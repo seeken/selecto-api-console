@@ -17,10 +17,14 @@
     "README.md",
     "LICENSE"
   ],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "npm run build && node --test",
-    "pack:check": "npm run test && npm pack --dry-run"
+    "build:all": "npm run build && npm run build --workspace @selecto/web-assets",
+    "test": "npm run build:all && node --test test/*.test.cjs && npm test --workspace @selecto/web-assets",
+    "pack:check": "npm run test && npm pack --dry-run && npm pack --dry-run --workspace @selecto/web-assets"
   },
   "engines": {
     "node": ">=18"

@@ -1,4 +1,25 @@
-# Selecto API Console
+# Selecto shared JavaScript workspace
+
+This repository is the local-first home for Selecto browser packages:
+
+- `@selecto/api-console` at the repository root;
+- `@selecto/web-assets` under `packages/web-assets`, containing the
+  Perl-derived native theme, shared dialog behavior, and pinned htmx assets.
+
+Both packages build without publication:
+
+```sh
+npm install
+npm run build:all
+npm test
+```
+
+Sibling Selecto repositories resolve this checkout through
+`SELECTO_LIVE_SELECTO_WEB` or `../selecto-api-console`. The same resolvers fall
+back to installed `@selecto/*` packages when these packages are later
+published.
+
+## API Console
 
 `@selecto/api-console` is the dependency-free browser console for every Selecto
 canonical domain API. It discovers the API manifest, canonical domain, OpenAPI

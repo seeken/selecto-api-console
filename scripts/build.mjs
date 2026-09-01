@@ -1,12 +1,17 @@
 import {copyFile, mkdir, readFile, writeFile} from "node:fs/promises";
 import {createHash} from "node:crypto";
+import {dirname, resolve} from "node:path";
+import {fileURLToPath} from "node:url";
 
 const version = "0.1.0";
 const files = ["selecto-api-console.js", "selecto-api-console.css"];
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const sourcePath = (file) => resolve(packageRoot, "src", file);
+const distPath = (file) => resolve(packageRoot, "dist", file);
 
-await mkdir("dist", {recursive: true});
-for (const file of files) await copyFile(`src/${file}`, `dist/${file}`);
-await copyFile("src/compatibility.json", "dist/compatibility.json");
+await mkdir(distPath("."), {recursive: true});
+for (const file of files) await copyFile(sourcePath(file), distPath(file));
+await copyFile(sourcePath("compatibility.json"), distPath("compatibility.json"));
 
 const html = `<!doctype html>
 <html lang="en">
@@ -25,14 +30,14 @@ const html = `<!doctype html>
 </body>
 </html>
 `;
-await writeFile("dist/index.html", html);
+await writeFile(distPath("index.html"), html);
 
 const assets = {};
 for (const file of [...files, "index.html", "compatibility.json"]) {
-  const content = await readFile(`dist/${file}`);
+  const content = await readFile(distPath(file));
   assets[file] = {
     bytes: content.length,
     sha256: createHash("sha256").update(content).digest("hex"),
   };
 }
-await writeFile("dist/manifest.json", `${JSON.stringify({format: "selecto.api-console.assets.v1", version, assets}, null, 2)}\n`);
+await writeFile(distPath("manifest.json"), `${JSON.stringify({format: "selecto.api-console.assets.v1", version, assets}, null, 2)}\n`);

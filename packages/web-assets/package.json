@@ -1,0 +1,36 @@
+{
+  "name": "@selecto/web-assets",
+  "version": "0.1.0",
+  "description": "Shared Perl-derived visual assets and native browser behavior for Selecto web explorers.",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "main": "dist/native-dialogs.js",
+  "style": "dist/native.css",
+  "bin": {
+    "selecto-web-assets": "bin/selecto-web-assets.mjs"
+  },
+  "exports": {
+    ".": "./dist/native-dialogs.js",
+    "./native.css": "./dist/native.css",
+    "./native-dialogs.js": "./dist/native-dialogs.js",
+    "./perl.css": "./dist/perl.css",
+    "./htmx.min.js": "./dist/vendor/htmx.min.js",
+    "./hx-ws.min.js": "./dist/vendor/hx-ws.min.js",
+    "./manifest.json": "./dist/manifest.json"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "LICENSE",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "pack:check": "npm run test && npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
