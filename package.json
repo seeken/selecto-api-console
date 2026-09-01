@@ -1,0 +1,28 @@
+{
+  "name": "@selecto/api-console",
+  "version": "0.1.0",
+  "description": "Dependency-free console for Selecto canonical domain APIs",
+  "license": "SEE LICENSE IN LICENSE",
+  "main": "dist/selecto-api-console.js",
+  "style": "dist/selecto-api-console.css",
+  "exports": {
+    ".": "./dist/selecto-api-console.js",
+    "./styles.css": "./dist/selecto-api-console.css",
+    "./index.html": "./dist/index.html",
+    "./manifest.json": "./dist/manifest.json",
+    "./compatibility.json": "./dist/compatibility.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "npm run build && node --test",
+    "pack:check": "npm run test && npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
