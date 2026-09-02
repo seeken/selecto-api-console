@@ -51,6 +51,12 @@ Hosts can also embed the console in their own shell:
       data-title="Orders API Console"></main>
 ```
 
+The standalone console uses a light operational theme by default and also
+supports `data-sac-color-scheme="dark"` on the document root. Hosts can map
+their tenant brand into `--sac-accent`, `--sac-teal`, and
+`--sac-on-accent`; the console keeps all application and menu integration
+outside this backend-neutral package.
+
 The host remains responsible for authentication, authorization, CSRF policy,
 rate limits, and serving the assets. The console cannot make a field or
 operation public; it can only use the canonical contracts returned to the
