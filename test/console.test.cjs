@@ -51,6 +51,13 @@ test("derives sorted public fields from a canonical domain", () => {
   assert.deepEqual(fields.map((field) => field.path), ["name", "id", "orders.total"]);
 });
 
+test("preserves exact decimal strings for table and JSON result rendering", () => {
+  const response = JSON.parse('{"data":{"rows":[["1.2500"]]},"ok":true}');
+  assert.equal(response.data.rows[0][0], "1.2500");
+  assert.equal(api.renderValue(response.data.rows[0][0]), "1.2500");
+  assert.match(JSON.stringify(response), /"1\.2500"/);
+});
+
 test("discovers advertised canonical API routes without backend assumptions", async () => {
   const requests = [];
   const responses = new Map([
