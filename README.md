@@ -27,6 +27,13 @@ canonical domain API. It discovers the API manifest, canonical domain, OpenAPI
 query route at runtime. It contains no adapter, database, table, raw-SQL, or
 application-domain knowledge.
 
+Field and filter selection use the same searchable semantic catalog pattern.
+Temporal fields also offer operational quick periods such as Today, This Week,
+Month to Date, Month/Quarter/Year to Date across all years, and Last 30 Days.
+The console sends the selected semantic value,
+for example `{ "op": "date_shortcut", "value": "this_week" }`; the API host
+resolves its server-local half-open date boundaries when it executes the query.
+
 ## Run it against any backend
 
 Serve `dist/` from the same origin as a canonical API, then open:
