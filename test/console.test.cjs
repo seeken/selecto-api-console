@@ -5,9 +5,27 @@ const test = require("node:test");
 const api = require("../dist/selecto-api-console.js");
 
 test("exports a reusable browser and CommonJS surface", () => {
-  assert.equal(api.version, "0.2.0");
+  assert.equal(api.version, "0.3.2");
   assert.equal(typeof api.APIConsole, "function");
   assert.equal(typeof api.mountAll, "function");
+});
+
+test("offers Explorer-style quick periods only for temporal filters", () => {
+  assert.ok(api.operatorsForType("date").includes("date_shortcut"));
+  assert.ok(api.operatorsForType("epoch_datetime").includes("date_shortcut"));
+  assert.ok(!api.operatorsForType("decimal").includes("date_shortcut"));
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  assert.ok(consoleInstance.dateShortcuts().some((choice) => choice[1] === "mtd_all_years"));
+  assert.ok(consoleInstance.dateShortcuts().some((choice) => choice[1] === "qtd_all_years"));
+  assert.ok(consoleInstance.dateShortcuts().some((choice) => choice[1] === "ytd_all_years"));
+  consoleInstance.fieldMap = new Map([["occurred_at", {path: "occurred_at", type: "epoch_datetime"}]]);
+  assert.deepEqual(consoleInstance.filterPayloads({
+    field: "occurred_at", op: "date_shortcut", value: "this_week",
+  }), [{field: "occurred_at", op: "date_shortcut", value: "this_week"}]);
+  consoleInstance.openapi = {components: {schemas: {SelectoFilter: {
+    "x-selecto-date-shortcuts": [{group: "Weeks", id: "this_week", label: "This Week"}],
+  }}}};
+  assert.deepEqual(consoleInstance.dateShortcuts(), [["Weeks", "this_week", "This Week"]]);
 });
 
 test("accepts only absolute same-origin API paths", () => {
@@ -87,7 +105,7 @@ test("build emits a standalone same-origin console", () => {
   assert.match(html, /selecto-api-console\.js/);
   assert.match(css, /\.sac-query-layout/);
   assert.equal(manifest.format, "selecto.api-console.assets.v1");
-  assert.equal(manifest.version, "0.2.0");
+  assert.equal(manifest.version, "0.3.2");
   assert.equal(compatibility.targets.length, 14);
   assert.equal(new Set(compatibility.targets.map((target) => target.lineage)).size, 11);
 });

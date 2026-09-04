@@ -1,6 +1,6 @@
 {
   "name": "@selecto/api-console",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "description": "Dependency-free console for Selecto canonical domain APIs",
   "license": "SEE LICENSE IN LICENSE",
   "main": "dist/selecto-api-console.js",
