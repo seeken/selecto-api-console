@@ -5,7 +5,7 @@ const test = require("node:test");
 const api = require("../dist/selecto-api-console.js");
 
 test("exports a reusable browser and CommonJS surface", () => {
-  assert.equal(api.version, "0.3.2");
+  assert.equal(api.version, "0.3.9");
   assert.equal(typeof api.APIConsole, "function");
   assert.equal(typeof api.mountAll, "function");
 });
@@ -60,13 +60,84 @@ test("derives sorted public fields from a canonical domain", () => {
         name: {type: "string", label: "Account name"},
         secret: {type: "string", internal: true},
       },
-      associations: {orders: {queryable: "order"}},
+      associations: {
+        origin: {queryable: "location"},
+        destination: {queryable: "location"},
+        orders: {queryable: "order"},
+      },
     },
     schemas: {
       order: {fields: ["total"], columns: {total: {type: "decimal", label: "Order total"}}},
+      location: {fields: ["address1"], columns: {address1: {type: "string", label: "Address 1"}}},
     },
+    joins: {origin: {name: "Origin"}, destination: {name: "Destination"}},
   });
-  assert.deepEqual(fields.map((field) => field.path), ["name", "id", "orders.total"]);
+  assert.deepEqual(fields.map((field) => field.path), [
+    "name", "destination.address1", "id", "orders.total", "origin.address1",
+  ]);
+  assert.equal(fields.find((field) => field.path === "origin.address1").label, "Origin: Address 1");
+  assert.equal(fields.find((field) => field.path === "destination.address1").label, "Destination: Address 1");
+  assert.equal(fields.find((field) => field.path === "orders.total").label, "Orders: Order total");
+});
+
+test("infers canonical to-many associations when cardinality is omitted", () => {
+  const schemas = {
+    load_det: {primary_key: "id"},
+    client_location: {primary_key: "id"},
+  };
+  assert.equal(api.associationIsMany({
+    queryable: "load_det", related_key: "load_id",
+  }, schemas), true);
+  assert.equal(api.associationIsMany({
+    queryable: "client_location", related_key: "id",
+  }, schemas), false);
+  assert.equal(api.associationIsMany({
+    queryable: "load_det", related_key: "load_id", cardinality: "one",
+  }, schemas), false);
+});
+
+test("renders a usable subtable checkbox for an inferred to-many association", () => {
+  class FakeNode {
+    constructor(tag) {
+      this.tag = tag;
+      this.children = [];
+      this.dataset = {};
+      this.hidden = false;
+    }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+  }
+  const previousDocument = global.document;
+  global.document = {createElement: (tag) => new FakeNode(tag)};
+  try {
+    const container = new FakeNode("div");
+    const consoleInstance = new api.APIConsole({
+      dataset: {},
+      querySelector: (selector) => selector === "[data-sac-normalization]" ? container : null,
+    });
+    consoleInstance.domain = {
+      source: {associations: {
+        load_det: {queryable: "load_det", related_key: "load_id"},
+      }},
+      schemas: {load_det: {primary_key: "id"}},
+    };
+    consoleInstance.openapi = {components: {schemas: {SelectoQuery: {properties: {
+      select: {items: {oneOf: [
+        {type: "string"},
+        {$ref: "#/components/schemas/SelectoSubtableSelection"},
+      ]}},
+    }}}}};
+    consoleInstance.state.selectedFields = [{field: "load_det.vin"}];
+    consoleInstance.renderNormalization();
+    assert.equal(container.hidden, false);
+    assert.equal(container.children[0].textContent, "To-many relationships");
+    const checkbox = container.children[1].children[0];
+    assert.equal(checkbox.type, "checkbox");
+    assert.equal(checkbox.value, "load_det");
+    assert.equal(checkbox.dataset.sacSubtable, "");
+  } finally {
+    global.document = previousDocument;
+  }
 });
 
 test("preserves exact decimal strings for table and JSON result rendering", () => {
@@ -74,6 +145,70 @@ test("preserves exact decimal strings for table and JSON result rendering", () =
   assert.equal(response.data.rows[0][0], "1.2500");
   assert.equal(api.renderValue(response.data.rows[0][0]), "1.2500");
   assert.match(JSON.stringify(response), /"1\.2500"/);
+});
+
+test("reads result cells from ordered arrays and JSON objects", () => {
+  assert.equal(api.rowValue([7, "A"], "status", 1), "A");
+  assert.equal(api.rowValue({id: 7, status: "A"}, "status", 1), "A");
+});
+
+test("builds configured field aliases and formats from picked fields", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {query_library: {}};
+  consoleInstance.state.selectedFields = [
+    {id: "1", field: "id", alias: "", format: ""},
+    {id: "2", field: "origin.city", alias: "pickup_city", format: ""},
+    {id: "3", field: "pickup_datetime_tz", alias: "pickup_month", format: "month"},
+  ];
+  consoleInstance.state.timezone = "America/New_York";
+  consoleInstance.state.rowFormat = "objects";
+  assert.deepEqual(consoleInstance.buildPayload().select, [
+    "id",
+    {field: "origin.city", alias: "pickup_city"},
+    {field: "pickup_datetime_tz", alias: "pickup_month", format: "month"},
+  ]);
+  assert.equal(consoleInstance.buildPayload().timezone, "America/New_York");
+  assert.equal(consoleInstance.buildPayload().row_format, "objects");
+});
+
+test("groups explicitly selected to-many relationships into sub-arrays", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {query_library: {}};
+  consoleInstance.state.selectedFields = [
+    {id: "1", field: "id", alias: "", format: ""},
+    {id: "2", field: "load_det.vin", alias: "", format: ""},
+  ];
+  consoleInstance.state.subtables = ["load_det"];
+  assert.deepEqual(consoleInstance.buildPayload().select, ["id", ["load_det.vin"]]);
+});
+
+test("allows one field to be selected repeatedly with independent configuration", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {query_library: {}};
+  const dateSelection = consoleInstance.newSelectedField("created_at");
+  consoleInstance.state.selectedFields.push(dateSelection);
+  const timeSelection = consoleInstance.newSelectedField("created_at");
+  consoleInstance.state.selectedFields.push(timeSelection);
+  dateSelection.alias = "created_date";
+  dateSelection.format = "day";
+  timeSelection.alias = "created_time";
+  timeSelection.format = "time";
+  assert.deepEqual(consoleInstance.buildPayload().select, [
+    {field: "created_at", alias: "created_date", format: "day"},
+    {field: "created_at", alias: "created_time", format: "time"},
+  ]);
+  const thirdSelection = consoleInstance.newSelectedField("created_at");
+  assert.equal(thirdSelection.alias, "created_at__3");
+});
+
+test("discovers field formats from OpenAPI only for temporal fields", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.openapi = {components: {schemas: {SelectoSelection: {properties: {
+    alias: {type: "string"},
+    format: {type: "string", enum: ["day", "month"]},
+  }}}}};
+  assert.deepEqual(consoleInstance.fieldFormats({type: "utc_datetime"}), ["day", "month"]);
+  assert.deepEqual(consoleInstance.fieldFormats({type: "decimal"}), []);
 });
 
 test("discovers advertised canonical API routes without backend assumptions", async () => {
@@ -105,7 +240,7 @@ test("build emits a standalone same-origin console", () => {
   assert.match(html, /selecto-api-console\.js/);
   assert.match(css, /\.sac-query-layout/);
   assert.equal(manifest.format, "selecto.api-console.assets.v1");
-  assert.equal(manifest.version, "0.3.2");
+  assert.equal(manifest.version, "0.3.9");
   assert.equal(compatibility.targets.length, 14);
   assert.equal(new Set(compatibility.targets.map((target) => target.lineage)).size, 11);
 });
