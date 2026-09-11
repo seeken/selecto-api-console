@@ -5,7 +5,7 @@ const test = require("node:test");
 const api = require("../dist/selecto-api-console.js");
 
 test("exports a reusable browser and CommonJS surface", () => {
-  assert.equal(api.version, "0.3.10");
+  assert.equal(api.version, "0.3.11");
   assert.equal(typeof api.APIConsole, "function");
   assert.equal(typeof api.mountAll, "function");
 });
@@ -34,6 +34,38 @@ test("accepts only absolute same-origin API paths", () => {
   for (const value of ["api/v1/orders", "//example.test/api", "/api//orders", "/api/orders?x=1", "/api/../admin", "/api/%2e%2e/admin", "/api/%ZZ"]) {
     assert.throws(() => api.normalizeAPIBase(value), /same-origin API path/);
   }
+});
+
+test("builds host-configurable cURL authentication", () => {
+  assert.equal(api.normalizeCurlAuth(undefined), "cookie");
+  assert.equal(api.normalizeCurlAuth("BASIC"), "basic");
+  assert.equal(api.normalizeCurlAuth("none"), "none");
+  assert.throws(() => api.normalizeCurlAuth("bearer"), /basic, cookie, or none/);
+
+  const renderCurl = (curlAuth) => {
+    const editor = {value: '{"select":["id"]}'};
+    const output = {textContent: ""};
+    const consoleInstance = new api.APIConsole({
+      dataset: {apiBase: "/api2/load/v1", curlAuth},
+      querySelector: (selector) => selector === "[data-sac-request]" ? editor
+        : selector === "[data-sac-curl]" ? output : null,
+    });
+    const previousWindow = global.window;
+    global.window = {location: {origin: "https://tenant.example"}};
+    try {
+      consoleInstance.updateCurl();
+    } finally {
+      global.window = previousWindow;
+    }
+    return output.textContent;
+  };
+
+  const basic = renderCurl("basic");
+  assert.match(basic, /--basic/);
+  assert.match(basic, /--user 'YOUR_USERNAME:YOUR_PASSWORD'/);
+  assert.doesNotMatch(basic, /--cookie/);
+  assert.match(renderCurl("cookie"), /--cookie 'YOUR_SESSION_COOKIE'/);
+  assert.doesNotMatch(renderCurl("none"), /--basic|--user|--cookie/);
 });
 
 test("ignores advertised routes that are not same-origin paths", async () => {
@@ -302,7 +334,7 @@ test("build emits a standalone same-origin console", () => {
   assert.match(html, /selecto-api-console\.js/);
   assert.match(css, /\.sac-query-layout/);
   assert.equal(manifest.format, "selecto.api-console.assets.v1");
-  assert.equal(manifest.version, "0.3.10");
+  assert.equal(manifest.version, "0.3.11");
   assert.equal(compatibility.targets.length, 14);
   assert.equal(new Set(compatibility.targets.map((target) => target.lineage)).size, 11);
 });
