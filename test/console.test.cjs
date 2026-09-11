@@ -5,7 +5,7 @@ const test = require("node:test");
 const api = require("../dist/selecto-api-console.js");
 
 test("exports a reusable browser and CommonJS surface", () => {
-  assert.equal(api.version, "0.3.9");
+  assert.equal(api.version, "0.3.10");
   assert.equal(typeof api.APIConsole, "function");
   assert.equal(typeof api.mountAll, "function");
 });
@@ -182,6 +182,68 @@ test("groups explicitly selected to-many relationships into sub-arrays", () => {
   assert.deepEqual(consoleInstance.buildPayload().select, ["id", ["load_det.vin"]]);
 });
 
+test("loads representable request JSON back into every chooser level", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {
+    source: {associations: {load_det: {queryable: "load_det", related_key: "load_id"}}},
+    schemas: {load_det: {primary_key: "id"}},
+    query_library: {
+      segments: {active: {parameters: {tenant: {type: "integer"}}}},
+      orderings: {}, projections: {}, views: {},
+    },
+  };
+  consoleInstance.openapi = {components: {schemas: {SelectoSelection: {properties: {
+    format: {enum: ["day"]},
+  }}}}};
+  consoleInstance.fields = [
+    {path: "id", type: "integer"},
+    {path: "load_det.vin", type: "string"},
+    {path: "load_det.created", type: "epoch_datetime"},
+  ];
+  consoleInstance.fieldMap = new Map(consoleInstance.fields.map((field) => [field.path, field]));
+  const payload = {
+    select: ["id", ["load_det.vin", {field: "load_det.created", alias: "created_day", format: "day"}]],
+    segments: ["active"], parameters: {tenant: 7},
+    filters: [{field: "id", op: "gte", value: 10}],
+    order_by: [{field: "id", direction: "desc"}],
+    timezone: "America/New_York", row_format: "objects", limit: 25, offset: 5,
+  };
+  consoleInstance.loadPayloadIntoChooser(payload);
+  assert.deepEqual(consoleInstance.buildPayload(), payload);
+  assert.deepEqual(consoleInstance.state.subtables, ["load_det"]);
+});
+
+test("rejects JSON the chooser cannot faithfully represent without changing state", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {source: {associations: {}}, schemas: {}, query_library: {}};
+  consoleInstance.fields = [{path: "id", type: "integer"}];
+  consoleInstance.fieldMap = new Map([["id", consoleInstance.fields[0]]]);
+  const before = JSON.parse(JSON.stringify(consoleInstance.state));
+  assert.throws(
+    () => consoleInstance.loadPayloadIntoChooser({select: ["id"], raw_sql: "select 1"}),
+    /Unsupported request properties: raw_sql/,
+  );
+  assert.deepEqual(consoleInstance.state, before);
+});
+
+test("keeps unrepresentable pasted JSON and clearly enters manual mode", () => {
+  const editor = {value: '{"select":["id"],"raw_sql":"select 1"}'};
+  const message = {textContent: "", dataset: {}, hidden: true};
+  const consoleInstance = new api.APIConsole({
+    dataset: {},
+    querySelector: (selector) => selector === "[data-sac-request]" ? editor
+      : selector === "[data-sac-import-message]" ? message : null,
+  });
+  consoleInstance.domain = {source: {associations: {}}, schemas: {}, query_library: {}};
+  consoleInstance.fields = [{path: "id", type: "integer"}];
+  consoleInstance.fieldMap = new Map([["id", consoleInstance.fields[0]]]);
+  assert.equal(consoleInstance.loadRequestIntoChooser(), false);
+  assert.equal(editor.value, '{"select":["id"],"raw_sql":"select 1"}');
+  assert.equal(message.hidden, false);
+  assert.equal(message.dataset.kind, "error");
+  assert.match(message.textContent, /manual JSON mode/);
+});
+
 test("allows one field to be selected repeatedly with independent configuration", () => {
   const consoleInstance = new api.APIConsole({dataset: {}});
   consoleInstance.domain = {query_library: {}};
@@ -240,7 +302,7 @@ test("build emits a standalone same-origin console", () => {
   assert.match(html, /selecto-api-console\.js/);
   assert.match(css, /\.sac-query-layout/);
   assert.equal(manifest.format, "selecto.api-console.assets.v1");
-  assert.equal(manifest.version, "0.3.9");
+  assert.equal(manifest.version, "0.3.10");
   assert.equal(compatibility.targets.length, 14);
   assert.equal(new Set(compatibility.targets.map((target) => target.lineage)).size, 11);
 });

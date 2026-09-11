@@ -40,6 +40,11 @@ ordinary ungrouped fields remain flat and may produce multiple root rows.
 The Result row shape control chooses ordered arrays or JSON objects for both
 the main result and every subtable.
 
+Pasted request JSON can be loaded back into the visual controls with **Load
+into chooser**. The console only applies the conversion when it can represent
+the full request; otherwise it preserves the pasted JSON and clearly marks it
+as manual JSON mode.
+
 ## Run it against any backend
 
 Serve `dist/` from the same origin as a canonical API, then open:
