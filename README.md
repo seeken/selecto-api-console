@@ -33,6 +33,12 @@ Month to Date, Month/Quarter/Year to Date across all years, and Last 30 Days.
 The console sends the selected semantic value,
 for example `{ "op": "date_shortcut", "value": "this_week" }`; the API host
 resolves its server-local half-open date boundaries when it executes the query.
+When selected fields belong to a to-many relationship and the API advertises
+subtable selections, the console offers an explicit subtable control. Enabling
+it groups those fields into a nested selection array, preserving one root row;
+ordinary ungrouped fields remain flat and may produce multiple root rows.
+The Result row shape control chooses ordered arrays or JSON objects for both
+the main result and every subtable.
 
 ## Run it against any backend
 
