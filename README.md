@@ -45,6 +45,23 @@ into chooser**. The console only applies the conversion when it can represent
 the full request; otherwise it preserves the pasted JSON and clearly marks it
 as manual JSON mode.
 
+The **Writes** tab is contract-driven. It appears for every domain, but only
+offers operations and assignment fields enabled by `writes.operations` and
+`writes.fields`. Update and delete requests require explicit root-field
+filters, expected affected-row counts are checked before sending, and upserts
+expose their conflict and update field sets. The generated JSON is always
+visible and copyable, and Send remains disabled until the request is locally
+consistent with the published contract. The server repeats all validation and
+applies its trusted tenant scope.
+
+The **Actions** tab uses the governed action catalog published in OpenAPI.
+Input types, required values, choices, bounds, and target IDs become form
+controls. Group-selection actions get repeatable target groups with their own
+declared inputs. The console shows the generated JSON, its local correctness,
+and the exact action path before allowing the request to be sent. Server-side
+capability, target-scope, eligibility, and execution checks remain
+authoritative.
+
 ## Run it against any backend
 
 Serve `dist/` from the same origin as a canonical API, then open:

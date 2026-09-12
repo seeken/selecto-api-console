@@ -5,7 +5,7 @@ const test = require("node:test");
 const api = require("../dist/selecto-api-console.js");
 
 test("exports a reusable browser and CommonJS surface", () => {
-  assert.equal(api.version, "0.3.11");
+  assert.equal(api.version, "0.4.0");
   assert.equal(typeof api.APIConsole, "function");
   assert.equal(typeof api.mountAll, "function");
 });
@@ -80,6 +80,103 @@ test("ignores advertised routes that are not same-origin paths", async () => {
     "/api/v1/selecto/",
     "/api/v1/selecto/domain",
     "/api/v1/selecto/openapi.json",
+  ]);
+});
+
+test("discovers governed write and action routes", async () => {
+  const discovered = await api.discoverCanonicalAPI("/api/v1/orders", async (path) => {
+    if (path.endsWith("/")) return {routes: [
+      {operation_id: "getDomain", path: "/api/v1/orders/domain"},
+      {operation_id: "getOpenApi", path: "/api/v1/orders/openapi.json"},
+      {operation_id: "queryDomain", path: "/api/v1/orders/query"},
+      {operation_id: "writeDomain", path: "/api/v1/orders/write"},
+      {operation_id: "executeAction", path: "/api/v1/orders/actions/{action}"},
+    ]};
+    if (path.endsWith("/domain")) return {source: {columns: {}}};
+    return {openapi: "3.1.0"};
+  });
+  assert.equal(discovered.writePath, "/api/v1/orders/write");
+  assert.equal(discovered.actionPath, "/api/v1/orders/actions/{action}");
+});
+
+test("builds and validates a governed write request", () => {
+  const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/orders"}});
+  consoleInstance.domain = {
+    source: {
+      primary_key: "id", fields: ["id", "status", "amount"],
+      columns: {id: {type: "integer"}, status: {type: "string"}, amount: {type: "decimal"}},
+    },
+    writes: {
+      operations: {update: {enabled: true, bulk: true}},
+      fields: {status: {updatable: true}, amount: {updatable: true}},
+    },
+  };
+  consoleInstance.writeState = {
+    operation: "update", assignments: {status: "closed", amount: "12.3400"},
+    included: {status: true, amount: true}, filters: [{field: "id", op: "eq", value: "17"}],
+    expectedCount: 1, returning: ["id", "amount"], conflictTarget: [], updateFields: [],
+  };
+  const model = consoleInstance.buildWriteRequest();
+  assert.deepEqual(model.errors, []);
+  assert.deepEqual(model.payload, {
+    operation: "update",
+    assignments: {status: "closed", amount: "12.3400"},
+    filters: [{field: "id", op: "eq", value: 17}],
+    expected_count: 1,
+    returning: ["id", "amount"],
+  });
+  consoleInstance.writeState.filters = [];
+  assert.match(consoleInstance.buildWriteRequest().errors.join(" "), /explicit filter/);
+});
+
+test("builds action forms from the OpenAPI governed action catalog", () => {
+  const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/orders"}});
+  consoleInstance.domain = {
+    source: {primary_key: "id", columns: {id: {type: "integer"}}}, actions: {},
+  };
+  consoleInstance.actionPath = "/api/v1/orders/actions/{action}";
+  consoleInstance.openapi = {paths: {"/api/v1/orders/actions/{action}": {post: {
+    "x-selecto-actions": [{
+      id: "archive", label: "Archive", inputs: [{
+        id: "reason", label: "Reason", type: "select", required: true,
+        options: [{value: "duplicate", label: "Duplicate"}],
+      }],
+    }],
+  }}}};
+  consoleInstance.actionState = {
+    id: "archive", targetIds: "17, 18", inputs: {reason: "duplicate"}, groups: [],
+  };
+  const model = consoleInstance.buildActionRequest();
+  assert.equal(model.path, "/api/v1/orders/actions/archive");
+  assert.deepEqual(model.errors, []);
+  assert.deepEqual(model.payload, {
+    target: {ids: [17, 18]}, inputs: {reason: "duplicate"},
+  });
+  consoleInstance.actionState.inputs.reason = "unknown";
+  assert.match(consoleInstance.buildActionRequest().errors.join(" "), /not an available choice/);
+});
+
+test("builds grouped action payloads as governed sub-arrays", () => {
+  const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/orders"}});
+  consoleInstance.domain = {source: {primary_key: "id", columns: {id: {type: "integer"}}}, actions: {}};
+  consoleInstance.actionPath = "/api/v1/orders/actions/{action}";
+  consoleInstance.openapi = {paths: {"/api/v1/orders/actions/{action}": {post: {
+    "x-selecto-actions": [{
+      id: "build", inputs: [], selection: {mode: "groups", max_groups: 3, group_inputs: [
+        {id: "carrier_id", label: "Carrier", type: "lookup", value_type: "integer", required: true},
+      ]},
+    }],
+  }}}};
+  consoleInstance.actionState = {id: "build", targetIds: "", inputs: {}, groups: [
+    {ids: "1, 2", inputs: {carrier_id: "44"}},
+    {ids: "3", inputs: {carrier_id: "45"}},
+  ]};
+  const model = consoleInstance.buildActionRequest();
+  assert.deepEqual(model.errors, []);
+  assert.deepEqual(model.payload.target.ids, [1, 2, 3]);
+  assert.deepEqual(model.payload.groups, [
+    {index: 0, selected_ids: [1, 2], inputs: {carrier_id: 44}},
+    {index: 1, selected_ids: [3], inputs: {carrier_id: 45}},
   ]);
 });
 
@@ -334,7 +431,7 @@ test("build emits a standalone same-origin console", () => {
   assert.match(html, /selecto-api-console\.js/);
   assert.match(css, /\.sac-query-layout/);
   assert.equal(manifest.format, "selecto.api-console.assets.v1");
-  assert.equal(manifest.version, "0.3.11");
+  assert.equal(manifest.version, "0.4.0");
   assert.equal(compatibility.targets.length, 14);
   assert.equal(new Set(compatibility.targets.map((target) => target.lineage)).size, 11);
 });
