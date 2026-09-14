@@ -4,7 +4,7 @@ import {dirname, resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 
 const version = "0.5.0";
-const files = ["selecto-api-console.js", "selecto-api-console.css"];
+const files = ["selecto-api-console.js", "selecto-api-console.css", "selecto-importer.js", "selecto-importer.css"];
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = (file) => resolve(packageRoot, "src", file);
 const distPath = (file) => resolve(packageRoot, "dist", file);
