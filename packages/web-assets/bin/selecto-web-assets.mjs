@@ -57,8 +57,24 @@ if (manifest.format !== "selecto.web-assets.v1") throw new Error("Unsupported Se
 await mkdir(resolve(target), {recursive: true});
 const expectedTargets = new Set(profiles[profile].map(([, destination]) => destination));
 if (!check) {
+  const generatedDigests = new Set(Object.values(manifest.assets).map((asset) => asset.sha256));
   for (const stale of ["selecto.css", "app.css", "selecto-dialogs.js", "selecto-native-dialogs.js", "htmx.min.js", "hx-ws.min.js", "selecto-components.css"]) {
-    if (!expectedTargets.has(stale)) await rm(resolve(target, stale), {force: true});
+    if (expectedTargets.has(stale)) continue;
+    const destination = resolve(target, stale);
+    let content;
+    try {
+      content = await readFile(destination);
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    // A shared filename does not establish ownership: Django, for example,
+    // keeps its own app.css beside generated selecto.css. Only remove content
+    // we can identify as one of our generated artifacts. Unknown older or
+    // locally modified files stay available for an explicit migration.
+    if (generatedDigests.has(createHash("sha256").update(content).digest("hex"))) {
+      await rm(destination);
+    }
   }
 }
 for (const [sourceName, targetName] of profiles[profile]) {
