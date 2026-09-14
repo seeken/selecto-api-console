@@ -23,6 +23,11 @@ test("governed write controls follow canonical field types", () => {
   assert.equal(api.writeFieldRequired({required: true}, "insert"), true);
   assert.equal(api.writeFieldRequired({required: true}, "upsert"), true);
   assert.equal(api.writeFieldRequired({required: true}, "update"), false);
+  assert.equal(api.writeRequiredValueMissing(true, ""), true);
+  assert.equal(api.writeRequiredValueMissing(true, "   "), true);
+  assert.equal(api.writeRequiredValueMissing(true, null), true);
+  assert.equal(api.writeRequiredValueMissing(true, 0), false);
+  assert.equal(api.writeRequiredValueMissing(true, false), false);
 });
 
 test("places required governed write fields before optional fields", () => {
@@ -103,6 +108,29 @@ test("builds host-configurable cURL authentication", () => {
   assert.doesNotMatch(basic, /--cookie/);
   assert.match(renderCurl("cookie"), /--cookie 'YOUR_SESSION_COOKIE'/);
   assert.doesNotMatch(renderCurl("none"), /--basic|--user|--cookie/);
+});
+
+test("builds write and resolved action cURL commands from their current JSON", () => {
+  const consoleInstance = new api.APIConsole({dataset: {curlAuth: "basic"}});
+  const previousWindow = global.window;
+  global.window = {location: {origin: "https://tenant.example"}};
+  try {
+    const write = consoleInstance.curlCommand(
+      "/api2/truck/v1/write", '{"operation":"insert"}',
+    );
+    assert.match(write, /curl -X POST 'https:\/\/tenant\.example\/api2\/truck\/v1\/write'/);
+    assert.match(write, /--basic/);
+    assert.match(write, /--user 'YOUR_USERNAME:YOUR_PASSWORD'/);
+    assert.match(write, /--data-binary '\{"operation":"insert"\}'/);
+
+    const action = consoleInstance.curlCommand(
+      "/api2/truck/v1/actions/set_truck_status", '{"target":{"ids":[7]}}',
+    );
+    assert.match(action, /\/api2\/truck\/v1\/actions\/set_truck_status'/);
+    assert.match(action, /--data-binary '\{"target":\{"ids":\[7\]\}\}'/);
+  } finally {
+    global.window = previousWindow;
+  }
 });
 
 test("ignores advertised routes that are not same-origin paths", async () => {
@@ -198,6 +226,11 @@ test("reports omitted required insert fields before sending", () => {
   const valid = consoleInstance.buildWriteRequest();
   assert.deepEqual(valid.errors, []);
   assert.deepEqual(valid.payload.assignments, {name: "Circle shipment", tenant_id: 41});
+
+  consoleInstance.writeState.assignments.name = "   ";
+  assert.deepEqual(consoleInstance.buildWriteRequest().errors, [
+    "Name (name) is required for insert.",
+  ]);
 });
 
 test("rejects blank and invalid date assignments before sending", () => {
@@ -319,6 +352,31 @@ test("rejects unrepresentable write JSON atomically", () => {
     /Unsupported write properties: raw_sql/,
   );
   assert.deepEqual(consoleInstance.writeState, before);
+});
+
+test("loads a filter-first update draft before an assignment is chosen", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {
+    source: {
+      primary_key: "id", fields: ["id", "description"],
+      columns: {id: {type: "integer"}, description: {type: "string", label: "Description"}},
+    },
+    writes: {
+      operations: {update: {enabled: true}},
+      fields: {description: {updatable: true}},
+    },
+  };
+  const payload = {
+    operation: "update",
+    filters: [{field: "id", op: "eq", value: 17}],
+    expected_count: 1,
+  };
+  consoleInstance.loadWritePayloadIntoForm(payload);
+  assert.equal(consoleInstance.writeState.operation, "update");
+  assert.deepEqual(consoleInstance.writeState.filters, [{field: "id", op: "eq", value: "17"}]);
+  assert.deepEqual(consoleInstance.writeState.assignments, {});
+  assert.deepEqual(consoleInstance.writeState.included, {});
+  assert.deepEqual(consoleInstance.buildWriteRequest().errors, ["Choose at least one assignment."]);
 });
 
 test("builds action forms from the OpenAPI governed action catalog", () => {
