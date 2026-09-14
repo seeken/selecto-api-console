@@ -5,9 +5,24 @@ const test = require("node:test");
 const api = require("../dist/selecto-api-console.js");
 
 test("exports a reusable browser and CommonJS surface", () => {
-  assert.equal(api.version, "0.4.0");
+  assert.equal(api.version, "0.5.0");
   assert.equal(typeof api.APIConsole, "function");
   assert.equal(typeof api.mountAll, "function");
+});
+
+test("governed write controls follow canonical field types", () => {
+  assert.equal(api.writeControlKind({type: "integer"}), "number");
+  assert.equal(api.writeControlKind({type: "decimal"}), "number");
+  assert.equal(api.writeControlKind({type: "epoch_datetime"}), "number");
+  assert.equal(api.writeControlKind({type: "date"}), "date");
+  assert.equal(api.writeControlKind({type: "utc_datetime"}), "datetime-local");
+  assert.equal(api.writeControlKind({type: "boolean"}), "select");
+  assert.equal(api.writeControlKind({type: "string"}), "text");
+  assert.equal(api.writeControlKind({type: "object"}), "textarea");
+  assert.equal(api.writeControlKind({type: "string", column: {enum: ["A", "B"]}}), "select");
+  assert.equal(api.writeFieldRequired({required: true}, "insert"), true);
+  assert.equal(api.writeFieldRequired({required: true}, "upsert"), true);
+  assert.equal(api.writeFieldRequired({required: true}, "update"), false);
 });
 
 test("offers Explorer-style quick periods only for temporal filters", () => {
@@ -115,6 +130,7 @@ test("builds and validates a governed write request", () => {
     operation: "update", assignments: {status: "closed", amount: "12.3400"},
     included: {status: true, amount: true}, filters: [{field: "id", op: "eq", value: "17"}],
     expectedCount: 1, returning: ["id", "amount"], conflictTarget: [], updateFields: [],
+    relationships: {},
   };
   const model = consoleInstance.buildWriteRequest();
   assert.deepEqual(model.errors, []);
@@ -127,6 +143,160 @@ test("builds and validates a governed write request", () => {
   });
   consoleInstance.writeState.filters = [];
   assert.match(consoleInstance.buildWriteRequest().errors.join(" "), /explicit filter/);
+});
+
+test("reports omitted required insert fields before sending", () => {
+  const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/orders"}});
+  consoleInstance.domain = {
+    source: {
+      primary_key: "id", fields: ["id", "tenant_id", "name"],
+      columns: {
+        id: {type: "integer"}, tenant_id: {type: "integer", label: "Owner Client"},
+        name: {type: "string", label: "Name"},
+      },
+    },
+    writes: {
+      operations: {insert: {enabled: true}},
+      fields: {
+        tenant_id: {insertable: true, required: true},
+        name: {insertable: true, required: true},
+      },
+    },
+  };
+  consoleInstance.writeState = {
+    operation: "insert", assignments: {name: "Circle shipment"},
+    included: {name: true}, filters: [], expectedCount: 1, returning: [],
+    conflictTarget: [], updateFields: [], relationships: {},
+  };
+  assert.deepEqual(consoleInstance.buildWriteRequest().errors, [
+    "Owner Client (tenant_id) is required for insert.",
+  ]);
+  consoleInstance.writeState.assignments.tenant_id = "41";
+  consoleInstance.writeState.included.tenant_id = true;
+  const valid = consoleInstance.buildWriteRequest();
+  assert.deepEqual(valid.errors, []);
+  assert.deepEqual(valid.payload.assignments, {name: "Circle shipment", tenant_id: 41});
+});
+
+test("rejects blank and invalid date assignments before sending", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  assert.match(
+    consoleInstance.coerceValue("", "date", "Out of Service Date").error,
+    /must be an ISO date.*uncheck it to omit it/,
+  );
+  assert.match(
+    consoleInstance.coerceValue("2026-02-30", "date", "Out of Service Date").error,
+    /must be an ISO date/,
+  );
+  assert.deepEqual(
+    consoleInstance.coerceValue("2026-02-28", "date", "Out of Service Date"),
+    {value: "2026-02-28"},
+  );
+});
+
+test("builds a governed nested relationship write", () => {
+  const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/trucks"}});
+  consoleInstance.domain = {
+    source: {
+      primary_key: "id", fields: ["id", "short_desc"],
+      columns: {id: {type: "integer"}, short_desc: {type: "string"}},
+    },
+    writes: {
+      operations: {update: {enabled: true}},
+      fields: {short_desc: {updatable: true}},
+      relationships: {
+        assigned_trailer: {
+          writable: true, cardinality: "one", allowed_ops: ["update"],
+          domain: {
+            source: {
+              primary_key: "id", fields: ["id", "description"],
+              columns: {id: {type: "integer"}, description: {type: "string"}},
+            },
+            writes: {
+              operations: {update: {enabled: true}},
+              fields: {description: {updatable: true}},
+            },
+          },
+        },
+      },
+    },
+  };
+  consoleInstance.writeState = {
+    operation: "update", assignments: {short_desc: "T-1A"},
+    included: {short_desc: true}, filters: [{field: "id", op: "eq", value: "7"}],
+    expectedCount: 1, returning: [], conflictTarget: [], updateFields: [],
+    relationships: {assigned_trailer: {
+      enabled: true, operation: "update", assignments: {description: "Reefer"},
+      included: {description: true}, returning: [],
+    }},
+  };
+  const model = consoleInstance.buildWriteRequest();
+  assert.deepEqual(model.errors, []);
+  assert.deepEqual(model.payload.relationships, {
+    assigned_trailer: {operation: "update", assignments: {description: "Reefer"}},
+  });
+});
+
+test("loads governed write JSON into the write form without losing nested data", () => {
+  const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/trucks"}});
+  consoleInstance.domain = {
+    source: {
+      primary_key: "id", fields: ["id", "short_desc", "out_service_date"],
+      columns: {
+        id: {type: "integer"}, short_desc: {type: "string", label: "Description"},
+        out_service_date: {type: "date", label: "Out of service date"},
+      },
+    },
+    writes: {
+      operations: {update: {enabled: true}},
+      fields: {short_desc: {updatable: true}, out_service_date: {updatable: true}},
+      relationships: {
+        assigned_trailer: {
+          writable: true, cardinality: "one", allowed_ops: ["update"],
+          domain: {
+            source: {
+              primary_key: "id", fields: ["id", "description"],
+              columns: {id: {type: "integer"}, description: {type: "string", label: "Description"}},
+            },
+            writes: {
+              operations: {update: {enabled: true}},
+              fields: {description: {updatable: true}},
+            },
+          },
+        },
+      },
+    },
+  };
+  const payload = {
+    operation: "update",
+    assignments: {short_desc: "T-9", out_service_date: "2026-09-14"},
+    filters: [{field: "id", op: "eq", value: 9}],
+    expected_count: 1,
+    returning: ["id", "short_desc"],
+    relationships: {
+      assigned_trailer: {
+        operation: "update", assignments: {description: "Reefer"}, returning: ["id"],
+      },
+    },
+  };
+  consoleInstance.loadWritePayloadIntoForm(payload);
+  assert.deepEqual(consoleInstance.buildWriteRequest(), {payload, errors: []});
+  assert.equal(consoleInstance.writeState.assignments.id, undefined);
+  assert.equal(consoleInstance.writeState.relationships.assigned_trailer.enabled, true);
+});
+
+test("rejects unrepresentable write JSON atomically", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {
+    source: {primary_key: "id", fields: ["id", "name"], columns: {id: {type: "integer"}, name: {type: "string"}}},
+    writes: {operations: {insert: {enabled: true}}, fields: {name: {insertable: true}}},
+  };
+  const before = JSON.parse(JSON.stringify(consoleInstance.writeState));
+  assert.throws(
+    () => consoleInstance.loadWritePayloadIntoForm({operation: "insert", assignments: {name: "Truck"}, raw_sql: "no"}),
+    /Unsupported write properties: raw_sql/,
+  );
+  assert.deepEqual(consoleInstance.writeState, before);
 });
 
 test("builds action forms from the OpenAPI governed action catalog", () => {
@@ -178,6 +348,48 @@ test("builds grouped action payloads as governed sub-arrays", () => {
     {index: 0, selected_ids: [1, 2], inputs: {carrier_id: 44}},
     {index: 1, selected_ids: [3], inputs: {carrier_id: 45}},
   ]);
+});
+
+test("loads grouped action JSON into the selected action form", () => {
+  const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/orders"}});
+  consoleInstance.domain = {source: {primary_key: "id", columns: {id: {type: "integer"}}}, actions: {}};
+  consoleInstance.actionPath = "/api/v1/orders/actions/{action}";
+  consoleInstance.openapi = {paths: {"/api/v1/orders/actions/{action}": {post: {
+    "x-selecto-actions": [{
+      id: "build", inputs: [{id: "note", type: "textarea"}],
+      selection: {mode: "groups", max_groups: 3, group_inputs: [
+        {id: "carrier_id", label: "Carrier", type: "lookup", value_type: "integer", required: true},
+      ]},
+    }],
+  }}}};
+  consoleInstance.actionState.id = "build";
+  const payload = {
+    target: {ids: [1, 2, 3]}, inputs: {note: "Handle together"},
+    groups: [
+      {index: 0, selected_ids: [1, 2], inputs: {carrier_id: 44}},
+      {index: 1, selected_ids: [3], inputs: {carrier_id: 45}},
+    ],
+  };
+  consoleInstance.loadActionPayloadIntoForm(payload);
+  assert.deepEqual(consoleInstance.buildActionRequest(), {
+    path: "/api/v1/orders/actions/build", payload, errors: [],
+  });
+});
+
+test("rejects action JSON that cannot map to the selected form without changing state", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {source: {primary_key: "id", columns: {id: {type: "integer"}}}, actions: {}};
+  consoleInstance.actionPath = "/api/v1/orders/actions/{action}";
+  consoleInstance.openapi = {paths: {"/api/v1/orders/actions/{action}": {post: {
+    "x-selecto-actions": [{id: "archive", inputs: []}],
+  }}}};
+  consoleInstance.actionState.id = "archive";
+  const before = JSON.parse(JSON.stringify(consoleInstance.actionState));
+  assert.throws(
+    () => consoleInstance.loadActionPayloadIntoForm({target: {ids: [1]}, inputs: {}, groups: []}),
+    /does not use target groups/,
+  );
+  assert.deepEqual(consoleInstance.actionState, before);
 });
 
 test("derives sorted public fields from a canonical domain", () => {
@@ -431,7 +643,7 @@ test("build emits a standalone same-origin console", () => {
   assert.match(html, /selecto-api-console\.js/);
   assert.match(css, /\.sac-query-layout/);
   assert.equal(manifest.format, "selecto.api-console.assets.v1");
-  assert.equal(manifest.version, "0.4.0");
+  assert.equal(manifest.version, "0.5.0");
   assert.equal(compatibility.targets.length, 14);
   assert.equal(new Set(compatibility.targets.map((target) => target.lineage)).size, 11);
 });
