@@ -25,6 +25,28 @@ test("governed write controls follow canonical field types", () => {
   assert.equal(api.writeFieldRequired({required: true}, "update"), false);
 });
 
+test("places required governed write fields before optional fields", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  const fields = [
+    {name: "optional_first"}, {name: "required_one"},
+    {name: "optional_second"}, {name: "required_two"},
+  ];
+  const contract = {
+    optional_first: {insertable: true, updatable: true},
+    required_one: {insertable: true, updatable: true, required: true},
+    optional_second: {insertable: true, updatable: true},
+    required_two: {insertable: true, updatable: true, required: true},
+  };
+  assert.deepEqual(
+    consoleInstance.writeFieldsForOperation(fields, contract, "insert").map((field) => field.name),
+    ["required_one", "required_two", "optional_first", "optional_second"],
+  );
+  assert.deepEqual(
+    consoleInstance.writeFieldsForOperation(fields, contract, "update").map((field) => field.name),
+    fields.map((field) => field.name),
+  );
+});
+
 test("offers Explorer-style quick periods only for temporal filters", () => {
   assert.ok(api.operatorsForType("date").includes("date_shortcut"));
   assert.ok(api.operatorsForType("epoch_datetime").includes("date_shortcut"));
