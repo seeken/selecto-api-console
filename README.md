@@ -54,6 +54,19 @@ visible and copyable, and Send remains disabled until the request is locally
 consistent with the published contract. The server repeats all validation and
 applies its trusted tenant scope.
 
+Write controls follow canonical field types: dates and date-times use native
+temporal inputs, numeric and epoch fields use numeric inputs, booleans and
+enumerations use choices, and structured JSON values use multiline editors.
+Fields published with `required: true` are selected automatically for inserts,
+marked **Required for insert**, and cannot be unchecked. Missing required
+assignments are named in the local correctness errors before Send is enabled.
+An included date field must contain an ISO `YYYY-MM-DD` value; leave an optional
+date unchecked instead of sending an empty string.
+Writable one-to-one relationships published in `writes.relationships` appear
+as optional nested forms and produce a governed `relationships` request
+object; the host remains responsible for implementing its advertised atomic
+relationship semantics.
+
 The **Actions** tab uses the governed action catalog published in OpenAPI.
 Input types, required values, choices, bounds, and target IDs become form
 controls. Group-selection actions get repeatable target groups with their own
