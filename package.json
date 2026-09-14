@@ -9,6 +9,8 @@
     ".": "./dist/selecto-api-console.js",
     "./styles.css": "./dist/selecto-api-console.css",
     "./index.html": "./dist/index.html",
+    "./importer": "./dist/selecto-importer.js",
+    "./importer.css": "./dist/selecto-importer.css",
     "./manifest.json": "./dist/manifest.json",
     "./compatibility.json": "./dist/compatibility.json"
   },
