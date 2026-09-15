@@ -24,6 +24,9 @@ test("offers published governed action inputs as file mapping targets", () => {
   assert.match(source, /importActions\(\)/);
   assert.match(source, /actionMappings/);
   assert.match(source, /governed action input/);
+  assert.match(source, /Action inputs/);
+  assert.match(source, /Missing — choose a file column/);
+  assert.match(source, /missingRequiredActionInputs/);
 });
 
 test("supports static and typed values for governed action inputs", () => {
