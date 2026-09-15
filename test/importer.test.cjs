@@ -16,6 +16,7 @@ test("maps uploaded columns to governed fields and keeps non-file values separat
   assert.match(source, /Additional values not in the file/);
   assert.match(source, /data-sai-run-row/);
   assert.match(source, /Import row/);
+  assert.doesNotMatch(source, />Selecto Importer</);
 });
 
 test("offers published governed action inputs as file mapping targets", () => {
