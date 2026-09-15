@@ -22,6 +22,9 @@ test("maps uploaded columns to governed fields and keeps non-file values separat
 test("offers published governed action inputs as file mapping targets", () => {
   const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
   assert.match(source, /importActions\(\)/);
+  assert.match(source, /this\.domain\.imports/);
+  assert.match(source, /Object\.entries\(publishedAction\.inputs/);
+  assert.doesNotMatch(source, /extensions\.importer/);
   assert.match(source, /actionMappings/);
   assert.match(source, /governed action input/);
   assert.match(source, /Action inputs/);
