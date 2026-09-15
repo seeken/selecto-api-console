@@ -66,3 +66,12 @@ test("lets an operator explicitly disable source-row duplicate protection", () =
   assert.match(source, /Duplicate protection is off/);
   assert.match(source, /mode: "none"/);
 });
+
+test("shows proposed work and supports server-governed import row scopes", () => {
+  const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
+  assert.match(source, /Source data/);
+  assert.match(source, /Proposed work/);
+  assert.match(source, /data-sai-row-select/);
+  assert.match(source, /row_numbers/);
+  assert.match(source, /All valid rows/);
+});
