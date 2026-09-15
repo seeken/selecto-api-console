@@ -54,6 +54,14 @@ test("places required governed write fields before optional fields", () => {
   );
 });
 
+test("accepts canonical keyed action-input maps", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  assert.deepEqual(
+    consoleInstance.actionInputSpecs({miles: {type: "number", required: true}}),
+    [{id: "miles", type: "number", required: true}],
+  );
+});
+
 test("offers Explorer-style quick periods only for temporal filters", () => {
   assert.ok(api.operatorsForType("date").includes("date_shortcut"));
   assert.ok(api.operatorsForType("epoch_datetime").includes("date_shortcut"));
