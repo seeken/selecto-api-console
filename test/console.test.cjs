@@ -8,6 +8,8 @@ test("exports a reusable browser and CommonJS surface", () => {
   assert.equal(api.version, "0.5.0");
   assert.equal(typeof api.APIConsole, "function");
   assert.equal(typeof api.mountAll, "function");
+  const source = fs.readFileSync(require.resolve("../dist/selecto-api-console.js"), "utf8");
+  assert.doesNotMatch(source, />Selecto API</);
 });
 
 test("governed write controls follow canonical field types", () => {
