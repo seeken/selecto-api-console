@@ -111,7 +111,15 @@
       }
     }
     const [domain, openapi] = await Promise.all([fetchJSON(domainPath), fetchJSON(openapiPath)]);
-    return {base: normalizedBase, manifest, domain, openapi, queryPath, writePath, actionPath};
+    const advertisedAccess = manifest && manifest.access && typeof manifest.access === "object"
+      ? manifest.access : {};
+    const access = {
+      read: advertisedAccess.read !== false,
+      write: advertisedAccess.write !== false,
+      action: advertisedAccess.action !== false,
+      importer: advertisedAccess.importer === true,
+    };
+    return {base: normalizedBase, manifest, domain, openapi, queryPath, writePath, actionPath, access};
   }
 
   function humanize(value) {
@@ -312,6 +320,7 @@
       this.queryPath = `${this.base}/query`;
       this.writePath = `${this.base}/write`;
       this.actionPath = `${this.base}/actions/{action}`;
+      this.access = {read: true, write: true, action: true, importer: false};
       this.fields = [];
       this.fieldMap = new Map();
       this.nextSelectedFieldId = 1;
@@ -356,6 +365,7 @@
         this.queryPath = discovery.queryPath;
         this.writePath = discovery.writePath;
         this.actionPath = discovery.actionPath;
+        this.access = discovery.access;
         this.fields = collectFields(discovery.domain);
         this.fieldMap = new Map(this.fields.map((field) => [field.path, field]));
         this.seedState();
@@ -421,6 +431,7 @@
             <span class="sac-live"><i></i>Authenticated</span>
             <a class="sac-button sac-secondary" data-sac-domain-link>Domain JSON</a>
             <a class="sac-button sac-secondary" data-sac-openapi-link>OpenAPI</a>
+            <a class="sac-button sac-secondary" data-sac-importer-link hidden>Importer</a>
           </div>
         </header>
         <nav class="sac-tabs" aria-label="API console sections">
@@ -563,6 +574,14 @@
       this.root.querySelector("[data-sac-write-path]").textContent = this.writePath;
       this.root.querySelector("[data-sac-domain-link]").href = `${this.base}/domain`;
       this.root.querySelector("[data-sac-openapi-link]").href = `${this.base}/openapi.json`;
+      const importerLink = this.root.querySelector("[data-sac-importer-link]");
+      importerLink.href = `${this.base}/importer`;
+      importerLink.hidden = !this.access.importer;
+      const surfaceTabs = [["query", this.access.read], ["writes", this.access.write], ["actions", this.access.action]];
+      for (const [name, allowed] of surfaceTabs) {
+        const tab = this.root.querySelector(`[data-sac-main-tab="${name}"]`);
+        if (tab) tab.hidden = !allowed;
+      }
       this.root.querySelector("[data-sac-domain-json]").textContent = JSON.stringify(this.domain, null, 2);
       this.root.querySelector("[data-sac-openapi-json]").textContent = JSON.stringify(this.openapi, null, 2);
       this.root.querySelector("[data-sac-curl-auth-help]").textContent = curlAuthConfiguration(this.curlAuth).help;
@@ -574,6 +593,8 @@
       this.renderAll();
       this.renderWritePanel();
       this.renderActionPanel();
+      const initialTab = surfaceTabs.find(([, allowed]) => allowed);
+      if (initialTab && initialTab[0] !== "query") this.switchMainTab(initialTab[0]);
     }
 
     bind() {

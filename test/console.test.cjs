@@ -174,6 +174,24 @@ test("discovers governed write and action routes", async () => {
   assert.equal(discovered.actionPath, "/api/v1/orders/actions/{action}");
 });
 
+test("honors server-advertised API surface access", async () => {
+  const discovered = await api.discoverCanonicalAPI("/api2/truck/v1", async (path) => {
+    if (path.endsWith("/")) return {
+      access: {read: true, write: false, action: false, importer: true},
+      routes: [
+        {operation_id: "getDomain", path: "/api2/truck/v1/domain"},
+        {operation_id: "getOpenApi", path: "/api2/truck/v1/openapi.json"},
+        {operation_id: "queryDomain", path: "/api2/truck/v1/query"},
+      ],
+    };
+    if (path.endsWith("/domain")) return {source: {columns: {}}};
+    return {openapi: "3.1.0"};
+  });
+  assert.deepEqual(discovered.access, {
+    read: true, write: false, action: false, importer: true,
+  });
+});
+
 test("builds and validates a governed write request", () => {
   const consoleInstance = new api.APIConsole({dataset: {apiBase: "/api/v1/orders"}});
   consoleInstance.domain = {
