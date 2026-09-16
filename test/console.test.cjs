@@ -138,6 +138,18 @@ test("builds write and resolved action cURL commands from their current JSON", (
     );
     assert.match(action, /\/api2\/truck\/v1\/actions\/set_truck_status'/);
     assert.match(action, /--data-binary '\{"target":\{"ids":\[7\]\}\}'/);
+
+    consoleInstance.queryResponseFormats = api.discoverQueryResponseFormats({
+      paths: {"/api2/truck/v1/query": {post: {responses: {200: {content: {
+        "application/json": {}, "text/csv": {},
+      }}}}}},
+    }, "/api2/truck/v1/query");
+    const csv = consoleInstance.curlCommand(
+      "/api2/truck/v1/query", '{"select":["id"]}', "csv", "September Trucks.csv",
+    );
+    assert.match(csv, /-H 'Accept: text\/csv'/);
+    assert.match(csv, /filename=September%20Trucks\.csv/);
+    assert.match(csv, /--output 'September Trucks\.csv'/);
   } finally {
     global.window = previousWindow;
   }
@@ -168,10 +180,44 @@ test("discovers governed write and action routes", async () => {
       {operation_id: "executeAction", path: "/api/v1/orders/actions/{action}"},
     ]};
     if (path.endsWith("/domain")) return {source: {columns: {}}};
-    return {openapi: "3.1.0"};
+    return {openapi: "3.1.0", paths: {"/api/v1/orders/query": {post: {
+      responses: {200: {content: {
+        "application/json": {},
+        "text/csv": {},
+        "text/tab-separated-values": {},
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {},
+      }}},
+    }}}};
   });
   assert.equal(discovered.writePath, "/api/v1/orders/write");
   assert.equal(discovered.actionPath, "/api/v1/orders/actions/{action}");
+  assert.deepEqual(discovered.queryResponseFormats.map((format) => format.id), [
+    "json", "csv", "tsv", "xlsx",
+  ]);
+});
+
+test("uses safe response download filenames", () => {
+  assert.equal(api.downloadFilename('attachment; filename="orders-query.csv"', "query.csv"), "orders-query.csv");
+  assert.equal(api.downloadFilename('attachment; filename="../../unsafe name.csv"', "query.csv"), "unsafe name.csv");
+  assert.equal(api.downloadFilename('attachment; filename="bad..name.csv"', "query.csv"), "query-download");
+  assert.equal(api.downloadFilename("", "query.tsv"), "query.tsv");
+});
+
+test("requires a safe download filename with the selected extension", () => {
+  const csv = {id: "csv", extension: "csv"};
+  assert.deepEqual(api.validateDownloadFilename("September Trucks.csv", csv), {
+    value: "September Trucks.csv", error: "",
+  });
+  assert.match(api.validateDownloadFilename("September Trucks.xlsx", csv).error, /ending in \.csv/);
+  assert.match(api.validateDownloadFilename("../trucks.csv", csv).error, /safe name/);
+  assert.deepEqual(api.validateDownloadFilename("ignored", {id: "json", extension: "json"}), {
+    value: "", error: "",
+  });
+  assert.equal(api.suggestedDownloadFilename("Truck API", "xlsx"), "truck-api-query.xlsx");
+  assert.equal(
+    api.pathWithDownloadFilename("/api2/truck/v1/query", "September Trucks.csv"),
+    "/api2/truck/v1/query?filename=September%20Trucks.csv",
+  );
 });
 
 test("honors server-advertised API surface access", async () => {

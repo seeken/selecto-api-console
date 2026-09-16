@@ -40,6 +40,14 @@ ordinary ungrouped fields remain flat and may produce multiple root rows.
 The Result row shape control chooses ordered arrays or JSON objects for both
 the main result and every subtable.
 
+The Response control is populated from the query operation's OpenAPI media
+types. JSON renders in the console; CSV, TSV, and XLSX responses download with
+the chosen safe filename. The filename is required for a downloadable response
+and must end in the matching `.csv`, `.tsv`, or `.xlsx` extension. Generated
+cURL commands send the matching `Accept` header and filename query parameter,
+then add the same name to `--output`. The request JSON remains the same
+regardless of its response representation.
+
 Pasted request JSON can be loaded back into the visual controls with **Load
 into chooser**. The console only applies the conversion when it can represent
 the full request; otherwise it preserves the pasted JSON and clearly marks it
