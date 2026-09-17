@@ -236,6 +236,9 @@ test("honors server-advertised API surface access", async () => {
   assert.deepEqual(discovered.access, {
     read: true, write: false, action: false, importer: true,
   });
+  assert.equal(api.initialSurfaceTab(discovered.access), "query");
+  assert.equal(api.initialSurfaceTab({read: false, write: true, action: false}), "writes");
+  assert.equal(api.initialSurfaceTab({read: false, write: false, action: false}), "domain");
 });
 
 test("builds and validates a governed write request", () => {

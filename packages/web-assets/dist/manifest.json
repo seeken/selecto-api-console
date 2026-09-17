@@ -11,8 +11,8 @@
       "sha256": "1e0c8eca79f5ddbf6933eba6c2af51cc3c33b721fe65798783e2f741c1e190df"
     },
     "perl.css": {
-      "bytes": 52281,
-      "sha256": "a4cb3d720afe35dbec65835cf272ebc2f89681505fb1422729568ee9412436b8"
+      "bytes": 55723,
+      "sha256": "14cebd0dc6a45edd6f185bf21a11e06b325b06571c7a81e6b92290e61675c0fb"
     },
     "vendor/htmx.min.js": {
       "bytes": 36716,
