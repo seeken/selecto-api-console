@@ -53,6 +53,12 @@ into chooser**. The console only applies the conversion when it can represent
 the full request; otherwise it preserves the pasted JSON and clearly marks it
 as manual JSON mode.
 
+Hosts can launch the console with a preconfigured query by adding a
+percent-encoded canonical request as `#request=<JSON>`. Because the handoff is
+in the URL fragment it is not sent to the server or included in HTTP access
+logs. The console loads representable requests into the chooser and reports a
+clear error instead of silently changing an unsupported request.
+
 The **Writes** tab is contract-driven. It appears for every domain, but only
 offers operations and assignment fields enabled by `writes.operations` and
 `writes.fields`. Update and delete requests require explicit root-field

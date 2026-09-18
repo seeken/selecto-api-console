@@ -88,6 +88,17 @@ test("accepts only absolute same-origin API paths", () => {
   }
 });
 
+test("reads an Explorer query handoff from the URL fragment", () => {
+  const payload = {select: [{field: "created", format: "iso_date"}], limit: 25};
+  const hash = `#request=${encodeURIComponent(JSON.stringify(payload))}`;
+  assert.deepEqual(api.requestPayloadFromLocation({hash}), payload);
+  assert.equal(api.requestPayloadFromLocation({hash: "#tab=query"}), null);
+  assert.throws(
+    () => api.requestPayloadFromLocation({hash: "#request=%7Bbad"}),
+    /not valid JSON/,
+  );
+});
+
 test("builds host-configurable cURL authentication", () => {
   assert.equal(api.normalizeCurlAuth(undefined), "cookie");
   assert.equal(api.normalizeCurlAuth("BASIC"), "basic");
