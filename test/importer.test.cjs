@@ -36,7 +36,8 @@ test("supports static and typed values for governed action inputs", () => {
   const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
   assert.match(source, /data-sai-action-static/);
   assert.match(source, /extraActionInputs/);
-  assert.match(source, /inputType\(spec.type\)/);
+  assert.match(source, /staticValueControl/);
+  assert.match(source, /Array\.isArray\(spec && spec\.options\)/);
   assert.match(source, /publishedAction/);
 });
 
