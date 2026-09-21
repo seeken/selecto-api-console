@@ -9,6 +9,13 @@ test("exports a reusable importer surface", () => {
   assert.equal(typeof importer.mountAll, "function");
 });
 
+test("propagates host CSRF tokens on importer mutations", () => {
+  const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
+  assert.match(source, /dataset\.csrfToken/);
+  assert.match(source, /request\.headers\["X-CSRF-Token"\]/);
+  assert.match(source, /credentials: "same-origin"/);
+});
+
 test("maps uploaded columns to governed fields and keeps non-file values separate", () => {
   const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
   assert.match(source, /Each row below is a column in the uploaded file/);
