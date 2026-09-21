@@ -127,8 +127,17 @@ test("builds host-configurable cURL authentication", () => {
   assert.match(basic, /--basic/);
   assert.match(basic, /--user 'YOUR_USERNAME:YOUR_PASSWORD'/);
   assert.doesNotMatch(basic, /--cookie/);
-  assert.match(renderCurl("cookie"), /--cookie 'YOUR_SESSION_COOKIE'/);
+  const cookie = renderCurl("cookie");
+  assert.match(cookie, /--cookie 'YOUR_SESSION_COOKIE'/);
+  assert.match(cookie, /X-CSRF-Token: YOUR_CSRF_TOKEN/);
   assert.doesNotMatch(renderCurl("none"), /--basic|--user|--cookie/);
+});
+
+test("propagates host CSRF tokens on cookie-authenticated mutations", () => {
+  const source = fs.readFileSync(require.resolve("../dist/selecto-api-console.js"), "utf8");
+  assert.match(source, /dataset\.csrfToken/);
+  assert.match(source, /request\.headers\["X-CSRF-Token"\]/);
+  assert.match(source, /response\.headers\.get\("X-CSRF-Token"\)/);
 });
 
 test("builds write and resolved action cURL commands from their current JSON", () => {
