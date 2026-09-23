@@ -15,13 +15,69 @@ test("exports a reusable browser and CommonJS surface", () => {
 test("hides narrow segments unless they are already selected", () => {
   const consoleInstance = new api.APIConsole({dataset: {}});
   consoleInstance.domain = {query_library: {segments: {
-    active: {label: "Active"},
+    active: {label: "Active", description: "Only active quotes."},
     dvd_unassigned: {label: "Unassigned DVD", picker_hidden: true},
   }}};
   consoleInstance.state = {segments: []};
   assert.deepEqual(consoleInstance.segmentOptions().map((option) => option.value), ["active"]);
+  assert.equal(consoleInstance.segmentOptions()[0].description, "Only active quotes.");
   consoleInstance.state.segments = ["dvd_unassigned"];
   assert.deepEqual(consoleInstance.segmentOptions().map((option) => option.value), ["active", "dvd_unassigned"]);
+  consoleInstance.state = {mode: "view", view: "saved", segments: []};
+  consoleInstance.domain.query_library.views = {saved: {segments: ["dvd_unassigned"]}};
+  assert.deepEqual(consoleInstance.segmentOptions().map((option) => option.value), ["active", "dvd_unassigned"]);
+});
+
+test("source groups keep descriptive names while hiding incidental IDs from column choices", () => {
+  const domain = {
+    name: "Quote",
+    source: {source_table: "quote", primary_key: "id", fields: ["id", "status", "bill_id"],
+      columns: {id: {type: "integer"}, status: {type: "integer"}, bill_id: {type: "integer"}},
+      associations: {bill_to: {queryable: "client", owner_key: "bill_id"},
+        quote_status: {queryable: "status", owner_key: "status"}}},
+    schemas: {client: {source_table: "client_profile", fields: ["id", "co_name"],
+      columns: {id: {type: "integer"}, co_name: {label: "Company Name"}}, associations: {}},
+    status: {source_table: "ref_status", fields: ["id", "descr"],
+      columns: {id: {type: "integer"}, descr: {label: "Description"}}, associations: {}}},
+    joins: {bill_to: {name: "Bill To"}, quote_status: {name: "Status", type: "star_dimension", dimension_key: "status"}},
+  };
+  const fields = api.collectFields(domain);
+  const byPath = new Map(fields.map((field) => [field.path, field]));
+  assert.equal(byPath.get("bill_to.co_name").groupLabel, "Bill To");
+  assert.equal(byPath.get("bill_to.co_name").leafLabel, "Company Name");
+  assert.equal(byPath.get("id").pickerHidden, false);
+  assert.equal(byPath.get("bill_id").pickerHidden, false);
+  assert.equal(byPath.get("status").pickerHidden, true);
+  assert.equal(byPath.get("bill_to.id").pickerHidden, false);
+  assert.equal(byPath.get("quote_status.id").pickerHidden, true);
+  assert.equal(api.collectFilterFields(domain, fields).find((field) => field.path === "status").pickerHidden, false);
+});
+
+test("selected picker tones match repeated columns and filters remain addable", () => {
+  assert.equal(api.pickTone("bill_to.co_name"), api.pickTone("bill_to.co_name"));
+  assert.ok(api.pickTone("bill_to.co_name") >= 0 && api.pickTone("bill_to.co_name") < 8);
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  const field = {path: "bill_to.co_name", label: "Bill To: Company Name", type: "string"};
+  consoleInstance.filterFields = [field];
+  consoleInstance.filterFieldMap = new Map([[field.path, field]]);
+  consoleInstance.changed = () => {};
+  const addFilter = {dataset: {sacAddFilter: field.path}};
+  const event = {target: {closest: (selector) => selector === "[data-sac-add-filter]" ? addFilter : null}};
+  consoleInstance.onClick(event);
+  consoleInstance.onClick(event);
+  assert.deepEqual(consoleInstance.state.filters.map((filter) => filter.field), [field.path, field.path]);
+  assert.notEqual(consoleInstance.state.filters[0].id, consoleInstance.state.filters[1].id);
+  let available;
+  consoleInstance.renderAvailableFields = (kind, fields) => { available = {kind, fields}; };
+  consoleInstance.renderFilterFieldList();
+  assert.equal(available.kind, "filter");
+  assert.deepEqual(available.fields.map((candidate) => candidate.path), [field.path]);
+});
+
+test("picker cards identify a field by path and data type beneath its title", () => {
+  assert.equal(api.fieldSignature({path: "id", type: "integer"}), "id - integer");
+  assert.equal(api.fieldSignature({path: "bill_to.co_name", type: "string"}),
+    "bill_to.co_name - string");
 });
 
 test("segment picker groups keep Off, Yes and No mutually exclusive", () => {
