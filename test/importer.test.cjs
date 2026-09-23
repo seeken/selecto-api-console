@@ -9,6 +9,15 @@ test("exports a reusable importer surface", () => {
   assert.equal(typeof importer.mountAll, "function");
 });
 
+test("mapping targets use source and action groups without changing file-column mapping", () => {
+  const domain = {name: "Quote", joins: {bill_to: {name: "Bill To"}}};
+  assert.equal(importer.targetGroupLabel(domain, "id"), "Quote");
+  assert.equal(importer.targetGroupLabel(domain, "bill_to.co_name"), "Bill To");
+  const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
+  assert.match(source, /document\.createElement\("optgroup"\)/);
+  assert.match(source, /targetGroups, "Actions"/);
+});
+
 test("propagates host CSRF tokens on importer mutations", () => {
   const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
   assert.match(source, /dataset\.csrfToken/);
