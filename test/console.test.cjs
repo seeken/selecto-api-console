@@ -12,6 +12,98 @@ test("exports a reusable browser and CommonJS surface", () => {
   assert.doesNotMatch(source, />Selecto API</);
 });
 
+test("hides narrow segments unless they are already selected", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {query_library: {segments: {
+    active: {label: "Active"},
+    dvd_unassigned: {label: "Unassigned DVD", picker_hidden: true},
+  }}};
+  consoleInstance.state = {segments: []};
+  assert.deepEqual(consoleInstance.segmentOptions().map((option) => option.value), ["active"]);
+  consoleInstance.state.segments = ["dvd_unassigned"];
+  assert.deepEqual(consoleInstance.segmentOptions().map((option) => option.value), ["active", "dvd_unassigned"]);
+});
+
+test("segment picker groups keep Off, Yes and No mutually exclusive", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {query_library: {
+    segments: {pdf_yes: {label: "PDF sent"}, pdf_no: {label: "PDF not sent"}, active: {label: "Active"}},
+    segment_picker_groups: {pdf: {
+      label: "PDF sent to customer",
+      description: "Off includes both.",
+      choices: [{segment: "pdf_yes", label: "Yes"}, {segment: "pdf_no", label: "No"}],
+    }},
+  }};
+  consoleInstance.state = {segments: []};
+  assert.deepEqual(consoleInstance.segmentOptions().map((option) => option.value), ["active"]);
+  assert.equal(consoleInstance.segmentGroups()[0].offLabel, "Off");
+  assert.equal(consoleInstance.segmentGroups()[0].description, "Off includes both.");
+  assert.equal(consoleInstance.setSegmentGroupChoice("pdf", "pdf_yes"), true);
+  consoleInstance.setUngroupedSegments(["active"]);
+  assert.deepEqual(consoleInstance.state.segments, ["pdf_yes", "active"]);
+  assert.equal(consoleInstance.setSegmentGroupChoice("pdf", "pdf_no"), true);
+  assert.deepEqual(consoleInstance.state.segments, ["active", "pdf_no"]);
+  assert.equal(consoleInstance.setSegmentGroupChoice("pdf", ""), true);
+  assert.deepEqual(consoleInstance.state.segments, ["active"]);
+  assert.equal(consoleInstance.setSegmentGroupChoice("pdf", "invalid"), false);
+  assert.equal(consoleInstance.conflictingSegmentGroup(["pdf_yes", "pdf_no"]).id, "pdf");
+  consoleInstance.domain.source = {associations: {}};
+  consoleInstance.domain.schemas = {};
+  consoleInstance.fields = [{path: "id", type: "integer"}];
+  consoleInstance.fieldMap = new Map([["id", consoleInstance.fields[0]]]);
+  assert.throws(
+    () => consoleInstance.loadPayloadIntoChooser({select: ["id"], segments: ["pdf_yes", "pdf_no"]}),
+    /PDF sent to customer allows only one choice/,
+  );
+});
+
+test("conditional Billing Class is one named API filter and accepts Explorer handoff", () => {
+  const domain = {
+    source: {
+      fields: ["id", "customer_id", "billing_class_id"],
+      columns: {id: {type: "integer"}, customer_id: {type: "integer"},
+        billing_class_id: {type: "integer"}},
+      associations: {},
+    },
+    schemas: {}, joins: {},
+    components: {
+      filter_picker_hidden_paths: ["billing_class_id"],
+      filter_choices: {lhf_billing_class: {
+        label: "Billing Class", choices: [
+          {value: "14", label: "Private"}, {value: "15", label: "Corporate"},
+        ],
+        conditional: {
+          when_field: "customer_id", present_field: "customer_choice",
+          absent_field: "quote_choice",
+        },
+      }},
+    },
+  };
+  const fields = api.collectFields(domain);
+  const filterFields = api.collectFilterFields(domain, fields);
+  assert.equal(filterFields.filter((field) => field.label === "Billing Class").length, 1);
+  assert.equal(filterFields.find((field) => field.path === "billing_class_id").pickerHidden, true);
+  assert.deepEqual(api.operatorsForField(filterFields.find((field) =>
+    field.path === "lhf_billing_class")), ["eq", "ne", "in", "not_in", "is_null", "not_null"]);
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = domain;
+  consoleInstance.fields = fields;
+  consoleInstance.fieldMap = new Map(fields.map((field) => [field.path, field]));
+  consoleInstance.filterFields = filterFields;
+  consoleInstance.filterFieldMap = new Map(filterFields.map((field) => [field.path, field]));
+  consoleInstance.loadPayloadIntoChooser({
+    select: ["id"], filters: [{field: "billing_class_id", op: "eq", value: 14}],
+  });
+  assert.equal(consoleInstance.state.filters[0].field, "billing_class_id");
+  consoleInstance.loadPayloadIntoChooser({
+    select: ["id"], filters: [
+      {field: "lhf_billing_class", op: "in", value: ["14", "15"]},
+    ],
+  });
+  assert.deepEqual(consoleInstance.filterPayloads(consoleInstance.state.filters[0]),
+    [{field: "lhf_billing_class", op: "in", value: ["14", "15"]}]);
+});
+
 test("governed write controls follow canonical field types", () => {
   assert.equal(api.writeControlKind({type: "integer"}), "number");
   assert.equal(api.writeControlKind({type: "decimal"}), "number");
@@ -719,6 +811,8 @@ test("loads representable request JSON back into every chooser level", () => {
     {path: "load_det.created", type: "epoch_datetime"},
   ];
   consoleInstance.fieldMap = new Map(consoleInstance.fields.map((field) => [field.path, field]));
+  consoleInstance.filterFields = api.collectFilterFields(consoleInstance.domain, consoleInstance.fields);
+  consoleInstance.filterFieldMap = new Map(consoleInstance.filterFields.map((field) => [field.path, field]));
   const payload = {
     select: ["id", ["load_det.vin", {field: "load_det.created", alias: "created_day", format: "day"}]],
     segments: ["active"], parameters: {tenant: 7},
