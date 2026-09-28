@@ -214,6 +214,14 @@ test("offers Explorer-style quick periods only for temporal filters", () => {
   assert.ok(api.operatorsForType("date").includes("date_shortcut"));
   assert.ok(api.operatorsForType("epoch_datetime").includes("date_shortcut"));
   assert.ok(!api.operatorsForType("decimal").includes("date_shortcut"));
+  for (const op of ["starts_with", "starts_with_ci", "text_contains", "text_contains_ci", "ends_with", "ends_with_ci"]) {
+    assert.ok(api.operatorsForType("string").includes(op));
+    assert.ok(api.operatorsForType("text").includes(op));
+    for (const type of ["decimal", "integer", "boolean", "date", "utc_datetime"]) {
+      assert.ok(!api.operatorsForType(type).includes(op));
+    }
+    assert.ok(!api.operatorsForField({type: "string", filterChoices: []}).includes(op));
+  }
   const consoleInstance = new api.APIConsole({dataset: {}});
   assert.ok(consoleInstance.dateShortcuts().some((choice) => choice[1] === "mtd_all_years"));
   assert.ok(consoleInstance.dateShortcuts().some((choice) => choice[1] === "qtd_all_years"));
