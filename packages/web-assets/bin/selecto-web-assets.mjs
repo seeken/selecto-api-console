@@ -30,6 +30,11 @@ const profiles = {
     ["perl.css", "selecto-components.css"],
     ["vendor/htmx.min.js", "htmx.min.js"],
     ["vendor/hx-ws.min.js", "hx-ws.min.js"]
+  ],
+  // Rails/Hotwire Explorer: the Perl theme only. Turbo and Stimulus come from
+  // the host importmap, so no htmx or WebSocket bundle is shipped.
+  "rails-components": [
+    ["perl.css", "selecto-components.css"]
   ]
 };
 

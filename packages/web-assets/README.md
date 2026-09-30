@@ -25,4 +25,9 @@ installed from npm. Every sync validates `dist/manifest.json` before changing
 the target directory.
 
 Available profiles are `native-htmx`, `native-spring`, `native-livewire`,
-`native-blazor`, and `perl-components`.
+`native-blazor`, `perl-components`, and `rails-components`.
+
+`perl-components` and `rails-components` ship the same Perl reference
+stylesheet (`perl.css`) as `selecto-components.css`. The Perl profile adds the
+pinned htmx and WebSocket bundles; the Rails/Hotwire profile ships the
+stylesheet alone because Turbo and Stimulus come from the host importmap.
