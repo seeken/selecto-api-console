@@ -25,3 +25,19 @@ test("profile changes preserve host-owned app.css and remove identifiable genera
     await rm(target, {recursive: true, force: true});
   }
 });
+
+test("the Rails components profile ships the Perl stylesheet and no htmx bundles", async () => {
+  const target = await mkdtemp(resolve(tmpdir(), "selecto-assets-rails-"));
+  const run = (...extra) => execFileSync(process.execPath, [resolve(root, "bin/selecto-web-assets.mjs"), "sync", "--profile", "rails-components", "--target", target, ...extra], {stdio: "pipe"});
+  try {
+    run();
+    assert.equal(await readFile(resolve(target, "selecto-components.css"), "utf8"), await readFile(resolve(root, "dist/perl.css"), "utf8"));
+    await assert.rejects(access(resolve(target, "htmx.min.js")), {code: "ENOENT"});
+    await assert.rejects(access(resolve(target, "hx-ws.min.js")), {code: "ENOENT"});
+    run("--check");
+    await writeFile(resolve(target, "selecto-components.css"), "/* edited */\n");
+    assert.throws(() => run("--check"), /Stale generated Selecto web asset/);
+  } finally {
+    await rm(target, {recursive: true, force: true});
+  }
+});
