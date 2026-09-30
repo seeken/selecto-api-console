@@ -46,11 +46,15 @@ test("source groups keep descriptive names while hiding incidental IDs from colu
   assert.equal(byPath.get("bill_to.co_name").groupLabel, "Bill To");
   assert.equal(byPath.get("bill_to.co_name").leafLabel, "Company Name");
   assert.equal(byPath.get("id").pickerHidden, false);
-  assert.equal(byPath.get("bill_id").pickerHidden, false);
+  assert.equal(byPath.get("bill_id").pickerHidden, true, "no table name keeps its IDs visible");
   assert.equal(byPath.get("status").pickerHidden, true);
-  assert.equal(byPath.get("bill_to.id").pickerHidden, false);
+  assert.equal(byPath.get("bill_to.id").pickerHidden, true, "no table name keeps its IDs visible");
   assert.equal(byPath.get("quote_status.id").pickerHidden, true);
   assert.equal(api.collectFilterFields(domain, fields).find((field) => field.path === "status").pickerHidden, false);
+  const listed = new Map(api.collectFields({...domain, components: {picker_visible_id_paths: ["bill_id", "bill_to.id"]}})
+    .map((field) => [field.path, field]));
+  assert.equal(listed.get("bill_id").pickerHidden, false, "the domain lists the client number as visible");
+  assert.equal(listed.get("bill_to.id").pickerHidden, false);
 });
 
 test("selected picker tones match repeated columns and filters remain addable", () => {
