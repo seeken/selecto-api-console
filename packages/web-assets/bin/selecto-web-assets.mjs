@@ -35,6 +35,13 @@ const profiles = {
   // the host importmap, so no htmx or WebSocket bundle is shipped.
   "rails-components": [
     ["perl.css", "selecto-components.css"]
+  ],
+  // Blazor Server Explorer (selecto-blazor-components): the Perl theme plus
+  // the shared dialog focus helper. Blazor's own SignalR circuit replaces
+  // htmx and the WebSocket bundle.
+  "blazor-components": [
+    ["perl.css", "selecto-components.css"],
+    ["native-dialogs.js", "selecto-dialogs.js"]
   ]
 };
 
