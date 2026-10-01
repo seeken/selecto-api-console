@@ -62,3 +62,25 @@ test("the Blazor components profile ships the Perl stylesheet and dialog helper,
     await rm(target, {recursive: true, force: true});
   }
 });
+
+test("the Django components profile ships the Perl stylesheet, dialog helper and htmx, and retires native-htmx's stylesheet", async () => {
+  const target = await mkdtemp(resolve(tmpdir(), "selecto-assets-django-"));
+  const run = (profile, ...extra) => execFileSync(process.execPath, [resolve(root, "bin/selecto-web-assets.mjs"), "sync", "--profile", profile, "--target", target, ...extra], {stdio: "pipe"});
+  try {
+    run("native-htmx");
+    await access(resolve(target, "selecto.css"));
+    run("django-components");
+    assert.equal(await readFile(resolve(target, "selecto-components.css"), "utf8"), await readFile(resolve(root, "dist/perl.css"), "utf8"));
+    assert.equal(await readFile(resolve(target, "selecto-dialogs.js"), "utf8"), await readFile(resolve(root, "dist/native-dialogs.js"), "utf8"));
+    assert.equal(await readFile(resolve(target, "htmx.min.js"), "utf8"), await readFile(resolve(root, "dist/vendor/htmx.min.js"), "utf8"));
+    // The generated native stylesheet of the previous profile is identifiable, so it is removed.
+    await assert.rejects(access(resolve(target, "selecto.css")), {code: "ENOENT"});
+    // htmx stays over plain HTTP: no WebSocket bundle.
+    await assert.rejects(access(resolve(target, "hx-ws.min.js")), {code: "ENOENT"});
+    run("django-components", "--check");
+    await writeFile(resolve(target, "selecto-components.css"), "/* edited */\n");
+    assert.throws(() => run("django-components", "--check"), /Stale generated Selecto web asset/);
+  } finally {
+    await rm(target, {recursive: true, force: true});
+  }
+});

@@ -1,6 +1,6 @@
 {
   "name": "@selecto/web-assets",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Shared Perl-derived visual assets and native browser behavior for Selecto web explorers.",
   "license": "Artistic-2.0",
   "type": "module",
@@ -21,6 +21,7 @@
   "files": [
     "bin",
     "dist",
+    "CHANGELOG.md",
     "LICENSE",
     "README.md",
     "THIRD_PARTY_NOTICES.md"

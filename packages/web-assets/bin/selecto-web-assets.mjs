@@ -42,6 +42,14 @@ const profiles = {
   "blazor-components": [
     ["perl.css", "selecto-components.css"],
     ["native-dialogs.js", "selecto-dialogs.js"]
+  ],
+  // Django Explorer (selecto-django-components): the Perl theme, the shared
+  // dialog focus helper and htmx 4. It keeps htmx over plain HTTP, so the
+  // WebSocket bundle is not shipped.
+  "django-components": [
+    ["perl.css", "selecto-components.css"],
+    ["native-dialogs.js", "selecto-dialogs.js"],
+    ["vendor/htmx.min.js", "htmx.min.js"]
   ]
 };
 
