@@ -41,3 +41,24 @@ test("the Rails components profile ships the Perl stylesheet and no htmx bundles
     await rm(target, {recursive: true, force: true});
   }
 });
+
+test("the Blazor components profile ships the Perl stylesheet and dialog helper, and retires native-livewire's copy", async () => {
+  const target = await mkdtemp(resolve(tmpdir(), "selecto-assets-blazor-"));
+  const run = (profile, ...extra) => execFileSync(process.execPath, [resolve(root, "bin/selecto-web-assets.mjs"), "sync", "--profile", profile, "--target", target, ...extra], {stdio: "pipe"});
+  try {
+    run("native-livewire");
+    await access(resolve(target, "selecto.css"));
+    run("blazor-components");
+    assert.equal(await readFile(resolve(target, "selecto-components.css"), "utf8"), await readFile(resolve(root, "dist/perl.css"), "utf8"));
+    assert.equal(await readFile(resolve(target, "selecto-dialogs.js"), "utf8"), await readFile(resolve(root, "dist/native-dialogs.js"), "utf8"));
+    // The generated native stylesheet of the previous profile is identifiable, so it is removed.
+    await assert.rejects(access(resolve(target, "selecto.css")), {code: "ENOENT"});
+    await assert.rejects(access(resolve(target, "htmx.min.js")), {code: "ENOENT"});
+    await assert.rejects(access(resolve(target, "hx-ws.min.js")), {code: "ENOENT"});
+    run("blazor-components", "--check");
+    await writeFile(resolve(target, "selecto-dialogs.js"), "/* edited */\n");
+    assert.throws(() => run("blazor-components", "--check"), /Stale generated Selecto web asset/);
+  } finally {
+    await rm(target, {recursive: true, force: true});
+  }
+});

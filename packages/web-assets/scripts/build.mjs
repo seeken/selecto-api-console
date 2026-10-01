@@ -30,5 +30,5 @@ for (const [, target] of files) {
 
 await writeFile(
   resolve(dist, "manifest.json"),
-  `${JSON.stringify({format: "selecto.web-assets.v1", version: "0.3.0", assets}, null, 2)}\n`
+  `${JSON.stringify({format: "selecto.web-assets.v1", version: "0.4.0", assets}, null, 2)}\n`
 );
