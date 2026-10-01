@@ -25,16 +25,20 @@ installed from npm. Every sync validates `dist/manifest.json` before changing
 the target directory.
 
 Available profiles are `native-htmx`, `native-spring`, `native-livewire`,
-`native-blazor`, `perl-components`, `rails-components`, and
-`blazor-components`.
+`native-blazor`, `perl-components`, `rails-components`, `blazor-components`,
+and `django-components`.
 
-`perl-components`, `rails-components`, and `blazor-components` ship the same
-Perl reference stylesheet (`perl.css`) as `selecto-components.css`. The Perl
+`perl-components`, `rails-components`, `blazor-components`, and
+`django-components` ship the same Perl reference stylesheet (`perl.css`) as
+`selecto-components.css`. The Perl
 profile adds the pinned htmx and WebSocket bundles; the Rails/Hotwire profile
 ships the stylesheet alone because Turbo and Stimulus come from the host
 importmap; the Blazor Server profile (`selecto-blazor-components`) adds only
 the shared dialog focus helper as `selecto-dialogs.js`, because Blazor's
-SignalR circuit replaces htmx and the WebSocket bundle.
+SignalR circuit replaces htmx and the WebSocket bundle. The Django profile
+(`selecto-django-components`) adds the dialog helper as `selecto-dialogs.js`
+and htmx 4 as `htmx.min.js`, but not the WebSocket bundle, because the Django
+Explorer keeps htmx over plain HTTP.
 
 `perl.css` works under a strict `style-src 'self'` Content-Security-Policy:
 the Perl Explorer renders aggregate-grid heat as `sc-heat-0`..`sc-heat-9`
