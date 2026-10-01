@@ -1,6 +1,6 @@
 {
   "format": "selecto.web-assets.v1",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "assets": {
     "native.css": {
       "bytes": 29466,
@@ -11,8 +11,8 @@
       "sha256": "1e0c8eca79f5ddbf6933eba6c2af51cc3c33b721fe65798783e2f741c1e190df"
     },
     "perl.css": {
-      "bytes": 65424,
-      "sha256": "a086750f84e2048d206068a15267aabdec11b432a1773f18e846e324754c8124"
+      "bytes": 67530,
+      "sha256": "49439f10e45e978df9a1749fe64f8444689150ef404a3d0e1f634b16cff68845"
     },
     "vendor/htmx.min.js": {
       "bytes": 36716,
