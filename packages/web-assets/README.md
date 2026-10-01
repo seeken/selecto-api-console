@@ -31,3 +31,9 @@ Available profiles are `native-htmx`, `native-spring`, `native-livewire`,
 stylesheet (`perl.css`) as `selecto-components.css`. The Perl profile adds the
 pinned htmx and WebSocket bundles; the Rails/Hotwire profile ships the
 stylesheet alone because Turbo and Stimulus come from the host importmap.
+
+`perl.css` works under a strict `style-src 'self'` Content-Security-Policy:
+the Perl Explorer renders aggregate-grid heat as `sc-heat-0`..`sc-heat-9`
+classes, rollup indentation as `sc-rollup-level-2`/`-3`, and its no-script
+chart fallback through `@media (scripting: none)`, so it needs no inline
+`style` attribute or `<style>` element.
