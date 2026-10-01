@@ -2,7 +2,7 @@
   "name": "@selecto/api-console",
   "version": "0.5.0",
   "description": "Dependency-free console for Selecto canonical domain APIs",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Artistic-2.0",
   "main": "dist/selecto-api-console.js",
   "style": "dist/selecto-api-console.css",
   "exports": {

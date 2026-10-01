@@ -2,7 +2,7 @@
   "name": "@selecto/web-assets",
   "version": "0.2.0",
   "description": "Shared Perl-derived visual assets and native browser behavior for Selecto web explorers.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Artistic-2.0",
   "type": "module",
   "main": "dist/native-dialogs.js",
   "style": "dist/native.css",
