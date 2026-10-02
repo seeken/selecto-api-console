@@ -65,10 +65,41 @@ test("offers only file-mapped key sets as persistent radio choices", () => {
   assert.match(source, /kind === "column"/);
 });
 
-test("auto-mapping reserves each file column for one governed destination", () => {
+test("one file column can feed multiple governed destinations", () => {
+  const surface = new importer.Importer({dataset: {}});
+  surface.domain = {
+    name: "Shipment",
+    source: {columns: {}},
+    actions: {},
+    imports: {
+      fields: {
+        pickup_date: {sources: ["column"], header_aliases: ["Imported date"]},
+        delivery_date: {sources: ["column"], header_aliases: ["Imported date"]},
+      },
+      actions: {},
+      key_sets: [],
+    },
+  };
+  surface.upload = {inspection: {columns: [{id: "c1", header: "Imported date"}]}};
+  surface.autoMap();
+  assert.equal(surface.mappings.get("pickup_date").column_id, "c1");
+  assert.equal(surface.mappings.get("delivery_date").column_id, "c1");
+
+  surface.renderMapping = () => {};
+  surface.columnChanged({
+    dataset: {saiColumn: "c1", saiCurrentTarget: "pickup_date"},
+    value: "",
+  });
+  assert.equal(surface.mappings.get("pickup_date").kind, "omit");
+  assert.deepEqual(surface.mappings.get("delivery_date"),
+    {kind: "column", column_id: "c1"},
+    "removing one destination preserves another destination using the same column");
+
   const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
-  assert.match(source, /claimedColumns/);
-  assert.match(source, /Action inputs are operational semantics/);
+  assert.match(source, /Add another destination/);
+  assert.match(source, /mappedTargets\.forEach\(appendTarget\)/);
+  assert.match(source, /saiCurrentTarget/);
+  assert.doesNotMatch(source, /claimedColumns/);
 });
 
 test("shows governed action results alongside the write result", () => {
