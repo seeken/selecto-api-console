@@ -828,6 +828,68 @@ test("preserves exact decimal strings for table and JSON result rendering", () =
 test("reads result cells from ordered arrays and JSON objects", () => {
   assert.equal(api.rowValue([7, "A"], "status", 1), "A");
   assert.equal(api.rowValue({id: 7, status: "A"}, "status", 1), "A");
+  const descriptor = {id: "status", label: "Status", type: "string", encoding: "string", nullable: false};
+  assert.equal(api.rowValue([7, "A"], descriptor, 1), "A");
+  assert.equal(api.rowValue({id: 7, status: "A"}, descriptor, 1), "A");
+});
+
+test("names result columns from typed descriptors or bare ids", () => {
+  assert.equal(api.columnId("status"), "status");
+  assert.equal(api.columnLabel("status"), "status");
+  assert.equal(api.columnId({id: "price", label: "Price", type: "decimal"}), "price");
+  assert.equal(api.columnLabel({id: "price", label: "Price", type: "decimal"}), "Price");
+  assert.equal(api.columnLabel({id: "price", label: "", type: "decimal"}), "price");
+  assert.equal(api.columnLabel({id: "price", type: "decimal"}), "price");
+});
+
+test("renders result headers and cells for both column shapes", () => {
+  class FakeNode {
+    constructor(tag) {
+      this.tag = tag;
+      this.children = [];
+      this.dataset = {};
+      this.hidden = false;
+    }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+  }
+  const previousDocument = global.document;
+  global.document = {createElement: (tag) => new FakeNode(tag)};
+  try {
+    const nodes = {
+      "[data-sac-empty-response]": new FakeNode("p"),
+      "[data-sac-response-json]": new FakeNode("pre"),
+      "[data-sac-result-head]": new FakeNode("thead"),
+      "[data-sac-result-body]": new FakeNode("tbody"),
+    };
+    const consoleInstance = new api.APIConsole({dataset: {}, querySelector: (selector) => nodes[selector] || null});
+    consoleInstance.updateCurl = () => {};
+    consoleInstance.switchResultTab = (tab) => { consoleInstance.shownTab = tab; };
+    const table = () => ({
+      head: nodes["[data-sac-result-head]"].children[0].children.map((th) => [th.textContent, th.title]),
+      cells: nodes["[data-sac-result-body]"].children.map((tr) => tr.children.map((td) => td.textContent)),
+    });
+    const typed = [
+      {id: "id", label: "ID", field: "id", type: "integer", encoding: "json", nullable: false},
+      {id: "price", label: "Price", field: "price", type: "decimal", encoding: "decimal-string", nullable: false},
+      {id: "note", label: "note", field: "note", type: "string", encoding: "string", nullable: true},
+    ];
+    consoleInstance.renderResponse({ok: true, data: {columns: typed, rows: [[3, "8.00", null]]}});
+    assert.deepEqual(table(), {
+      head: [["ID", "id"], ["Price", "price"], ["note", undefined]],
+      cells: [["3", "8.00", "NULL"]],
+    });
+    assert.equal(consoleInstance.shownTab, "table");
+    consoleInstance.renderResponse({ok: true, data: {columns: typed, row_format: "objects",
+      rows: [{id: 3, price: "8.00", note: "boxed"}]}});
+    assert.deepEqual(table().cells, [["3", "8.00", "boxed"]]);
+    consoleInstance.renderResponse({ok: true, data: {columns: ["id", "price"], rows: [[3, "8.00"]]}});
+    assert.deepEqual(table(), {head: [["id", undefined], ["price", undefined]], cells: [["3", "8.00"]]});
+    consoleInstance.renderResponse({ok: true, data: {columns: ["id", "price"], rows: [{id: 3, price: "8.00"}]}});
+    assert.deepEqual(table().cells, [["3", "8.00"]]);
+  } finally {
+    global.document = previousDocument;
+  }
 });
 
 test("builds configured field aliases and formats from picked fields", () => {
