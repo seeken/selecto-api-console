@@ -300,6 +300,46 @@ test("propagates host CSRF tokens on cookie-authenticated mutations", () => {
   assert.match(source, /response\.headers\.get\("X-CSRF-Token"\)/);
 });
 
+test("discovers safe OpenAPI operation headers for governed writes", () => {
+  const openapi = {paths: {"/api2/consignments/v1/write": {
+    parameters: [
+      {name: "X-Trace", in: "header", required: false},
+      {name: "unsafe name", in: "header", required: true},
+    ],
+    post: {parameters: [{
+      name: "If-Match", in: "header", required: true,
+      description: "Current aggregate version.",
+    }]},
+  }}};
+  assert.deepEqual(api.operationHeaderSpecs(
+    openapi, "/api2/consignments/v1/write",
+  ), [
+    {name: "X-Trace", required: false, description: ""},
+    {name: "If-Match", required: true, description: "Current aggregate version."},
+  ]);
+
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.writePath = "/api2/consignments/v1/write";
+  consoleInstance.openapi = openapi;
+  consoleInstance.domain = {
+    source: {
+      primary_key: "id", fields: ["id", "cons_ref"],
+      columns: {id: {type: "integer"}, cons_ref: {type: "string"}},
+    },
+    writes: {
+      operations: {update: {enabled: true}},
+      fields: {cons_ref: {updatable: true}},
+    },
+  };
+  consoleInstance.seedMutationState();
+  consoleInstance.writeState.included.cons_ref = true;
+  consoleInstance.writeState.assignments.cons_ref = "CUSTOMER-123";
+  consoleInstance.writeState.filters[0].value = "7001";
+  assert.match(consoleInstance.buildWriteRequest().errors.join(" "), /If-Match request header is required/);
+  consoleInstance.writeState.headers["If-Match"] = '"cm-version"';
+  assert.doesNotMatch(consoleInstance.buildWriteRequest().errors.join(" "), /If-Match/);
+});
+
 test("builds write and resolved action cURL commands from their current JSON", () => {
   const consoleInstance = new api.APIConsole({dataset: {curlAuth: "basic"}});
   const previousWindow = global.window;
@@ -312,6 +352,16 @@ test("builds write and resolved action cURL commands from their current JSON", (
     assert.match(write, /--basic/);
     assert.match(write, /--user 'YOUR_USERNAME:YOUR_PASSWORD'/);
     assert.match(write, /--data-binary '\{"operation":"insert"\}'/);
+    const conditionalWrite = consoleInstance.curlCommand(
+      "/api2/consignments/v1/write", '{"operation":"update"}', "json", "",
+      {"If-Match": '"cm-version"'},
+    );
+    assert.match(conditionalWrite, /-H 'If-Match: "cm-version"'/);
+    const resourceGet = consoleInstance.getCurlCommand(
+      "/api2/consignments/v1/resources/7001?fields=status,origin.city",
+    );
+    assert.match(resourceGet, /curl -X GET 'https:\/\/tenant\.example\/api2\/consignments\/v1\/resources\/7001\?fields=status,origin\.city'/);
+    assert.doesNotMatch(resourceGet, /--data-binary|Content-Type/);
 
     const action = consoleInstance.curlCommand(
       "/api2/truck/v1/actions/set_truck_status", '{"target":{"ids":[7]}}',
@@ -356,6 +406,7 @@ test("discovers governed write and action routes", async () => {
       {operation_id: "getDomain", path: "/api/v1/orders/domain"},
       {operation_id: "getOpenApi", path: "/api/v1/orders/openapi.json"},
       {operation_id: "queryDomain", path: "/api/v1/orders/query"},
+      {method: "GET", operation_id: "getCustomerResourceVersion", path: "/api/v1/orders/resources/{id}"},
       {operation_id: "writeDomain", path: "/api/v1/orders/write"},
       {operation_id: "executeAction", path: "/api/v1/orders/actions/{action}"},
     ]};
@@ -370,6 +421,7 @@ test("discovers governed write and action routes", async () => {
     }}}};
   });
   assert.equal(discovered.writePath, "/api/v1/orders/write");
+  assert.equal(discovered.resourcePath, "/api/v1/orders/resources/{id}");
   assert.equal(discovered.actionPath, "/api/v1/orders/actions/{action}");
   assert.deepEqual(discovered.queryResponseFormats.map((format) => format.id), [
     "json", "csv", "tsv", "xlsx",
@@ -381,6 +433,81 @@ test("uses safe response download filenames", () => {
   assert.equal(api.downloadFilename('attachment; filename="../../unsafe name.csv"', "query.csv"), "unsafe name.csv");
   assert.equal(api.downloadFilename('attachment; filename="bad..name.csv"', "query.csv"), "query-download");
   assert.equal(api.downloadFilename("", "query.tsv"), "query.tsv");
+});
+
+test("builds safe sparse-field resource GET requests", () => {
+  assert.equal(
+    api.safeResourcePathTemplate(
+      "/api2/consignments/v1/resources/{id}", "/api2/consignments/v1",
+    ),
+    "/api2/consignments/v1/resources/{id}",
+  );
+  assert.equal(api.safeResourcePathTemplate(
+    "//other.test/resources/{id}", "/api2/consignments/v1",
+  ), "");
+  assert.equal(
+    api.resourceRequestPath(
+      "/api2/consignments/v1/resources/{id}", "7001",
+      ["status", "origin.city", "status"],
+    ),
+    "/api2/consignments/v1/resources/7001?fields=status,origin.city",
+  );
+
+  const domain = {
+    source: {
+      primary_key: "id",
+      columns: {id: {type: "integer"}},
+      associations: {
+        origin: {queryable: "location", owner_key: "orig_id", related_key: "id"},
+        cargo: {queryable: "cargo", owner_key: "id", related_key: "load_id", cardinality: "many"},
+      },
+    },
+    schemas: {
+      location: {primary_key: "id", associations: {}},
+      cargo: {primary_key: "id", associations: {}},
+    },
+  };
+  assert.equal(api.fieldTraversesMany(domain, "origin.city"), false);
+  assert.equal(api.fieldTraversesMany(domain, "cargo.vin"), true);
+
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = domain;
+  consoleInstance.resourcePath = "/api2/consignments/v1/resources/{id}";
+  consoleInstance.state.queryMethod = "get";
+  consoleInstance.state.resourceId = "7001";
+  consoleInstance.state.selectedFields = [
+    {field: "id"}, {field: "status"}, {field: "origin.city"},
+  ];
+  assert.deepEqual(consoleInstance.buildResourceRequest(), {
+    path: "/api2/consignments/v1/resources/7001?fields=status,origin.city",
+    fields: ["status", "origin.city"], errors: [],
+  });
+  consoleInstance.state.selectedFields.push({field: "cargo.vin"});
+  assert.match(consoleInstance.buildResourceRequest().errors.join(" "), /to-many relationship/);
+
+  const switcher = new api.APIConsole({dataset: {}});
+  switcher.domain = domain;
+  switcher.resourcePath = "/api2/consignments/v1/resources/{id}";
+  switcher.state.selectedFields = [
+    {id: "1", field: "status", alias: "current_status", format: ""},
+    {id: "2", field: "cargo.vin", alias: "", format: ""},
+  ];
+  switcher.state.subtables = ["cargo"];
+  assert.equal(switcher.setQueryMethod("get"), "get");
+  assert.deepEqual(switcher.state.selectedFields, [
+    {id: "1", field: "status", alias: "", format: ""},
+  ]);
+  assert.deepEqual(switcher.state.subtables, []);
+  switcher.state.selectedFields.push({id: "3", field: "origin.city", alias: "", format: ""});
+  assert.equal(switcher.setQueryMethod("post"), "post");
+  assert.deepEqual(switcher.state.selectedFields.map((selection) => selection.field), [
+    "status", "cargo.vin",
+  ]);
+  assert.deepEqual(switcher.state.subtables, ["cargo"]);
+  assert.equal(switcher.setQueryMethod("get"), "get");
+  assert.deepEqual(switcher.state.selectedFields.map((selection) => selection.field), [
+    "status", "origin.city",
+  ]);
 });
 
 test("requires a safe download filename with the selected extension", () => {
