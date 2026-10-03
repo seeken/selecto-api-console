@@ -84,3 +84,23 @@ test("the Django components profile ships the Perl stylesheet, dialog helper and
     await rm(target, {recursive: true, force: true});
   }
 });
+
+test("the Spring components profile ships the Perl stylesheet, dialog helper and htmx, and retires native-htmx's stylesheet", async () => {
+  const target = await mkdtemp(resolve(tmpdir(), "selecto-assets-spring-"));
+  const run = (profile, ...extra) => execFileSync(process.execPath, [resolve(root, "bin/selecto-web-assets.mjs"), "sync", "--profile", profile, "--target", target, ...extra], {stdio: "pipe"});
+  try {
+    run("native-htmx");
+    await access(resolve(target, "selecto.css"));
+    run("spring-components");
+    assert.equal(await readFile(resolve(target, "selecto-components.css"), "utf8"), await readFile(resolve(root, "dist/perl.css"), "utf8"));
+    assert.equal(await readFile(resolve(target, "selecto-dialogs.js"), "utf8"), await readFile(resolve(root, "dist/native-dialogs.js"), "utf8"));
+    assert.equal(await readFile(resolve(target, "htmx.min.js"), "utf8"), await readFile(resolve(root, "dist/vendor/htmx.min.js"), "utf8"));
+    await assert.rejects(access(resolve(target, "selecto.css")), {code: "ENOENT"});
+    await assert.rejects(access(resolve(target, "hx-ws.min.js")), {code: "ENOENT"});
+    run("spring-components", "--check");
+    await writeFile(resolve(target, "htmx.min.js"), "/* edited */\n");
+    assert.throws(() => run("spring-components", "--check"), /Stale generated Selecto web asset/);
+  } finally {
+    await rm(target, {recursive: true, force: true});
+  }
+});

@@ -1,6 +1,6 @@
 {
   "format": "selecto.web-assets.v1",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "assets": {
     "native.css": {
       "bytes": 29466,
