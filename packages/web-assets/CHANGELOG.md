@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+
+- Add the `spring-components` profile: `perl.css` as `selecto-components.css`, the dialog helper as `selecto-dialogs.js` and htmx 4 as `htmx.min.js`, for the Spring Boot Explorer.
+
 ## 0.5.0
 
 - Add the `django-components` profile: `perl.css` as `selecto-components.css`, the dialog helper as `selecto-dialogs.js` and htmx 4 as `htmx.min.js`, for the Django Explorer.

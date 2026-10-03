@@ -50,6 +50,14 @@ const profiles = {
     ["perl.css", "selecto-components.css"],
     ["native-dialogs.js", "selecto-dialogs.js"],
     ["vendor/htmx.min.js", "htmx.min.js"]
+  ],
+  // Spring Boot Explorer (selecto-spring-components): the same files as the
+  // Django profile. It keeps Thymeleaf and htmx over plain HTTP, so the
+  // WebSocket bundle is not shipped.
+  "spring-components": [
+    ["perl.css", "selecto-components.css"],
+    ["native-dialogs.js", "selecto-dialogs.js"],
+    ["vendor/htmx.min.js", "htmx.min.js"]
   ]
 };
 
