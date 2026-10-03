@@ -12,6 +12,13 @@ test("exports a reusable browser and CommonJS surface", () => {
   assert.doesNotMatch(source, />Selecto API</);
 });
 
+test("links the Importer at the path every host mounts", () => {
+  // Perl, Rails, Blazor and Django mount the importer page at <base>/import.
+  const source = fs.readFileSync(require.resolve("../dist/selecto-api-console.js"), "utf8");
+  assert.match(source, /importerLink\.href = `\$\{this\.base\}\/import`;/);
+  assert.doesNotMatch(source, /\$\{this\.base\}\/importer`/);
+});
+
 test("hides narrow segments unless they are already selected", () => {
   const consoleInstance = new api.APIConsole({dataset: {}});
   consoleInstance.domain = {query_library: {segments: {
