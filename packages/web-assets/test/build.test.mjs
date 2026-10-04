@@ -16,6 +16,8 @@ test("the generated asset manifest covers every shared browser artifact", async 
     assert.equal(createHash("sha256").update(content).digest("hex"), entry.sha256);
   }
   assert.deepEqual(Object.keys(manifest.assets).sort(), [
+    "demo-theme.css",
+    "demo-theme.js",
     "hx-ws.min.js",
     "htmx.min.js",
     "native-dialogs.js",
