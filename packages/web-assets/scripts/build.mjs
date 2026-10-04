@@ -7,6 +7,8 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(packageRoot, "dist");
 const files = [
   ["src/native.css", "native.css"],
+  ["src/demo-theme.js", "demo-theme.js"],
+  ["src/demo-theme.css", "demo-theme.css"],
   ["src/native-dialogs.js", "native-dialogs.js"],
   ["src/perl.css", "perl.css"],
   ["vendor/htmx.min.js", "vendor/htmx.min.js"],

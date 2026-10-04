@@ -104,3 +104,22 @@ test("the Spring components profile ships the Perl stylesheet, dialog helper and
     await rm(target, {recursive: true, force: true});
   }
 });
+
+for (const profile of ["laravel-components", "typescript-components"]) {
+  test(`${profile} uses the Perl theme and preserves the host stylesheet when replacing native assets`, async () => {
+    const target=await mkdtemp(resolve(tmpdir(),"selecto-assets-explorer-"));
+    const run=(...args)=>execFileSync(process.execPath,[resolve(root,"bin/selecto-web-assets.mjs"),"sync","--profile",profile,"--target",target,...args],{stdio:"pipe"});
+    try{
+      await writeFile(resolve(target,"explorer.css"),".host { display: grid; }\n");
+      await writeFile(resolve(target,"selecto.css"),await readFile(resolve(root,"dist/native.css")));
+      run();
+      assert.equal(await readFile(resolve(target,"selecto-components.css"),"utf8"),await readFile(resolve(root,"dist/perl.css"),"utf8"));
+      assert.equal(await readFile(resolve(target,"explorer.css"),"utf8"),".host { display: grid; }\n");
+      await assert.rejects(access(resolve(target,"selecto.css")),{code:"ENOENT"});
+      await assert.rejects(access(resolve(target,"htmx.min.js")),{code:"ENOENT"});
+      run("--check");
+      await writeFile(resolve(target,"selecto-components.css"),"/* stale */\n");
+      assert.throws(()=>run("--check"),/Stale generated Selecto web asset/);
+    }finally{await rm(target,{recursive:true,force:true});}
+  });
+}

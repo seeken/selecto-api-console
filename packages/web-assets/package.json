@@ -16,7 +16,9 @@
     "./perl.css": "./dist/perl.css",
     "./htmx.min.js": "./dist/vendor/htmx.min.js",
     "./hx-ws.min.js": "./dist/vendor/hx-ws.min.js",
-    "./manifest.json": "./dist/manifest.json"
+    "./manifest.json": "./dist/manifest.json",
+    "./demo-theme.js": "./dist/demo-theme.js",
+    "./demo-theme.css": "./dist/demo-theme.css"
   },
   "files": [
     "bin",

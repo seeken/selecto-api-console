@@ -8,6 +8,7 @@ import {fileURLToPath} from "node:url";
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(packageRoot, "dist");
 const profiles = {
+  "demo-theme": [["demo-theme.js", "demo-theme.js"], ["demo-theme.css", "demo-theme.css"]],
   "native-htmx": [
     ["native.css", "selecto.css"],
     ["native-dialogs.js", "selecto-dialogs.js"],
@@ -58,6 +59,14 @@ const profiles = {
     ["perl.css", "selecto-components.css"],
     ["native-dialogs.js", "selecto-dialogs.js"],
     ["vendor/htmx.min.js", "htmx.min.js"]
+  ],
+  "laravel-components": [
+    ["native.css", "selecto-native.css"],
+    ["perl.css", "selecto-components.css"],
+    ["native-dialogs.js", "selecto-dialogs.js"]
+  ],
+  "typescript-components": [
+    ["perl.css", "selecto-components.css"]
   ]
 };
 
@@ -78,6 +87,8 @@ const target = valueFor("--target");
 const check = args.includes("--check");
 if (!profile || !profiles[profile]) usage(`Unknown or missing profile: ${profile ?? ""}`);
 if (!target) usage("Missing --target");
+
+if (profile !== "demo-theme") profiles[profile].push(["demo-theme.js", "demo-theme.js"], ["demo-theme.css", "demo-theme.css"]);
 
 const manifest = JSON.parse(await readFile(resolve(dist, "manifest.json"), "utf8"));
 if (manifest.format !== "selecto.web-assets.v1") throw new Error("Unsupported Selecto web asset manifest");
