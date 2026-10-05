@@ -3,16 +3,16 @@
   "version": "0.6.0",
   "assets": {
     "native.css": {
-      "bytes": 29892,
-      "sha256": "5dea6085a44727223cc55d1602a28f744fb2a1e89a56513267a523da818cfabe"
+      "bytes": 30313,
+      "sha256": "a3ccc620665ba9fe9f6ebeaa70ed0b553b042997bd336642b99a983ff5286c6c"
     },
     "demo-theme.js": {
       "bytes": 5039,
       "sha256": "2fb3fdaad489ce708a1542d4436e6780e0bdd613103b367ffc7f7da72f4762c6"
     },
     "demo-theme.css": {
-      "bytes": 9659,
-      "sha256": "246fb723b10dd322eb79ac78cb730c9b4e1e0fc6f94944199ce274bb22532950"
+      "bytes": 10378,
+      "sha256": "f7c99956fd1a80ac4bc477b1975ae2d187f055b7b78728ff222fa164a243b64d"
     },
     "native-dialogs.js": {
       "bytes": 5268,
