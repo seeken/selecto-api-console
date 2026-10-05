@@ -1,6 +1,8 @@
 /* Opt-in page chrome for every Selecto demo. Generated hosts must not fork it. */
 html[data-selecto-demo-theme] {
   color-scheme: dark;
+  font-size: 14px;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --demo-canvas: #101516;
   --demo-panel: #172023;
   --demo-raised: #1c282b;
@@ -9,6 +11,8 @@ html[data-selecto-demo-theme] {
   --demo-border: #314044;
   --demo-control: #0e1517;
   --demo-accent: #f2b84b;
+  --demo-brand: #f2b84b;
+  --demo-on-brand: #181309;
   --demo-on-accent: #1a1509;
   --demo-link: #55d6be;
 }
@@ -58,9 +62,20 @@ html[data-selecto-demo-theme] .sc-theme-root {
   --sc-text-primary: var(--demo-ink) !important;
   --sc-text-secondary: var(--demo-muted) !important;
   --sc-text-muted: var(--demo-muted) !important;
+  --sc-accent: var(--demo-brand) !important;
+  --sc-accent-hover: #e6a52e !important;
+  --sc-accent-soft: color-mix(in srgb, var(--demo-brand) 12%, var(--demo-panel)) !important;
+  --sc-accent-contrast: var(--demo-on-brand) !important;
+  --sc-focus-ring: color-mix(in srgb, var(--demo-brand) 35%, transparent) !important;
+}
+html[data-selecto-demo-theme] .sc-theme-root .sc-tab-active {
+  background: var(--demo-brand);
+  color: var(--demo-on-brand);
+  border-color: var(--demo-brand);
+  border-radius: 7px;
 }
 /* Native demo landing pages also use muted paper and mint panels. */
-html[data-selecto-demo-theme][data-sc-color-scheme="dark"] :is([class*="bg-[linear-gradient("], [class*="bg-gradient-to-"]) {
+html[data-selecto-demo-theme][data-sc-color-scheme="dark"] :is([class*="bg-[linear-gradient("], [class*="bg-[radial-gradient("], [class*="bg-gradient-to-"]) {
   background-image: none;
   background-color: var(--demo-canvas);
 }

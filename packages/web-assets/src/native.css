@@ -211,8 +211,13 @@ select, input { border: 1px solid var(--line-strong); border-radius: 8px; backgr
 .pie-chart.doughnut { position: relative; }
 .pie-chart.doughnut::after { content: ""; position: absolute; inset: 27%; border-radius: 50%; background: var(--panel); }
 .graph-surface svg { width: 100%; min-height: 280px; overflow: visible; }
-.graph-surface svg rect, .graph-surface svg circle { fill: var(--accent); }
-.graph-surface svg text { fill: var(--muted); font-size: 10px; text-anchor: middle; }
+.graph-surface:not(.rich-graph) svg rect, .graph-surface:not(.rich-graph) svg circle { fill: var(--accent); }
+.graph-surface svg text { fill: var(--muted); font-size: 11px; }
+.graph-surface:not(.rich-graph) svg text { text-anchor: middle; }
+.rich-graph { background: transparent; border: 0; border-radius: 0; padding: 18px; }
+.rich-graph .chart-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; color: var(--muted); font-size: 11px; }
+.rich-graph .chart-legend li { display: inline-flex; gap: 6px; }
+.rich-graph .chart-grid { stroke: var(--line); stroke-width: 1; }
 .chart-line { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linejoin: round; stroke-linecap: round; }
 .chart-area { fill: rgba(242,184,75,.18); stroke: none; }
 .debug-panel { margin-top: 18px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); }
