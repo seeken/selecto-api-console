@@ -1,3 +1,468 @@
+(function(global) {
+global.SelectoCanonicalClient = (function() {
+/** Strict transport validation; host authorization and query policy stay on the host. */
+class CanonicalWireError extends Error {
+  constructor(path, message) {
+    super(`${path}: ${message}`);
+    this.name = "CanonicalWireError";
+    this.code = "invalid_response";
+    this.path = path;
+  }
+}
+
+class CanonicalHttpError extends Error {
+  constructor(status, envelope) {
+    super(envelope.error.message);
+    this.name = "CanonicalHttpError";
+    this.status = status;
+    this.code = envelope.error.code;
+    this.details = envelope.error.details;
+    this.requestId = envelope.meta?.request_id;
+    this.envelope = envelope;
+  }
+}
+
+function safePath(value) {
+  if (typeof value !== "string" || !/^\/(?!\/)[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$/.test(value) || value.includes("//")) {
+    throw new CanonicalWireError("path", "expected an absolute same-origin path");
+  }
+  for (const segment of value.split("/")) {
+    let decoded;
+    try { decoded = decodeURIComponent(segment); } catch { throw new CanonicalWireError("path", "invalid escaping"); }
+    // Encoded separators can be interpreted differently by a proxy or host.
+    if (decoded === "." || decoded === ".." || /[\\/\u0000-\u0020]/.test(decoded)) {
+      throw new CanonicalWireError("path", "unsafe path segment");
+    }
+  }
+  return value;
+}
+
+function record(value, path) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new CanonicalWireError(path, "expected an object");
+  return value;
+}
+function nonEmptyString(value, path) {
+  if (typeof value !== "string" || !value.length) throw new CanonicalWireError(path, "expected a non-empty string");
+  return value;
+}
+function integer(value, path, minimum = 0) {
+  if (!Number.isSafeInteger(value) || value < minimum) throw new CanonicalWireError(path, `expected an integer >= ${minimum}`);
+  return value;
+}
+function bool(value, path) {
+  if (typeof value !== "boolean") throw new CanonicalWireError(path, "expected a boolean");
+}
+function oneOf(value, allowed, path) {
+  if (!allowed.includes(value)) throw new CanonicalWireError(path, `expected one of ${allowed.join(", ")}`);
+}
+function keys(value, allowed, path) {
+  record(value, path);
+  const extra = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (extra.length) throw new CanonicalWireError(path, `unsupported members: ${extra.join(", ")}`);
+}
+function array(value, path) {
+  if (!Array.isArray(value)) throw new CanonicalWireError(path, "expected an array");
+  return value;
+}
+function format(value, expected, path) {
+  record(value, path);
+  if (value.format !== expected || value.format_version !== 1) throw new CanonicalWireError(path, `expected ${expected} version 1`);
+}
+
+function assertCatalog(value) {
+  format(value, "selecto.domain-catalog", "catalog");
+  const ids = new Set();
+  array(value.domains, "catalog.domains").forEach((entry, i) => {
+    record(entry, `catalog.domains.${i}`);
+    nonEmptyString(entry.id, "catalog.domain.id");
+    nonEmptyString(entry.label, "catalog.domain.label");
+    nonEmptyString(entry.publication, "catalog.domain.publication");
+    safePath(entry.manifest);
+    safePath(entry.explorer_metadata);
+    if (ids.has(entry.id)) throw new CanonicalWireError("catalog.domains", "duplicate domain id");
+    ids.add(entry.id);
+  });
+  return value;
+}
+
+function assertManifest(value) {
+  format(value, "selecto.canonical-domain-api", "manifest");
+  record(value.domain, "manifest.domain");
+  nonEmptyString(value.domain.fingerprint, "manifest.domain.fingerprint");
+  const operations = new Set();
+  array(value.routes, "manifest.routes").forEach((route) => {
+    record(route, "manifest.route");
+    nonEmptyString(route.operation_id, "manifest.route.operation_id");
+    nonEmptyString(route.method, "manifest.route.method");
+    // Parameterized write/action routes are outside the read client.
+    if (["queryDomain", "getDomain", "getOpenApi", "getExplorerMetadata", "getDomainCatalog"].includes(route.operation_id)) safePath(route.path);
+    if (operations.has(route.operation_id)) throw new CanonicalWireError("manifest.routes", "duplicate operation id");
+    operations.add(route.operation_id);
+  });
+  array(value.profiles, "manifest.profiles").forEach((profile) => nonEmptyString(profile, "manifest.profile"));
+  if (!value.profiles.includes("remote_query.v1")) throw new CanonicalWireError("manifest.profiles", "remote_query.v1 is required");
+  routePath(value, "queryDomain", "POST");
+  return value;
+}
+
+function routePath(manifest, operation, method) {
+  const route = manifest.routes.find((entry) => entry.operation_id === operation && entry.method.toUpperCase() === method);
+  if (!route) throw new CanonicalWireError("manifest.routes", `missing ${method} ${operation}`);
+  return safePath(route.path);
+}
+
+function assertDomain(value, fingerprint) {
+  record(value, "domain");
+  if (value.domain_fingerprint !== fingerprint) throw new CanonicalWireError("domain.domain_fingerprint", "differs from manifest fingerprint");
+  record(value.source, "domain.source");
+  record(value.source.columns, "domain.source.columns");
+  array(value.source.fields, "domain.source.fields").forEach((field) => nonEmptyString(field, "domain.source.field"));
+  return value;
+}
+
+function assertError(value) {
+  record(value, "error response");
+  if (value.ok !== false) throw new CanonicalWireError("error response.ok", "expected false");
+  record(value.error, "error response.error");
+  nonEmptyString(value.error.code, "error.code");
+  nonEmptyString(value.error.message, "error.message");
+  record(value.error.details, "error.details");
+  if (value.meta !== undefined) {
+    record(value.meta, "error.meta");
+    if (value.meta.request_id !== undefined) nonEmptyString(value.meta.request_id, "error.meta.request_id");
+  }
+  return value;
+}
+
+const columnTypes = ["integer", "decimal", "string", "boolean", "date", "time", "datetime", "uuid", "binary", "json", "unknown"];
+const encodings = ["json", "string", "decimal-string", "rfc3339", "base64"];
+function assertColumn(value, path = "column") {
+  record(value, path);
+  nonEmptyString(value.id, `${path}.id`);
+  nonEmptyString(value.label, `${path}.label`);
+  oneOf(value.type, columnTypes, `${path}.type`);
+  oneOf(value.encoding, encodings, `${path}.encoding`);
+  bool(value.nullable, `${path}.nullable`);
+  return value;
+}
+
+function validDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+function jsonScalar(value) {
+  if (typeof value === "number") return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value));
+  if (value === null || ["string", "boolean"].includes(typeof value)) return true;
+  if (Array.isArray(value)) return value.every(jsonScalar);
+  return value && typeof value === "object" && Object.values(value).every(jsonScalar);
+}
+function assertScalar(value, column, path) {
+  if (value === null) {
+    if (!column.nullable) throw new CanonicalWireError(path, "null in non-nullable column");
+    return;
+  }
+  let valid = false;
+  if (column.encoding === "decimal-string") {
+    valid = typeof value === "string" && (column.type === "integer" ? /^-?(0|[1-9]\d*)$/ : /^-?(0|[1-9]\d*)(\.\d+)?$/).test(value);
+  } else if (column.type === "integer") valid = Number.isSafeInteger(value);
+  else if (column.type === "decimal") valid = typeof value === "number" && Number.isFinite(value);
+  else if (column.type === "boolean") valid = typeof value === "boolean";
+  else if (column.type === "date") valid = typeof value === "string" && validDate(value);
+  else if (column.type === "time") valid = typeof value === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?$/.test(value);
+  else if (column.type === "datetime") valid = typeof value === "string" && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value) && validDate(value.slice(0, 10));
+  else if (column.type === "uuid") valid = typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+  else if (column.type === "binary") valid = typeof value === "string" && column.encoding === "base64" && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+  else if (["json", "unknown"].includes(column.type)) valid = jsonScalar(value);
+  else valid = typeof value === "string";
+  if (!valid) throw new CanonicalWireError(path, `invalid ${column.type}/${column.encoding} value`);
+}
+
+function assertQueryResult(value, fingerprint, query = {}) {
+  record(value, "response");
+  if (value.ok !== true) throw new CanonicalWireError("response.ok", "expected true");
+  const data = record(value.data, "response.data");
+  format(data, "selecto.remote-query-result", "response.data");
+  if (record(data.domain, "response.data.domain").fingerprint !== fingerprint) throw new CanonicalWireError("response.data.domain", "Domain fingerprint drift");
+  const columns = array(data.columns, "response.data.columns");
+  const ids = new Set();
+  columns.forEach((column, i) => {
+    assertColumn(column, `columns.${i}`);
+    if (ids.has(column.id)) throw new CanonicalWireError("columns", "duplicate column id");
+    ids.add(column.id);
+  });
+  const rowFormat = data.row_format ?? "arrays";
+  oneOf(rowFormat, ["arrays", "objects"], "response.data.row_format");
+  if (rowFormat !== (query.row_format ?? "arrays")) throw new CanonicalWireError("response.data.row_format", "does not match request");
+  const rows = array(data.rows, "response.data.rows");
+  rows.forEach((row, i) => {
+    if (rowFormat === "arrays") {
+      if (!Array.isArray(row) || row.length !== columns.length) throw new CanonicalWireError(`rows.${i}`, "row width differs from columns");
+    } else {
+      record(row, `rows.${i}`);
+      if (Object.keys(row).length !== ids.size || Object.keys(row).some((key) => !ids.has(key))) throw new CanonicalWireError(`rows.${i}`, "row keys differ from columns");
+    }
+    columns.forEach((column, j) => assertScalar(rowFormat === "arrays" ? row[j] : row[column.id], column, `rows.${i}.${column.id}`));
+  });
+  if (integer(data.row_count, "response.data.row_count") !== rows.length) throw new CanonicalWireError("row_count", "differs from returned rows");
+  record(data.page, "response.data.page");
+  integer(data.page.limit, "page.limit", 1);
+  integer(data.page.offset, "page.offset");
+  bool(data.page.has_more, "page.has_more");
+  if (rows.length > data.page.limit || (query.limit !== undefined && query.limit !== data.page.limit) || (query.offset !== undefined && query.offset !== data.page.offset)) throw new CanonicalWireError("page", "does not match requested page");
+  return value;
+}
+
+function buildRemoteRequest(fingerprint, query, requestId) {
+  nonEmptyString(fingerprint, "domain.fingerprint");
+  keys(query, ["select", "projection", "view", "filters", "group_by", "segments", "parameters", "order_by", "ordering", "limit", "offset", "timezone", "row_format"], "query");
+  if (["select", "projection", "view"].filter((key) => Object.hasOwn(query, key)).length !== 1) throw new CanonicalWireError("query", "exactly one authoring mode is required");
+  if (query.select !== undefined) {
+    const selected = array(query.select, "query.select");
+    if (!selected.length) throw new CanonicalWireError("query.select", "selection cannot be empty");
+  }
+  if (query.limit !== undefined) { integer(query.limit, "query.limit", 1); if (query.limit > 10000) throw new CanonicalWireError("query.limit", "exceeds protocol maximum"); }
+  if (query.offset !== undefined) integer(query.offset, "query.offset");
+  if (query.row_format !== undefined) oneOf(query.row_format, ["arrays", "objects"], "query.row_format");
+  if (query.timezone !== undefined) nonEmptyString(query.timezone, "query.timezone");
+  if (!jsonScalar(query)) throw new CanonicalWireError("query", "must contain finite JSON values");
+  const result = {format: "selecto.remote-query", format_version: 1, domain: {fingerprint}, query};
+  if (requestId !== undefined) { nonEmptyString(requestId, "request_id"); if (requestId.length > 128) throw new CanonicalWireError("request_id", "too long"); result.request_id = requestId; }
+  return result;
+}
+
+function createCanonicalClient(options = {}) {
+  const baseUrl = safePath((options.baseUrl ?? "/api/v1/selecto").replace(/\/+$/, ""));
+  const transport = options.fetch ?? globalThis.fetch;
+  async function request(path, init = {}) {
+    const headers = new Headers(typeof options.headers === "function" ? options.headers() : options.headers);
+    headers.set("accept", "application/json");
+    if (init.body !== undefined) headers.set("content-type", "application/json");
+    new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+    const response = await transport(safePath(path), {...init, headers, credentials: "same-origin"});
+    const payload = await response.json().catch((error) => {
+      if (error?.name === "AbortError") throw error;
+      throw new CanonicalWireError("response", "server did not return JSON");
+    });
+    if (!response.ok) throw new CanonicalHttpError(response.status, assertError(payload));
+    return {payload, status: response.status, statusText: response.statusText, headers: response.headers};
+  }
+  return {
+    baseUrl,
+    async catalog(signal) { return assertCatalog((await request(options.catalogPath ?? `${baseUrl}/catalog`, {signal})).payload); },
+    async manifest(path = `${baseUrl}/`, signal) { return assertManifest((await request(path, {signal})).payload); },
+    async domain(manifest, signal) { return assertDomain((await request(routePath(manifest, "getDomain", "GET"), {signal})).payload, manifest.domain.fingerprint); },
+    async metadata(path, signal) { return (await request(path, {signal})).payload; },
+    async query(manifest, query, requestOptions = {}) {
+      assertManifest(manifest);
+      const envelope = buildRemoteRequest(requestOptions.fingerprint ?? manifest.domain.fingerprint, query, requestOptions.requestId);
+      const result = await request(routePath(manifest, "queryDomain", "POST"), {method: "POST", body: JSON.stringify(envelope), signal: requestOptions.signal});
+      assertQueryResult(result.payload, envelope.domain.fingerprint, query);
+      return result.payload;
+    },
+    request,
+  };
+}
+
+return {CanonicalWireError,CanonicalHttpError,safePath,record,nonEmptyString,integer,keys,assertCatalog,assertManifest,assertDomain,routePath,assertError,assertColumn,assertScalar,assertQueryResult,buildRemoteRequest,createCanonicalClient};
+})();
+global.SelectoExplorerClient = (function() {
+const canonical = global.SelectoCanonicalClient;
+
+const operatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", is_null: "is_null", is_not_null: "is_not_null"};
+const reverseOperators = Object.fromEntries(Object.entries(operatorMap).map(([key, value]) => [value, key]));
+const {record, nonEmptyString, integer, keys, safePath, CanonicalWireError} = canonical;
+
+class ExplorerIntentError extends Error {
+  constructor(path, message, code = "operation_unsupported") {
+    super(`${path}: ${message}`);
+    this.name = "ExplorerIntentError";
+    this.path = path;
+    this.code = code;
+    this.details = {path};
+  }
+}
+function refuse(path, message, code) { throw new ExplorerIntentError(path, message, code); }
+function isEmpty(value) { return value === undefined || value === null || value === false || (Array.isArray(value) && !value.length) || (typeof value === "object" && !Object.keys(value).length); }
+
+function assertExplorerMetadata(value, manifest, entry, domain) {
+  record(value, "metadata");
+  if (value.format !== "selecto.explorer-metadata" || value.format_version !== 1) throw new CanonicalWireError("metadata", "expected selecto.explorer-metadata version 1");
+  record(value.domain, "metadata.domain");
+  nonEmptyString(value.domain.id, "metadata.domain.id");
+  nonEmptyString(value.domain.fingerprint, "metadata.domain.fingerprint");
+  nonEmptyString(value.domain.publication, "metadata.domain.publication");
+  if (manifest && manifest.domain.fingerprint !== value.domain.fingerprint) throw new CanonicalWireError("metadata.domain.fingerprint", "differs from manifest fingerprint");
+  if (entry && (entry.id !== value.domain.id || entry.publication !== value.domain.publication)) throw new CanonicalWireError("metadata.domain", "differs from catalog publication");
+  nonEmptyString(value.label, "metadata.label");
+  if (!Array.isArray(value.fields) || !value.fields.length) throw new CanonicalWireError("metadata.fields", "expected non-empty fields");
+  const ids = new Set();
+  const paths = new Set();
+  value.fields.forEach((field, i) => {
+    canonical.assertColumn(field, `metadata.fields.${i}`);
+    nonEmptyString(field.path, `metadata.fields.${i}.path`);
+    if (domain && (!domain.source.fields.includes(field.path) || !Object.hasOwn(domain.source.columns, field.path))) throw new CanonicalWireError(`metadata.fields.${i}.path`, "field absent from canonical publication");
+    if (ids.has(field.id) || paths.has(field.path)) throw new CanonicalWireError("metadata.fields", "duplicate field id or path");
+    ids.add(field.id); paths.add(field.path);
+  });
+  if (!Array.isArray(value.default_select) || value.default_select.some((id) => !ids.has(id)) || new Set(value.default_select).size !== value.default_select.length) throw new CanonicalWireError("metadata.default_select", "expected unique published field IDs");
+  record(value.query, "metadata.query");
+  if (value.query.profile !== "remote_query.v1") throw new CanonicalWireError("metadata.query.profile", "requires remote_query.v1");
+  if (!Array.isArray(value.query.operators) || value.query.operators.some((op) => typeof op !== "string")) throw new CanonicalWireError("metadata.query.operators", "expected operator IDs");
+  record(value.query.supports, "metadata.query.supports");
+  for (const key of ["detail", "nested", "recursive_filters", "aggregates"]) if (typeof value.query.supports[key] !== "boolean") throw new CanonicalWireError(`metadata.query.supports.${key}`, "expected boolean");
+  if (!value.query.supports.detail) throw new CanonicalWireError("metadata.query.supports.detail", "Detail profile unavailable");
+  record(value.query.limits, "metadata.query.limits");
+  integer(value.query.limits.max_limit, "metadata.query.limits.max_limit", 1);
+  integer(value.query.limits.max_offset, "metadata.query.limits.max_offset");
+  integer(value.query.limits.max_filters, "metadata.query.limits.max_filters");
+  record(value.services, "metadata.services");
+  if (value.links !== undefined) {
+    record(value.links, "metadata.links");
+    if (value.links.api_console !== undefined) {
+      nonEmptyString(value.links.api_console, "metadata.links.api_console");
+      safePath(value.links.api_console.split("?")[0]);
+      if (value.links.api_console.includes("#")) throw new CanonicalWireError("metadata.links.api_console", "fragments are reserved for request handoff");
+    }
+  }
+  return value;
+}
+
+function toExplorerDescriptor(metadata) {
+  assertExplorerMetadata(metadata);
+  return {
+    schema: "selecto.spa.domain-descriptor/v1", schemaVersion: 1,
+    id: metadata.domain.id, name: metadata.label, source: metadata.label,
+    capabilities: ["detail"], protocolFeatures: metadata.links?.api_console ? ["api_console"] : [],
+    fields: metadata.fields.map((field) => ({id: field.id, label: field.label, type: field.type === "string" ? "text" : field.type === "binary" ? "text" : field.type, encoding: field.encoding, selectable: true, sortable: true, groupable: false, aggregatable: false,
+      filterOperators: metadata.query.operators.map((op) => reverseOperators[op]).filter(Boolean)})),
+    views: [{id: "detail", kind: "detail", label: "Detail"}],
+    defaults: {selected: metadata.default_select.slice(), orderBy: [], groupBy: [], aggregates: [], rollup: true, preventDenormalization: true},
+    release: {schema: "selecto.domain-publication/v1", id: metadata.domain.publication, version: metadata.domain.fingerprint, fingerprint: metadata.domain.fingerprint, status: "published"},
+    ...(metadata.links?.api_console ? {artifacts: {apiConsole: metadata.links.api_console}} : {}),
+    metadata: {canonical: {profile: metadata.query.profile, fingerprint: metadata.domain.fingerprint, publication: metadata.domain.publication, supports: {...metadata.query.supports}, limits: {...metadata.query.limits}}},
+  };
+}
+
+/** Translate the bounded Detail profile; never discard unsupported semantics. */
+function toCanonicalQuery(request, metadata) {
+  assertExplorerMetadata(metadata);
+  keys(request, ["schema", "domainId", "view", "state", "filters", "page", "presentation", "publication", "exportShape"], "request");
+  if (request.schema !== "selecto.spa.query-request/v1") refuse("request.schema", "unknown SPA request version", "invalid_query");
+  if (request.domainId !== metadata.domain.id) refuse("request.domainId", "does not match publication", "invalid_query");
+  if (request.view !== "detail") refuse("request.view", "only Detail is supported");
+  if (request.publication !== undefined) {
+    keys(request.publication, ["fingerprint", "publication"], "request.publication");
+    if (request.publication.fingerprint !== metadata.domain.fingerprint || (request.publication.publication !== undefined && request.publication.publication !== metadata.domain.publication)) refuse("request.publication", "publication changed; reload the domain", "stale_domain_fingerprint");
+  }
+  if (request.exportShape !== undefined) refuse("request.exportShape", "export is not available");
+  const state = record(request.state, "request.state");
+  keys(state, ["selected", "preventDenormalization", "rowClickAction", "fieldConfigs", "orderBy", "groupBy", "groupConfigs", "rollup", "aggregateGrid", "aggregateGridColorize", "aggregateGridColorScale", "columns", "aggregates", "graph", "queryLibrary"], "request.state");
+  for (const key of ["groupBy", "groupConfigs", "aggregates", "graph", "queryLibrary", "aggregateGrid", "aggregateGridColorize", "aggregateGridColorScale"]) if (!isEmpty(state[key])) refuse(`request.state.${key}`, "requires a richer profile");
+  if (state.preventDenormalization !== undefined && state.preventDenormalization !== true) refuse("request.state.preventDenormalization", "denormalization is unavailable");
+  if (state.rowClickAction && state.rowClickAction !== "__default_modal__") refuse("request.state.rowClickAction", "configured row actions are unavailable");
+  if (state.columns !== undefined && !isEmpty(state.columns)) refuse("request.state.columns", "repeated/formatted columns require a richer profile");
+  if (!isEmpty(state.fieldConfigs)) refuse("request.state.fieldConfigs", "formatted columns require a richer profile");
+  const byId = new Map(metadata.fields.map((field) => [field.id, field]));
+  function field(id, path) {
+    const value = byId.get(id);
+    if (!value) refuse(path, `unresolved field ${JSON.stringify(id)}`, "invalid_field");
+    return value;
+  }
+  if (!Array.isArray(state.selected) || !state.selected.length || new Set(state.selected).size !== state.selected.length) refuse("request.state.selected", "expected unique non-empty fields", "invalid_query");
+  const query = {select: state.selected.map((id) => field(id, "request.state.selected").path)};
+  const filters = record(request.filters, "request.filters");
+  keys(filters, ["conjunction", "items"], "request.filters");
+  if (filters.conjunction !== "and" || !Array.isArray(filters.items)) refuse("request.filters", "only flat AND filters are supported");
+  if (filters.items.length > metadata.query.limits.max_filters) refuse("request.filters", "exceeds advertised filter limit", "invalid_query");
+  query.filters = filters.items.map((filter, index) => {
+    const path = `request.filters.items.${index}`;
+    if (filter?.items !== undefined || filter?.conjunction !== undefined) refuse(path, "recursive filters require a richer profile");
+    keys(filter, ["id", "field", "operator", "value", "valueTo", "promoted", "groupConfig"], path);
+    if (filter.valueTo !== undefined || !isEmpty(filter.groupConfig)) refuse(path, "range/grouping semantics require a richer profile");
+    const op = operatorMap[filter.operator];
+    if (!op || !metadata.query.operators.includes(op)) refuse(`${path}.operator`, "operator not supported by this profile");
+    const result = {field: field(filter.field, `${path}.field`).path, op};
+    if (!["is_null", "is_not_null"].includes(op)) {
+      if (!Object.hasOwn(filter, "value")) refuse(`${path}.value`, "a value is required", "invalid_query");
+      result.value = filter.value;
+    } else if (filter.value !== undefined && filter.value !== null && filter.value !== "") refuse(`${path}.value`, "null test cannot carry a value", "invalid_query");
+    return result;
+  });
+  if (!Array.isArray(state.orderBy)) refuse("request.state.orderBy", "expected an array", "invalid_query");
+  query.order_by = state.orderBy.map((order, index) => {
+    keys(order, ["field", "direction"], `request.state.orderBy.${index}`);
+    if (!["asc", "desc"].includes(order.direction)) refuse("request.state.orderBy", "invalid direction", "invalid_query");
+    return {field: field(order.field, "request.state.orderBy").path, direction: order.direction};
+  });
+  keys(request.page, ["number", "size"], "request.page");
+  integer(request.page.number, "request.page.number", 1); integer(request.page.size, "request.page.size", 1);
+  query.limit = request.page.size;
+  query.offset = (request.page.number - 1) * request.page.size;
+  if (!Number.isSafeInteger(query.offset) || query.limit > metadata.query.limits.max_limit || query.offset > metadata.query.limits.max_offset) refuse("request.page", "exceeds advertised paging limits", "invalid_query");
+  if (request.presentation !== undefined) {
+    keys(request.presentation, ["timezone", "locale"], "request.presentation");
+    if (request.presentation.timezone !== undefined) {
+      nonEmptyString(request.presentation.timezone, "request.presentation.timezone");
+      query.timezone = request.presentation.timezone;
+    }
+    if (request.presentation.locale !== undefined) nonEmptyString(request.presentation.locale, "request.presentation.locale");
+  }
+  canonical.buildRemoteRequest(metadata.domain.fingerprint, query);
+  return query;
+}
+
+function toExplorerResult(envelope, request, metadata) {
+  const query = toCanonicalQuery(request, metadata);
+  canonical.assertQueryResult(envelope, metadata.domain.fingerprint, query);
+  const byPath = new Map(metadata.fields.map((field) => [field.path, field]));
+  const columns = envelope.data.columns.map((column) => {
+    const field = byPath.get(column.field ?? column.id);
+    if (!field) throw new CanonicalWireError("response.columns", "unresolved canonical field");
+    return {id: field.id, label: column.label, type: column.type === "string" ? "text" : column.type === "binary" ? "text" : column.type, encoding: column.encoding};
+  });
+  if (columns.length !== query.select.length || columns.some((column, i) => column.id !== request.state.selected[i])) throw new CanonicalWireError("response.columns", "selection differs from requested fields");
+  const rows = envelope.data.rows.map((row) => Object.fromEntries(envelope.data.columns.map((column, i) => [columns[i].id, Array.isArray(row) ? row[i] : row[column.id]])));
+  return {schema: "selecto.spa.query-response/v1", columns, rows,
+    page: {number: request.page.number, size: request.page.size},
+    metadata: {canonical: {fingerprint: metadata.domain.fingerprint, publication: metadata.domain.publication, hasMore: envelope.data.page.has_more}},
+  };
+}
+
+function createExplorerClient(options = {}) {
+  const client = canonical.createCanonicalClient(options);
+  // Discovery is refreshed before every query. No authenticated publication is
+  // reused across a changed cookie/session or across client instances.
+  async function publication(id, signal) {
+    const catalog = await client.catalog(signal);
+    const entry = catalog.domains.find((domain) => domain.id === id);
+    if (!entry) refuse("domainId", "domain is unavailable in the current publication", "operation_forbidden");
+    const [manifest, value] = await Promise.all([client.manifest(entry.manifest, signal), client.metadata(entry.explorer_metadata, signal)]);
+    const domain = await client.domain(manifest, signal);
+    return {manifest, metadata: assertExplorerMetadata(value, manifest, entry, domain)};
+  }
+  return {
+    async listDomains() {
+      const catalog = await client.catalog();
+      return Promise.all(catalog.domains.map(async (entry) => {
+        const [manifest, value] = await Promise.all([client.manifest(entry.manifest), client.metadata(entry.explorer_metadata)]);
+        const domain = await client.domain(manifest);
+        return toExplorerDescriptor(assertExplorerMetadata(value, manifest, entry, domain));
+      }));
+    },
+    async getDomain(id) { return toExplorerDescriptor((await publication(id)).metadata); },
+    async execute(request, requestOptions = {}) {
+      const {manifest, metadata} = await publication(request.domainId, requestOptions.signal);
+      const query = toCanonicalQuery(request, metadata);
+      const result = await client.query(manifest, query, requestOptions);
+      return toExplorerResult(result, request, metadata);
+    },
+  };
+}
+
+return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanonicalQuery,toExplorerResult,createExplorerClient};
+})();
+})(typeof globalThis !== 'undefined' ? globalThis : this);
 (function (global) {
   "use strict";
 
@@ -618,6 +1083,32 @@
         this.actionPath = discovery.actionPath;
         this.access = discovery.access;
         this.queryResponseFormats = discovery.queryResponseFormats;
+        this.remoteMode = Array.isArray(this.manifest.profiles) && this.manifest.profiles.includes("remote_query.v1");
+        if (this.remoteMode) {
+          global.SelectoCanonicalClient.assertManifest(this.manifest);
+          global.SelectoCanonicalClient.assertDomain(this.domain, this.manifest.domain.fingerprint);
+          const catalogRoute = this.manifest.routes.find((route) => route.operation_id === "getDomainCatalog" && route.method === "GET");
+          this.canonicalClient = global.SelectoCanonicalClient.createCanonicalClient({
+            baseUrl: this.base,
+            ...(catalogRoute ? {catalogPath: catalogRoute.path} : {}),
+            headers: () => ({"X-CSRF-Token": this.csrfToken}),
+          });
+          const metadataRoute = this.manifest.routes.find((route) => route.operation_id === "getExplorerMetadata" && route.method === "GET");
+          if (metadataRoute) {
+            this.explorerMetadata = global.SelectoExplorerClient.assertExplorerMetadata(
+              await this.canonicalClient.metadata(metadataRoute.path), this.manifest, undefined, this.domain,
+            );
+            if (catalogRoute) {
+              const catalog = await this.canonicalClient.catalog();
+              const entry = catalog.domains.find((domain) => domain.id === this.explorerMetadata.domain.id);
+              if (!entry) throw new Error("This domain is not in the current authenticated catalog.");
+              global.SelectoExplorerClient.assertExplorerMetadata(this.explorerMetadata, this.manifest, entry);
+            }
+          }
+          // Remote v1 results have one JSON envelope. Legacy downloads retain
+          // their existing explicit bare-query mode on hosts without the profile.
+          this.queryResponseFormats = [Object.assign({}, QUERY_RESPONSE_FORMATS[0])];
+        }
         this.state.responseFormat = this.queryResponseFormats[0].id;
         this.state.responseFilename = suggestedDownloadFilename(
           this.domain.name, this.responseFormat(this.state.responseFormat).extension,
@@ -846,7 +1337,7 @@
                 </div>
                 <div class="sac-import-message" data-sac-import-message hidden></div>
                 <textarea class="sac-request-editor" spellcheck="false" aria-label="Query request" data-sac-request></textarea>
-                <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
+                <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button" data-sac-cancel-query hidden>Cancel query</button><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
               </section>
               <section class="sac-response-card">
                 <div class="sac-response-heading">
@@ -1982,7 +2473,9 @@
       payload.row_format = this.state.rowFormat;
       payload.limit = Number.parseInt(this.state.limit, 10) || 0;
       payload.offset = Number.parseInt(this.state.offset, 10) || 0;
-      return payload;
+      return this.remoteMode
+        ? global.SelectoCanonicalClient.buildRemoteRequest(this.manifest.domain.fingerprint, payload)
+        : payload;
     }
 
     buildResourceRequest() {
@@ -2018,6 +2511,13 @@
 
     chooserStateFromPayload(payload) {
       if (!isPlainObject(payload)) throw new Error("The request must be a JSON object.");
+      if (payload.schema === "selecto.spa.query-request/v1") {
+        if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
+        payload = global.SelectoExplorerClient.toCanonicalQuery(payload, this.explorerMetadata);
+      } else if (payload.format === "selecto.remote-query") {
+        if (payload.format_version !== 1 || !payload.domain || payload.domain.fingerprint !== this.manifest.domain.fingerprint) throw new Error("The request targets a different Domain fingerprint.");
+        payload = payload.query;
+      }
       const allowed = ["select", "projection", "view", "segments", "parameters", "filters", "ordering", "order_by", "timezone", "row_format", "limit", "offset"];
       const unknown = onlyKeys(payload, allowed);
       if (unknown.length) throw new Error(`Unsupported request properties: ${unknown.join(", ")}.`);
@@ -2214,7 +2714,13 @@
       this.root.querySelector("[data-sac-query-path]").textContent = this.queryPath;
       this.root.querySelector("[data-sac-run]").disabled = false;
       if (this.state.rawDirty && !force) return;
-      this.root.querySelector("[data-sac-request]").value = JSON.stringify(this.buildPayload(), null, 2);
+      try {
+        this.root.querySelector("[data-sac-request]").value = JSON.stringify(this.buildPayload(), null, 2);
+      } catch (error) {
+        this.root.querySelector("[data-sac-run]").disabled = true;
+        this.setImportMessage(error.message, "error");
+        return;
+      }
       this.state.rawDirty = false;
       this.root.querySelector("[data-sac-edited]").hidden = true;
       if (force) this.setImportMessage("", "");
@@ -3052,6 +3558,7 @@
       if (event.target.closest("[data-sac-load-json]")) return this.loadRequestIntoChooser();
       if (event.target.closest("[data-sac-reset-json]")) return this.syncRequest(true);
       if (event.target.closest("[data-sac-run]")) return this.run();
+      if (event.target.closest("[data-sac-cancel-query]")) return this.cancelQuery();
       if (event.target.closest("[data-sac-add-write-filter]")) {
         const primaryKey = this.domain && this.domain.source && this.domain.source.primary_key || "id";
         this.writeState.filters.push({field: primaryKey, op: "eq", value: ""});
@@ -3382,9 +3889,34 @@
       this.root.querySelector("[data-sac-run-label]").textContent = "Running…";
       this.setStatus("Running query", "running");
       const started = performance.now();
+      this.queryController?.abort();
+      const sequence = this.querySequence = (this.querySequence || 0) + 1;
+      const controller = this.queryController = new AbortController();
+      const cancel = this.root.querySelector("[data-sac-cancel-query]");
+      if (cancel) cancel.hidden = false;
       let response;
       let payload;
       try {
+        if (this.remoteMode) {
+          let query;
+          let fingerprint = this.manifest.domain.fingerprint;
+          let requestId;
+          if (request.schema === "selecto.spa.query-request/v1") {
+            if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
+            query = global.SelectoExplorerClient.toCanonicalQuery(request, this.explorerMetadata);
+          } else if (request.format === "selecto.remote-query") {
+            global.SelectoCanonicalClient.keys(request, ["format", "format_version", "domain", "query", "request_id"], "request");
+            if (request.format_version !== 1) throw new Error("Unsupported remote query version.");
+            global.SelectoCanonicalClient.keys(request.domain, ["fingerprint"], "request.domain");
+            fingerprint = request.domain.fingerprint;
+            query = request.query;
+            requestId = request.request_id;
+          } else {
+            query = request;
+          }
+          payload = await this.canonicalClient.query(this.manifest, query, {fingerprint, requestId, signal: controller.signal});
+          response = {status: 200, statusText: "OK", ok: true};
+        } else {
         const requestPath = format.id === "json"
           ? this.queryPath : pathWithDownloadFilename(this.queryPath, filenameValidation.value);
         response = await fetch(requestPath, {
@@ -3392,6 +3924,7 @@
           credentials: "same-origin",
           headers: {"Content-Type": "application/json", Accept: format.mediaType, "X-CSRF-Token": this.csrfToken},
           body: JSON.stringify(request),
+          signal: controller.signal,
         });
         if (response.ok && format.id !== "json") {
           const blob = await response.blob();
@@ -3410,19 +3943,35 @@
             payload = {ok: false, error: {code: "invalid_response", message: text || "Empty response", details: {}}};
           }
         }
+        }
+        if (sequence !== this.querySequence) return;
         const elapsed = Math.round(performance.now() - started);
         this.state.response = payload;
         this.renderResponse(payload);
         this.setStatus(`${response.status} ${response.statusText} · ${elapsed} ms`, response.ok ? "success" : "error");
       } catch (error) {
-        this.state.response = {ok: false, error: {code: "network_error", message: error.message, details: {}}};
+        if (sequence !== this.querySequence) return;
+        this.state.response = error.envelope || {ok: false, error: {code: error.name === "AbortError" ? "cancelled" : error.code || "network_error", message: error.message, details: error.details || {}}};
         this.renderResponse(this.state.response);
-        this.setStatus("Network error", "error");
+        this.setStatus(error.status ? `${error.status} · ${error.code}` : error.message, "error");
       } finally {
+        if (sequence !== this.querySequence) return;
         button.disabled = false;
         button.classList.remove("is-running");
         this.root.querySelector("[data-sac-run-label]").textContent = "Run query";
+        if (cancel) cancel.hidden = true;
       }
+    }
+
+    cancelQuery() {
+      this.querySequence = (this.querySequence || 0) + 1;
+      this.queryController?.abort();
+      const button = this.root.querySelector("[data-sac-run]");
+      button.disabled = false;
+      button.classList.remove("is-running");
+      this.root.querySelector("[data-sac-run-label]").textContent = "Run query";
+      this.root.querySelector("[data-sac-cancel-query]").hidden = true;
+      this.setStatus("Query cancelled in this browser", "error");
     }
 
     async runResource() {

@@ -1,0 +1,13 @@
+{
+  "name": "@selecto/explorer-client",
+  "version": "0.1.0",
+  "description": "Framework-neutral Detail Explorer adapter for Selecto canonical APIs",
+  "type": "module",
+  "license": "Artistic-2.0",
+  "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "dependencies": {"@selecto/canonical-client": "0.1.0"},
+  "scripts": {"build": "node ../../scripts/build-client.mjs explorer-client", "test": "node --test"},
+  "engines": {"node": ">=18"}
+}
