@@ -1,0 +1,12 @@
+{
+  "name": "@selecto/canonical-client",
+  "version": "0.1.0",
+  "description": "Framework-neutral, fingerprint-bound Selecto remote query client",
+  "type": "module",
+  "license": "Artistic-2.0",
+  "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "scripts": {"build": "node ../../scripts/build-client.mjs canonical-client", "test": "node --test"},
+  "engines": {"node": ">=18"}
+}

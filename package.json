@@ -24,9 +24,9 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "build:all": "npm run build && npm run build --workspace @selecto/web-assets",
-    "test": "npm run build:all && node --test test/*.test.cjs && npm test --workspace @selecto/web-assets",
-    "pack:check": "npm run test && npm pack --dry-run && npm pack --dry-run --workspace @selecto/web-assets"
+    "build:all": "npm run build --workspaces && npm run build",
+    "test": "npm run build:all && node --test test/*.test.cjs && npm test --workspaces",
+    "pack:check": "npm run test && npm pack --dry-run && npm pack --dry-run --workspaces && node scripts/pack-clients-check.mjs"
   },
   "engines": {
     "node": ">=18"

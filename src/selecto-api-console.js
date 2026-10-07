@@ -618,6 +618,32 @@
         this.actionPath = discovery.actionPath;
         this.access = discovery.access;
         this.queryResponseFormats = discovery.queryResponseFormats;
+        this.remoteMode = Array.isArray(this.manifest.profiles) && this.manifest.profiles.includes("remote_query.v1");
+        if (this.remoteMode) {
+          global.SelectoCanonicalClient.assertManifest(this.manifest);
+          global.SelectoCanonicalClient.assertDomain(this.domain, this.manifest.domain.fingerprint);
+          const catalogRoute = this.manifest.routes.find((route) => route.operation_id === "getDomainCatalog" && route.method === "GET");
+          this.canonicalClient = global.SelectoCanonicalClient.createCanonicalClient({
+            baseUrl: this.base,
+            ...(catalogRoute ? {catalogPath: catalogRoute.path} : {}),
+            headers: () => ({"X-CSRF-Token": this.csrfToken}),
+          });
+          const metadataRoute = this.manifest.routes.find((route) => route.operation_id === "getExplorerMetadata" && route.method === "GET");
+          if (metadataRoute) {
+            this.explorerMetadata = global.SelectoExplorerClient.assertExplorerMetadata(
+              await this.canonicalClient.metadata(metadataRoute.path), this.manifest, undefined, this.domain,
+            );
+            if (catalogRoute) {
+              const catalog = await this.canonicalClient.catalog();
+              const entry = catalog.domains.find((domain) => domain.id === this.explorerMetadata.domain.id);
+              if (!entry) throw new Error("This domain is not in the current authenticated catalog.");
+              global.SelectoExplorerClient.assertExplorerMetadata(this.explorerMetadata, this.manifest, entry);
+            }
+          }
+          // Remote v1 results have one JSON envelope. Legacy downloads retain
+          // their existing explicit bare-query mode on hosts without the profile.
+          this.queryResponseFormats = [Object.assign({}, QUERY_RESPONSE_FORMATS[0])];
+        }
         this.state.responseFormat = this.queryResponseFormats[0].id;
         this.state.responseFilename = suggestedDownloadFilename(
           this.domain.name, this.responseFormat(this.state.responseFormat).extension,
@@ -846,7 +872,7 @@
                 </div>
                 <div class="sac-import-message" data-sac-import-message hidden></div>
                 <textarea class="sac-request-editor" spellcheck="false" aria-label="Query request" data-sac-request></textarea>
-                <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
+                <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button" data-sac-cancel-query hidden>Cancel query</button><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
               </section>
               <section class="sac-response-card">
                 <div class="sac-response-heading">
@@ -1982,7 +2008,9 @@
       payload.row_format = this.state.rowFormat;
       payload.limit = Number.parseInt(this.state.limit, 10) || 0;
       payload.offset = Number.parseInt(this.state.offset, 10) || 0;
-      return payload;
+      return this.remoteMode
+        ? global.SelectoCanonicalClient.buildRemoteRequest(this.manifest.domain.fingerprint, payload)
+        : payload;
     }
 
     buildResourceRequest() {
@@ -2018,6 +2046,13 @@
 
     chooserStateFromPayload(payload) {
       if (!isPlainObject(payload)) throw new Error("The request must be a JSON object.");
+      if (payload.schema === "selecto.spa.query-request/v1") {
+        if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
+        payload = global.SelectoExplorerClient.toCanonicalQuery(payload, this.explorerMetadata);
+      } else if (payload.format === "selecto.remote-query") {
+        if (payload.format_version !== 1 || !payload.domain || payload.domain.fingerprint !== this.manifest.domain.fingerprint) throw new Error("The request targets a different Domain fingerprint.");
+        payload = payload.query;
+      }
       const allowed = ["select", "projection", "view", "segments", "parameters", "filters", "ordering", "order_by", "timezone", "row_format", "limit", "offset"];
       const unknown = onlyKeys(payload, allowed);
       if (unknown.length) throw new Error(`Unsupported request properties: ${unknown.join(", ")}.`);
@@ -2214,7 +2249,13 @@
       this.root.querySelector("[data-sac-query-path]").textContent = this.queryPath;
       this.root.querySelector("[data-sac-run]").disabled = false;
       if (this.state.rawDirty && !force) return;
-      this.root.querySelector("[data-sac-request]").value = JSON.stringify(this.buildPayload(), null, 2);
+      try {
+        this.root.querySelector("[data-sac-request]").value = JSON.stringify(this.buildPayload(), null, 2);
+      } catch (error) {
+        this.root.querySelector("[data-sac-run]").disabled = true;
+        this.setImportMessage(error.message, "error");
+        return;
+      }
       this.state.rawDirty = false;
       this.root.querySelector("[data-sac-edited]").hidden = true;
       if (force) this.setImportMessage("", "");
@@ -3052,6 +3093,7 @@
       if (event.target.closest("[data-sac-load-json]")) return this.loadRequestIntoChooser();
       if (event.target.closest("[data-sac-reset-json]")) return this.syncRequest(true);
       if (event.target.closest("[data-sac-run]")) return this.run();
+      if (event.target.closest("[data-sac-cancel-query]")) return this.cancelQuery();
       if (event.target.closest("[data-sac-add-write-filter]")) {
         const primaryKey = this.domain && this.domain.source && this.domain.source.primary_key || "id";
         this.writeState.filters.push({field: primaryKey, op: "eq", value: ""});
@@ -3382,9 +3424,34 @@
       this.root.querySelector("[data-sac-run-label]").textContent = "Running…";
       this.setStatus("Running query", "running");
       const started = performance.now();
+      this.queryController?.abort();
+      const sequence = this.querySequence = (this.querySequence || 0) + 1;
+      const controller = this.queryController = new AbortController();
+      const cancel = this.root.querySelector("[data-sac-cancel-query]");
+      if (cancel) cancel.hidden = false;
       let response;
       let payload;
       try {
+        if (this.remoteMode) {
+          let query;
+          let fingerprint = this.manifest.domain.fingerprint;
+          let requestId;
+          if (request.schema === "selecto.spa.query-request/v1") {
+            if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
+            query = global.SelectoExplorerClient.toCanonicalQuery(request, this.explorerMetadata);
+          } else if (request.format === "selecto.remote-query") {
+            global.SelectoCanonicalClient.keys(request, ["format", "format_version", "domain", "query", "request_id"], "request");
+            if (request.format_version !== 1) throw new Error("Unsupported remote query version.");
+            global.SelectoCanonicalClient.keys(request.domain, ["fingerprint"], "request.domain");
+            fingerprint = request.domain.fingerprint;
+            query = request.query;
+            requestId = request.request_id;
+          } else {
+            query = request;
+          }
+          payload = await this.canonicalClient.query(this.manifest, query, {fingerprint, requestId, signal: controller.signal});
+          response = {status: 200, statusText: "OK", ok: true};
+        } else {
         const requestPath = format.id === "json"
           ? this.queryPath : pathWithDownloadFilename(this.queryPath, filenameValidation.value);
         response = await fetch(requestPath, {
@@ -3392,6 +3459,7 @@
           credentials: "same-origin",
           headers: {"Content-Type": "application/json", Accept: format.mediaType, "X-CSRF-Token": this.csrfToken},
           body: JSON.stringify(request),
+          signal: controller.signal,
         });
         if (response.ok && format.id !== "json") {
           const blob = await response.blob();
@@ -3410,19 +3478,35 @@
             payload = {ok: false, error: {code: "invalid_response", message: text || "Empty response", details: {}}};
           }
         }
+        }
+        if (sequence !== this.querySequence) return;
         const elapsed = Math.round(performance.now() - started);
         this.state.response = payload;
         this.renderResponse(payload);
         this.setStatus(`${response.status} ${response.statusText} · ${elapsed} ms`, response.ok ? "success" : "error");
       } catch (error) {
-        this.state.response = {ok: false, error: {code: "network_error", message: error.message, details: {}}};
+        if (sequence !== this.querySequence) return;
+        this.state.response = error.envelope || {ok: false, error: {code: error.name === "AbortError" ? "cancelled" : error.code || "network_error", message: error.message, details: error.details || {}}};
         this.renderResponse(this.state.response);
-        this.setStatus("Network error", "error");
+        this.setStatus(error.status ? `${error.status} · ${error.code}` : error.message, "error");
       } finally {
+        if (sequence !== this.querySequence) return;
         button.disabled = false;
         button.classList.remove("is-running");
         this.root.querySelector("[data-sac-run-label]").textContent = "Run query";
+        if (cancel) cancel.hidden = true;
       }
+    }
+
+    cancelQuery() {
+      this.querySequence = (this.querySequence || 0) + 1;
+      this.queryController?.abort();
+      const button = this.root.querySelector("[data-sac-run]");
+      button.disabled = false;
+      button.classList.remove("is-running");
+      this.root.querySelector("[data-sac-run-label]").textContent = "Run query";
+      this.root.querySelector("[data-sac-cancel-query]").hidden = true;
+      this.setStatus("Query cancelled in this browser", "error");
     }
 
     async runResource() {

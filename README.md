@@ -126,6 +126,23 @@ current principal.
 
 ## Development
 
+The workspace also builds `@selecto/canonical-client` and
+`@selecto/explorer-client`, dependency-free ESM packages with TypeScript
+declarations. Their built sources are included in the existing standalone
+Console script so vendoring hosts do not need an additional script tag.
+
+When a host advertises `remote_query.v1`, the Console sends fingerprint-bound
+query envelopes through the shared canonical client and validates exact result
+codecs. Published `getExplorerMetadata` and `getDomainCatalog` routes bind
+Explorer handoff to the same authenticated publication. An Explorer fragment
+retains its execution timezone and publication; unsupported intent is refused
+explicitly. Hosts without the profile retain the existing bare read mode;
+write, action, resource and importer surfaces retain their existing contracts.
+
+`Cancel query` stops waiting in this browser. A sequence guard prevents a late
+response from replacing a newer result. The UI does not claim database query
+cancellation.
+
 ```sh
 npm test
 npm run pack:check
