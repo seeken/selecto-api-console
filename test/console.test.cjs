@@ -435,6 +435,28 @@ test("discovers governed write and action routes", async () => {
   ]);
 });
 
+test("discovers the canonical getResource route", async () => {
+  const discovered = await api.discoverCanonicalAPI("/api2/load/v1", async (path) => {
+    if (path.endsWith("/")) return {routes: [
+      {operation_id: "getDomain", path: "/api2/load/v1/domain"},
+      {operation_id: "queryDomain", path: "/api2/load/v1/query"},
+      {method: "GET", operation_id: "getResource", path: "/api2/load/v1/resources/{id}"},
+    ]};
+    if (path.endsWith("/domain")) return {source: {columns: {}}};
+    return {openapi: "3.1.0", paths: {}};
+  });
+  assert.equal(discovered.resourcePath, "/api2/load/v1/resources/{id}");
+});
+
+test("offers POST and GET as radio buttons, not a select", () => {
+  const source = fs.readFileSync(require.resolve("../dist/selecto-api-console.js"), "utf8");
+  assert.match(source, /<input type="radio" name="sac-query-method" value="post" data-sac-query-method>/);
+  assert.match(source, /<input type="radio" name="sac-query-method" value="get" data-sac-query-method>/);
+  assert.doesNotMatch(source, /<select id="sac-query-method"/);
+  assert.match(source, /choose Aggregate Version, when the domain publishes it/);
+  assert.match(source, /\[data-sac-query-method-group\]"\)\.hidden = !this\.resourcePath/);
+});
+
 test("uses safe response download filenames", () => {
   assert.equal(api.downloadFilename('attachment; filename="orders-query.csv"', "query.csv"), "orders-query.csv");
   assert.equal(api.downloadFilename('attachment; filename="../../unsafe name.csv"', "query.csv"), "unsafe name.csv");
