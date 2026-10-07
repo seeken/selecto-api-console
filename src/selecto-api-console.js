@@ -1947,7 +1947,7 @@
 
     filterPayloads(filter) {
       const field = this.filterFieldMap.get(filter.field);
-      const payload = {field: filter.field, op: filter.op};
+      const payload = {field: filter.field, op: this.remoteMode && filter.op === "not_null" ? "is_not_null" : filter.op};
       if (filter.op === "date_shortcut") {
         payload.value = filter.value;
         return [payload];
@@ -2001,11 +2001,13 @@
         if (value !== undefined && value !== "") parameters[name] = value;
       });
       if (Object.keys(parameters).length) payload.parameters = parameters;
-      if (this.state.filters.length) payload.filters = this.state.filters.flatMap((filter) => this.filterPayloads(filter));
+      if (this.state.filters.length || this.remoteMode) payload.filters = this.state.filters.flatMap((filter) => this.filterPayloads(filter));
       if (this.state.ordering) payload.ordering = this.state.ordering;
-      else if (this.state.orders.length) payload.order_by = this.state.orders.map((order) => ({field: order.field, direction: order.direction}));
+      else if (this.state.orders.length || this.remoteMode) payload.order_by = this.state.orders.map((order) => ({field: order.field, direction: order.direction}));
       if (String(this.state.timezone || "").trim()) payload.timezone = String(this.state.timezone).trim();
-      payload.row_format = this.state.rowFormat;
+      // The shared Detail adapter uses the protocol's array default. Keep
+      // handoff intent identical while retaining the explicit object choice.
+      if (!this.remoteMode || this.state.rowFormat !== "arrays") payload.row_format = this.state.rowFormat;
       payload.limit = Number.parseInt(this.state.limit, 10) || 0;
       payload.offset = Number.parseInt(this.state.offset, 10) || 0;
       return this.remoteMode
@@ -2155,6 +2157,7 @@
         if (!Array.isArray(payload.filters)) throw new Error("filters must be an array.");
         draft.filters = payload.filters.map((filter) => {
           if (!isPlainObject(filter)) throw new Error("Each filter must be a JSON object.");
+          if (this.remoteMode && filter.op === "is_not_null") filter = {...filter, op: "not_null"};
           const extra = onlyKeys(filter, ["field", "op", "value", "end"]);
           if (extra.length) throw new Error(`Unsupported filter properties: ${extra.join(", ")}.`);
           const field = this.filterFieldMap.get(filter.field);

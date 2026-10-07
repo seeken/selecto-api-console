@@ -5,7 +5,7 @@ const {APIConsole, renderValue} = require("../dist/selecto-api-console.js");
 const metadata = {format: "selecto.explorer-metadata", format_version: 1,
   domain: {id: "items", fingerprint: "fp", publication: "alpha"}, label: "Items",
   fields: [{id: "source.id", path: "id", label: "Id", type: "integer", encoding: "json", nullable: false}],
-  default_select: ["source.id"], query: {profile: "remote_query.v1", operators: ["eq"], limits: {max_limit: 100, max_offset: 100000, max_filters: 20}, supports: {detail: true, nested: false, recursive_filters: false, aggregates: false}}, services: {}};
+  default_select: ["source.id"], query: {profile: "remote_query.v1", operators: ["eq", "is_not_null"], limits: {max_limit: 100, max_offset: 100000, max_filters: 20}, supports: {detail: true, nested: false, recursive_filters: false, aggregates: false}}, services: {}};
 
 function instance() {
   const console = new APIConsole({dataset: {apiBase: "/api/items"}});
@@ -42,13 +42,34 @@ test("Explorer handoff preserves timezone/publication and rejects unrepresentabl
     filters: {conjunction: "and", items: []}, page: {number: 2, size: 30},
     presentation: {timezone: "America/Denver"}, publication: {fingerprint: "fp", publication: "alpha"}};
   console.loadPayloadIntoChooser(request);
-  assert.equal(console.buildPayload().query.timezone, "America/Denver");
-  assert.equal(console.buildPayload().query.offset, 30);
+  assert.deepEqual(console.buildPayload().query, {
+    select: ["id"], filters: [], order_by: [], limit: 30, offset: 30,
+    timezone: "America/Denver",
+  });
   const before = structuredClone(console.state);
   for (const changed of [{...request, publication: {fingerprint: "fp", publication: "beta"}}, {...request, filters: {conjunction: "or", items: []}}]) {
     assert.throws(() => console.loadPayloadIntoChooser(changed));
     assert.deepEqual(console.state, before);
   }
+});
+
+test("current nonempty Explorer fragment retains the shared canonical intent through the chooser", () => {
+  const console = instance();
+  const request = {schema: "selecto.spa.query-request/v1", domainId: "items", view: "detail",
+    state: {selected: ["source.id"], orderBy: [{field: "source.id", direction: "desc"}], groupBy: [], aggregates: []},
+    filters: {conjunction: "and", items: [{id: "current", field: "source.id", operator: "equals", value: 2}]},
+    page: {number: 3, size: 2}, presentation: {timezone: "UTC"}, publication: {fingerprint: "fp", publication: "alpha"}};
+  const hash = `#request=${encodeURIComponent(JSON.stringify(request))}`;
+  const {requestPayloadFromLocation} = require("../dist/selecto-api-console.js");
+  console.loadPayloadIntoChooser(requestPayloadFromLocation({hash}));
+  assert.deepEqual(console.buildPayload().query, globalThis.SelectoExplorerClient.toCanonicalQuery(request, metadata));
+  console.state.rowFormat = "objects";
+  assert.equal(console.buildPayload().query.row_format, "objects");
+
+  request.filters.items = [{id: "nonnull", field: "source.id", operator: "is_not_null"}];
+  console.loadPayloadIntoChooser(request);
+  assert.deepEqual(console.buildPayload().query, globalThis.SelectoExplorerClient.toCanonicalQuery(request, metadata));
+  assert.equal(console.state.filters[0].op, "not_null", "preserve the existing chooser selector value");
 });
 
 test("cancelled late requests cannot replace a newer rendered Console result", async () => {
