@@ -151,3 +151,14 @@ npm run pack:check
 `src/` is the source of truth. `dist/` is deterministic generated output and
 includes `manifest.json` with byte counts and SHA-256 digests for consumers
 that vendor the package into another distribution.
+
+Hosts advertising the separately bound root predicate sidecar expose an explicit
+Recursive root predicates (v2) option in Console. The raw query editor preserves
+entered JSON bytes after strict validation. Complete trees stay in that editor;
+Load into chooser visibly refuses conversion where the flat form cannot retain
+all intent. Root predicate state controls restore the separate closed state,
+copy a complete state URL, or save/restore private browser state. URL handoff uses
+the existing `#request=` key with the full root-state envelope. Discovery and
+publication binding refresh before execution; changed identity blocks retained
+state instead of silently rebinding. The ordinary flat v1 chooser, snapshots,
+writes, actions and legacy bare query behavior remain separate.

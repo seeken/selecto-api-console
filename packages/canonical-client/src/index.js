@@ -26,7 +26,7 @@ export function safePath(value) {
   }
   for (const segment of value.split("/")) {
     let decoded;
-    try { decoded = decodeURIComponent(segment); } catch { throw new CanonicalWireError("path", "invalid escaping"); }
+    try { decoded = segment; for (let pass = 0; pass < 16; pass++) { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next; if (pass === 15) throw new Error("escaping depth"); } } catch { throw new CanonicalWireError("path", "invalid escaping"); }
     // Encoded separators can be interpreted differently by a proxy or host.
     if (decoded === "." || decoded === ".." || /[\\/\u0000-\u0020]/.test(decoded)) {
       throw new CanonicalWireError("path", "unsafe path segment");
@@ -93,7 +93,7 @@ export function assertManifest(value) {
     nonEmptyString(route.operation_id, "manifest.route.operation_id");
     nonEmptyString(route.method, "manifest.route.method");
     // Parameterized write/action routes are outside the read client.
-    if (["queryDomain", "getDomain", "getOpenApi", "getExplorerMetadata", "getDomainCatalog"].includes(route.operation_id)) safePath(route.path);
+    if (["queryDomain", "getDomain", "getOpenApi", "getExplorerMetadata", "getDomainCatalog", "getRootPredicateFeatures"].includes(route.operation_id)) safePath(route.path);
     if (operations.has(route.operation_id)) throw new CanonicalWireError("manifest.routes", "duplicate operation id");
     operations.add(route.operation_id);
   });
@@ -237,8 +237,8 @@ export function createCanonicalClient(options = {}) {
     headers.set("accept", "application/json");
     if (init.body !== undefined) headers.set("content-type", "application/json");
     new Headers(init.headers).forEach((value, key) => headers.set(key, value));
-    const response = await transport(safePath(path), {...init, headers, credentials: "same-origin"});
-    const payload = await response.json().catch((error) => {
+    const response = await transport(safePath(path), {...init, headers, credentials: "same-origin", redirect: "error"});
+    const payload = await response.arrayBuffer().then((bytes) => parseStrictJSON(new TextDecoder("utf-8", {fatal:true}).decode(bytes), {maxBytes: Number.POSITIVE_INFINITY})).catch((error) => {
       if (error?.name === "AbortError") throw error;
       throw new CanonicalWireError("response", "server did not return JSON");
     });
@@ -258,6 +258,256 @@ export function createCanonicalClient(options = {}) {
       assertQueryResult(result.payload, envelope.domain.fingerprint, query);
       return result.payload;
     },
+    async rootPredicateFeatures(manifest, signal) {
+      if (!manifest.profiles.includes("remote_query.v2")) throw new CanonicalWireError("manifest.profiles", "remote_query.v2 unavailable");
+      return assertRootPredicateFeatures((await request(routePath(manifest,"getRootPredicateFeatures","GET"), {signal})).payload);
+    },
+    async queryRootPredicate(manifest, query, requestOptions = {}) {
+      const envelope = buildRootPredicateRequest(requestOptions.fingerprint ?? manifest.domain.fingerprint,query,requestOptions);
+      return this.queryText(manifest,JSON.stringify(envelope),requestOptions);
+    },
+    async queryText(manifest, text, requestOptions = {}) {
+      const parsed = parseCanonicalRequestText(text,{manifest,features:requestOptions.features});
+      const result = await request(routePath(manifest,"queryDomain","POST"),{method:"POST",body:parsed.raw,signal:requestOptions.signal});
+      if (parsed.request.format_version === 2) assertRootPredicateResult(result.payload,{fingerprint:parsed.request.domain.fingerprint,query:parsed.request.query,features:requestOptions.features});
+      else assertQueryResult(result.payload,parsed.request.domain.fingerprint,parsed.request.query);
+      return result.payload;
+    },
     request,
   };
+}
+
+/** Unicode scalar validation, without replacing malformed UTF-16. */
+export function assertUnicode(value, path = "string", maximum = Infinity, allowNul = false) {
+  if (typeof value !== "string") throw new CanonicalWireError(path, "expected a string");
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(++i);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new CanonicalWireError(path, "unpaired UTF-16 surrogate");
+    } else if (code >= 0xdc00 && code <= 0xdfff) throw new CanonicalWireError(path, "unpaired UTF-16 surrogate");
+  }
+  if (!allowNul && value.includes("\0")) throw new CanonicalWireError(path, "NUL is unavailable");
+  if (new TextEncoder().encode(value).length > maximum) throw new CanonicalWireError(path, "UTF-8 byte limit exceeded");
+  return value;
+}
+
+/** Parse structure once, reject decoded duplicate keys, and retain numeric lexemes. */
+export function parseStrictJSON(text, options = {}) {
+  assertUnicode(text, "JSON", options.maxBytes ?? 1048576, true);
+  let at = 0;
+  const numberTokens = new Map();
+  const fail = (message) => { throw new CanonicalWireError("JSON", `${message} at character ${at}`); };
+  const space = () => { while (/[\t\n\r ]/.test(text[at] ?? "x")) at++; };
+  function string() {
+    const start = at++;
+    while (at < text.length) {
+      const c = text[at++];
+      if (c === '"') {
+        let value;
+        try { value = JSON.parse(text.slice(start, at)); } catch { fail("invalid string"); }
+        assertUnicode(value, "JSON string", Infinity, true);
+        return value;
+      }
+      if (c === "\\") at++;
+    }
+    fail("unterminated string");
+  }
+  function value(path, depth) {
+    if (depth > 128) fail("JSON nesting limit exceeded");
+    space(); const c = text[at];
+    if (c === '"') return string();
+    if (c === "{") {
+      at++; space(); const result = {}; const seen = new Set();
+      if (text[at] === "}") {at++; return result;}
+      while (true) {
+        space(); if (text[at] !== '"') fail("object key required");
+        const key = string(); if (seen.has(key)) fail(`duplicate key ${JSON.stringify(key)}`); seen.add(key);
+        space(); if (text[at++] !== ":") fail("colon required");
+        Object.defineProperty(result, key, {value: value(`${path}/${key.replace(/~/g,"~0").replace(/\//g,"~1")}`, depth + 1), enumerable:true, writable:true, configurable:true});
+        space(); const next = text[at++]; if (next === "}") return result; if (next !== ",") fail("comma required");
+      }
+    }
+    if (c === "[") {
+      at++; space(); const result = []; if (text[at] === "]") {at++; return result;}
+      while (true) {
+        result.push(value(`${path}/${result.length}`, depth + 1)); space(); const next = text[at++];
+        if (next === "]") return result; if (next !== ",") fail("comma required");
+      }
+    }
+    for (const [literal, decoded] of [["true",true],["false",false],["null",null]]) if (text.startsWith(literal, at)) {at += literal.length; return decoded;}
+    const token = text.slice(at).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!token) fail("value required");
+    at += token[0].length; numberTokens.set(path, token[0]);
+    const decoded = Number(token[0]); if (!Number.isFinite(decoded)) fail("non-finite number"); return decoded;
+  }
+  const decoded = value("", 0); space(); if (at !== text.length) fail("unexpected trailing input");
+  return options.tokens ? {value: decoded, numberTokens} : decoded;
+}
+
+const rootOps = ["eq", "ne", "gt", "gte", "lt", "lte", "is_null", "is_not_null"];
+const rootLimits = {max_limit:100, default_limit:100, max_offset:100000, default_offset:0, max_nodes:20, max_depth:4, root_depth:1, max_select:100, max_orders:10, max_string_utf8_bytes:16384, max_raw_request_bytes:1048576};
+const rootSupports = {where:true, and:true, or:true, flat_filters:false, nested:false, not:false, ranges:false, named_definitions:false, analytics:false};
+function exactKeys(value, required, path) {
+  keys(value, required, path);
+  if (required.some((key) => !Object.hasOwn(value, key))) throw new CanonicalWireError(path, "missing required member");
+}
+function rootPair(field, path) {
+  const allowed = {integer:["json","decimal-string"],decimal:["decimal-string"],string:["string"],boolean:["json"],date:["string"]};
+  if (!allowed[field.type]?.includes(field.encoding)) throw new CanonicalWireError(path, "unsupported type/encoding pair");
+  if (typeof field.nullable !== "boolean") throw new CanonicalWireError(path, "nullable must be boolean");
+}
+export function canonicalRootFields(domain) {
+  record(domain?.source?.columns, "domain.source.columns");
+  return array(domain.source.fields, "domain.source.fields").map((path) => {
+    const column = record(domain.source.columns[path], `domain.source.columns.${path}`);
+    const type = ({int:"integer",bigint:"integer",text:"string",varchar:"string",numeric:"decimal",bool:"boolean"})[column.type] ?? column.type;
+    return {path, type, encoding: column.encoding ?? ({integer:"json",decimal:"decimal-string",boolean:"json",string:"string",date:"string"})[type], nullable: column.nullable ?? false};
+  });
+}
+
+export function assertRootPredicateFeatures(value, context) {
+  exactKeys(value, ["format","format_version","domain","profile","revision","wire_profile","request_format_version","result","fields","default_select","limits","supports"], "features");
+  format(value, "selecto.root-predicate-features", "features");
+  if (value.profile !== "canonical_root_predicates.v1" || value.wire_profile !== "remote_query.v2" || value.request_format_version !== 2) throw new CanonicalWireError("features.profile", "unsupported root predicate profile");
+  assertUnicode(nonEmptyString(value.revision, "features.revision"), "features.revision");
+  exactKeys(value.domain, ["id","fingerprint","publication"], "features.domain");
+  Object.values(value.domain).forEach((item) => assertUnicode(nonEmptyString(item,"features.domain"),"features.domain"));
+  exactKeys(value.result, ["format","format_version"], "features.result"); format(value.result,"selecto.remote-query-result","features.result");
+  for (const [name, expected] of [["limits",rootLimits],["supports",rootSupports]]) {
+    exactKeys(value[name],Object.keys(expected),`features.${name}`);
+    for (const [key, wanted] of Object.entries(expected)) if (value[name][key] !== wanted) throw new CanonicalWireError(`features.${name}.${key}`, "unsupported capability or bound");
+  }
+  const ids = new Set(), paths = new Set();
+  const fields = array(value.fields,"features.fields"); if (!fields.length) throw new CanonicalWireError("features.fields","empty fields");
+  fields.forEach((field, i) => {
+    const path = `features.fields.${i}`;
+    exactKeys(field,["id","path","label","type","encoding","nullable","operators"],path);
+    assertUnicode(nonEmptyString(field.id,`${path}.id`),`${path}.id`,16384);
+    assertUnicode(nonEmptyString(field.label,`${path}.label`),`${path}.label`,16384);
+    if (typeof field.path !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.path)) throw new CanonicalWireError(`${path}.path`,"expected public root path");
+    rootPair(field,path);
+    const ops = array(field.operators,`${path}.operators`);
+    const supported = field.type === "boolean" ? ["eq","ne","is_null","is_not_null"] : rootOps;
+    if (!ops.length || new Set(ops).size !== ops.length || ops.some((op) => !supported.includes(op))) throw new CanonicalWireError(`${path}.operators`,"unsupported operators");
+    if (ids.has(field.id) || paths.has(field.path)) throw new CanonicalWireError(path,"duplicate field ID or path"); ids.add(field.id); paths.add(field.path);
+  });
+  const selected = array(value.default_select,"features.default_select");
+  if (!selected.length || selected.length > 100 || new Set(selected).size !== selected.length || selected.some((id) => !ids.has(id))) throw new CanonicalWireError("features.default_select","unresolved or duplicate default selection");
+  if (context) {
+    const expected = context.domain ?? context.metadata?.domain;
+    if (!expected || ["id","fingerprint","publication"].some((key) => expected[key] !== value.domain[key])) throw new CanonicalWireError("features.domain","publication binding mismatch");
+    if ((context.profile !== undefined && context.profile !== value.profile) || (context.revision !== undefined && context.revision !== value.revision)) throw new CanonicalWireError("features.revision","active feature binding mismatch");
+    if (context.manifest && (!context.manifest.profiles.includes("remote_query.v2") || context.manifest.domain.fingerprint !== value.domain.fingerprint)) throw new CanonicalWireError("features.domain","manifest binding mismatch");
+    const published = context.canonical_fields ?? (context.canonicalDomain ? canonicalRootFields(context.canonicalDomain) : undefined);
+    if (!published) throw new CanonicalWireError("features.fields","canonical field context required");
+    const byPath = new Map(published.map((field) => [field.path,field]));
+    fields.forEach((field) => {
+      const actual = byPath.get(field.path);
+      if (!actual || ["type","encoding","nullable"].some((key) => actual[key] !== field[key])) throw new CanonicalWireError("features.fields","canonical path/type/codec binding mismatch");
+    });
+  }
+  return value;
+}
+
+export function assertRootScalar(value, field, path = "value", author = false) {
+  rootPair(field,path);
+  if (typeof value === "string") assertUnicode(value,path,16384);
+  if (author && typeof value !== "string" && typeof value !== "boolean") throw new CanonicalWireError(path,"author scalar must be typed text or boolean");
+  let valid = false;
+  if (field.type === "integer") {
+    if (typeof value === "number") valid = Number.isSafeInteger(value);
+    else if (typeof value === "string" && /^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(value)) {
+      const exact = BigInt(value); valid = exact >= -9223372036854775808n && exact <= 9223372036854775807n;
+    }
+  } else if (field.type === "decimal") valid = typeof value === "number" ? Number.isSafeInteger(value) : typeof value === "string" && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value);
+  else if (field.type === "boolean") valid = typeof value === "boolean";
+  else if (field.type === "string") valid = typeof value === "string";
+  else if (field.type === "date") valid = typeof value === "string" && !value.startsWith("0000-") && validDate(value);
+  if (!valid) throw new CanonicalWireError(path,`invalid exact ${field.type} scalar`);
+  return value;
+}
+
+export function assertRootPredicateQuery(query, features, options = {}) {
+  assertRootPredicateFeatures(features);
+  keys(query,["select","where","order_by","limit","offset","timezone","row_format"],"query");
+  const byPath = new Map(features.fields.map((field) => [field.path,field]));
+  const selected = array(query.select,"query.select");
+  if (!selected.length || selected.length > 100 || new Set(selected).size !== selected.length || selected.some((path) => !byPath.has(path))) throw new CanonicalWireError("query.select","unresolved, duplicate or excessive root selection");
+  let count = 0;
+  function node(value, depth, path) {
+    record(value,path); if (++count > 20 || depth > 4) throw new CanonicalWireError(path,"predicate node/depth bound exceeded");
+    const group = ["and","or"].filter((key) => Object.hasOwn(value,key));
+    if (group.length) {
+      exactKeys(value,group.length === 1 ? group : [],path);
+      const children = array(value[group[0]],path); if (!children.length) throw new CanonicalWireError(path,"empty executable group");
+      children.forEach((child,i) => node(child,depth+1,`${path}/${group[0]}/${i}`)); return;
+    }
+    const nullOp = ["is_null","is_not_null"].includes(value.op);
+    exactKeys(value,nullOp ? ["field","op"] : ["field","op","value"],path);
+    const field = byPath.get(value.field); if (!field) throw new CanonicalWireError(path,"unresolved root field");
+    if (!field.operators.includes(value.op)) throw new CanonicalWireError(path,"operator unavailable for field");
+    if (!nullOp) {
+      assertRootScalar(value.value,field,`${path}/value`);
+      const token = options.numberTokens?.get(`${path}/value`);
+      if (token && !/^-?(?:0|[1-9]\d*)$/.test(token)) throw new CanonicalWireError(path,"fraction/exponent numeric token unavailable");
+    }
+  }
+  if (Object.hasOwn(query,"where")) node(query.where,1,"/query/where");
+  if (Object.hasOwn(query,"order_by")) {
+    const orders = array(query.order_by,"query.order_by"); if (orders.length > 10) throw new CanonicalWireError("query.order_by","order bound exceeded");
+    const seen = new Set(); orders.forEach((order) => {exactKeys(order,["field","direction"],"order"); if (!byPath.has(order.field) || seen.has(order.field) || !["asc","desc"].includes(order.direction)) throw new CanonicalWireError("order","invalid or duplicate root order"); seen.add(order.field);});
+  }
+  for (const [key,max,min] of [["limit",100,1],["offset",100000,0]]) if (Object.hasOwn(query,key)) {
+    integer(query[key],`query.${key}`,min); if (query[key] > max) throw new CanonicalWireError(`query.${key}`,"paging bound exceeded");
+    const token = options.numberTokens?.get(`/query/${key}`); if (token && !/^(?:0|[1-9]\d*)$/.test(token)) throw new CanonicalWireError(`query.${key}`,"integer token required");
+  }
+  if (Object.hasOwn(query,"row_format")) oneOf(query.row_format,["arrays","objects"],"query.row_format");
+  if (Object.hasOwn(query,"timezone")) assertTimezone(query.timezone);
+  return query;
+}
+export function assertTimezone(value) {
+  assertUnicode(nonEmptyString(value,"timezone"),"timezone",16384);
+  try { new Intl.DateTimeFormat("en-US",{timeZone:value}); } catch { throw new CanonicalWireError("timezone","unknown IANA timezone"); }
+  return value;
+}
+function assertRootRequestId(value) {
+  assertUnicode(nonEmptyString(value,"request_id"),"request_id",128);
+  if (/[\r\n]/.test(value)) throw new CanonicalWireError("request_id","line breaks unavailable");
+}
+export function buildRootPredicateRequest(fingerprint, query, options = {}) {
+  assertUnicode(nonEmptyString(fingerprint,"domain.fingerprint"),"domain.fingerprint");
+  if (!options.features) throw new CanonicalWireError("features","root feature context required");
+  assertRootPredicateQuery(query,options.features);
+  const request = {format:"selecto.remote-query",format_version:2,domain:{fingerprint},query};
+  if (options.requestId !== undefined) {assertRootRequestId(options.requestId); request.request_id = options.requestId;}
+  parseStrictJSON(JSON.stringify(request));
+  return request;
+}
+export function parseCanonicalRequestText(text, context) {
+  const {value,numberTokens} = parseStrictJSON(text,{tokens:true});
+  exactKeys(value,Object.hasOwn(value,"request_id") ? ["format","format_version","domain","query","request_id"] : ["format","format_version","domain","query"],"request");
+  if (value.format !== "selecto.remote-query") throw new CanonicalWireError("request.format","remote envelope required");
+  exactKeys(value.domain,["fingerprint"],"request.domain"); assertUnicode(nonEmptyString(value.domain.fingerprint,"request.domain.fingerprint"),"request.domain.fingerprint");
+  if (value.request_id !== undefined) assertRootRequestId(value.request_id);
+  if (value.format_version === 2) {
+    if (numberTokens.get("/format_version") !== "2" || !context.manifest?.profiles.includes("remote_query.v2")) throw new CanonicalWireError("request.format_version","root v2 unavailable or noninteger token");
+    if (!context.features) throw new CanonicalWireError("features","root features unavailable");
+    assertRootPredicateQuery(value.query,context.features,{numberTokens});
+  } else if (value.format_version === 1) buildRemoteRequest(value.domain.fingerprint,value.query,value.request_id);
+  else throw new CanonicalWireError("request.format_version","unsupported protocol version");
+  return {request:value,raw:text};
+}
+export function assertRootPredicateResult(value, context) {
+  const {fingerprint,query,features} = context;
+  assertQueryResult(value,fingerprint,query);
+  const byPath = new Map(features.fields.map((field) => [field.path,field]));
+  if (value.data.columns.length !== query.select.length) throw new CanonicalWireError("response.columns","selection width mismatch");
+  value.data.columns.forEach((column,i) => {
+    const field = byPath.get(query.select[i]);
+    if (!field || column.id !== field.path || column.field !== field.path || column.label !== field.label || column.type !== field.type || column.nullable !== field.nullable || !(column.encoding === field.encoding || (field.type === "integer" && field.encoding === "json" && column.encoding === "decimal-string"))) throw new CanonicalWireError("response.columns","selection/type/codec binding mismatch");
+
+  });
+  if (value.data.page.limit !== (query.limit ?? 100) || value.data.page.offset !== (query.offset ?? 0)) throw new CanonicalWireError("response.page","effective page mismatch");
+  return value;
 }
