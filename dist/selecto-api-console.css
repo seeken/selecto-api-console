@@ -629,3 +629,14 @@ code, pre, textarea.sac-request-editor {
 .sac-root-controls label { display: block; margin: .5rem 0; }
 .sac-root-controls textarea { width: 100%; min-height: 12rem; font-family: monospace; }
 .sac-root-controls button { margin: .25rem .5rem .25rem 0; }
+
+.sac-nested-builder { border: 1px solid var(--sac-border); border-radius: .6rem; padding: 1rem; margin-bottom: 1rem; }
+.sac-nested-builder label { display: block; margin: .5rem 0; }
+.sac-nested-selected li { padding: .3rem 0; }
+.sac-nested-selected button { margin-left: .5rem; }
+.sac-nested-filter { display: flex; flex-wrap: wrap; align-items: end; gap: .5rem; }
+.sac-nested-schema, .sac-nested-results { width: 100%; border-collapse: collapse; }
+.sac-nested-schema th, .sac-nested-results th, .sac-nested-results td { padding: .35rem .5rem; white-space: pre-wrap; }
+.sac-nested-schema { margin-top: .4rem; font-weight: normal; }
+.sac-table-wrap .sac-nested-scalar { white-space: pre-wrap; }
+.sac-table-wrap .sac-nested-header, .sac-table-wrap .sac-nested-schema th, .sac-table-wrap .sac-nested-results th { text-transform: none; }

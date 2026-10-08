@@ -77,6 +77,16 @@
     return payload;
   }
 
+  function nestedStateFromLocation(locationLike) {
+    const slots = new URLSearchParams(String(locationLike && locationLike.hash || "").replace(/^#/, ""));
+    const values = slots.getAll("nested_request");
+    if (!values.length) return null;
+    if (values.length !== 1 || slots.has("request") || [...slots.keys()].some(key => key !== "nested_request")) {
+      throw new Error("Nested URL state requires exactly one isolated nested_request slot.");
+    }
+    return {raw: values[0], state: global.SelectoExplorerClient.decodeNestedDetailState(values[0])};
+  }
+
   function normalizeCurlAuth(value, fallback) {
     const candidate = String(value || fallback || "cookie").trim().toLowerCase();
     if (!CURL_AUTH_MODES.has(candidate)) {
@@ -601,6 +611,10 @@
       };
       this.nextFilterId = 1;
       this.nextOrderId = 1;
+      this.queryProfile = "flat";
+      this.profileDrafts = {};
+      this.nestedState = null;
+      this.nextNestedFilterId = 1;
       this.writeState = {
         operation: "", assignments: {}, included: {}, filters: [],
         expectedCount: 1, returning: [], conflictTarget: [], updateFields: [],
@@ -650,11 +664,18 @@
           // their existing explicit bare-query mode on hosts without the profile.
           this.queryResponseFormats = [Object.assign({}, QUERY_RESPONSE_FORMATS[0])];
         }
-        if (this.remoteMode && this.explorerMetadata) {
+        if (this.remoteMode) {
           const catalogRoute = this.manifest.routes.find((route) => route.operation_id === "getDomainCatalog" && route.method === "GET");
           this.explorerClient = global.SelectoExplorerClient.createExplorerClient({baseUrl:this.base,
             ...(catalogRoute ? {catalogPath:catalogRoute.path} : {}),headers:() => ({"X-CSRF-Token":this.csrfToken})});
-          if (this.manifest.profiles.includes("remote_query.v2")) this.rootPredicateContext = await this.explorerClient.getRootPredicateContext(this.explorerMetadata.domain.id);
+          if (this.explorerMetadata && this.manifest.profiles.includes("remote_query.v2")) this.rootPredicateContext = await this.explorerClient.getRootPredicateContext(this.explorerMetadata.domain.id);
+          if (this.manifest.routes.some(route => route.operation_id === "getNestedDetailFeatures" && route.method === "GET")) {
+            try {
+              const features = await this.canonicalClient.nestedDetailFeatures(this.manifest);
+              this.nestedDomainId = features.domain.id;
+              this.nestedDetailContext = await this.explorerClient.getNestedDetailContext(this.nestedDomainId);
+            } catch (error) { this.nestedAvailabilityError = error.message; }
+          }
         }
         this.state.responseFormat = this.queryResponseFormats[0].id;
         this.state.responseFilename = suggestedDownloadFilename(
@@ -668,15 +689,31 @@
         const initialRequestRaw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
         let initialRequest = null;
         let initialRequestError = null;
+        let initialNested = null;
         try {
-          initialRequest = requestPayloadFromLocation(global.location);
+          initialNested = nestedStateFromLocation(global.location);
+          if (!initialNested) initialRequest = requestPayloadFromLocation(global.location);
           if (initialRequest && initialRequest.format !== "selecto.root-predicate-state") this.loadPayloadIntoChooser(initialRequest);
         } catch (error) {
           initialRequestError = error;
           this.blockedInitialRequestText = initialRequestRaw;
+          if (new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).has("nested_request")) {
+            this.blockedInitialRequestText = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("nested_request");
+            this.nestedInitialError = error;
+          }
         }
         this.render();
-        if (initialRequest?.format === "selecto.root-predicate-state") {
+        if (initialNested) {
+          await this.restoreNestedState(initialNested.raw);
+        } else if (this.nestedInitialError) {
+          this.queryProfile = "nested";
+          this.nestedBlocked = true;
+          this.root.querySelector("[data-sac-request]").value = this.blockedInitialRequestText || "";
+          const stateEditor = this.root.querySelector("[data-sac-nested-state]");
+          if (stateEditor) stateEditor.value = this.blockedInitialRequestText || "";
+          this.applyQueryProfile();
+          this.setImportMessage(`Nested state blocked: ${this.nestedInitialError.message}`, "error");
+        } else if (initialRequest?.format === "selecto.root-predicate-state") {
           const raw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
           await this.restoreRootState(raw);
         } else if (initialRequestError) {
@@ -893,13 +930,19 @@
                 </div>
                 <div class="sac-import-message" data-sac-import-message hidden></div>
                 ${this.remoteMode ? `<div class="sac-root-controls">
-                  <label>Query profile<select aria-label="Query profile" data-sac-root-mode><option value="flat">Flat Detail (v1)</option><option value="root" ${this.rootPredicateContext ? "" : "disabled"}>Recursive root predicates (v2)</option></select></label>
+                  <label>Query profile<select aria-label="Query profile" data-sac-root-mode><option value="flat">Flat Detail (v1)</option><option value="root" ${this.rootPredicateContext ? "" : "disabled"}>Recursive root predicates (v2)</option><option value="nested" ${this.nestedDetailContext ? "" : "disabled"}>Complete nested Detail (v1)</option></select></label>
                   <p data-sac-root-availability>${this.rootPredicateContext ? "Recursive root predicates available; opt in explicitly." : "Recursive root predicates unavailable on this publication."}</p>
+                  <p data-sac-nested-availability></p>
                   <details><summary>Root predicate state</summary><label>Root predicate state<textarea aria-label="Root predicate state" data-sac-root-state spellcheck="false"></textarea></label>
                     <button type="button" data-sac-root-restore>Restore root state</button><button type="button" data-sac-root-link>Copy root state link</button>
                     <button type="button" data-sac-root-save>Save private root state</button><button type="button" data-sac-root-private>Restore private root state</button>
                   </details>
+                  <details data-sac-nested-state-controls><summary>Nested Detail state</summary><label>Nested Detail state<textarea aria-label="Nested Detail state" data-sac-nested-state spellcheck="false"></textarea></label>
+                    <button type="button" data-sac-nested-restore>Restore nested state</button><button type="button" data-sac-nested-link>Copy nested state link</button>
+                    <button type="button" data-sac-nested-save>Save private nested state</button><button type="button" data-sac-nested-private>Restore private nested state</button>
+                  </details>
                 </div>` : ""}
+                <section class="sac-nested-builder" data-sac-nested-builder hidden></section>
                 <textarea class="sac-request-editor" spellcheck="false" aria-label="Query request" data-sac-request></textarea>
                 <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button" data-sac-cancel-query hidden>Cancel query</button><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
               </section>
@@ -994,6 +1037,10 @@
         this.state.responseFormat,
       );
       this.bind();
+      const nestedAvailability = this.root.querySelector("[data-sac-nested-availability]");
+      if (nestedAvailability) nestedAvailability.textContent = this.nestedDetailContext
+        ? "Complete nested Detail available; opt in explicitly."
+        : `Complete nested Detail unavailable on this publication.${this.nestedAvailabilityError ? ` ${this.nestedAvailabilityError}` : ""}`;
       this.populateLibraryControls();
       this.seedMutationState();
       this.renderAll();
@@ -1994,6 +2041,13 @@
     }
 
     buildPayload() {
+      if (this.queryProfile === "nested") {
+        if (this.nestedBlocked || !this.nestedState) throw new Error("Nested state remains blocked; restore valid bound state or explicitly start a new draft.");
+        const context = this.nestedDetailContext;
+        const query = global.SelectoExplorerClient.toNestedDetailQuery(this.nestedState.intent, context);
+        return global.SelectoCanonicalClient.buildNestedDetailRequest(this.nestedState.intent.binding.fingerprint, query,
+          {features: context.features, context: global.SelectoCanonicalClient.nestedDetailContext(context.features)});
+      }
       if (this.rootMode && !this.rootState) throw new Error("Root state remains blocked; restore valid bound state or explicitly select Flat Detail.");
       if (this.rootState && this.rootMode) {
         const query = global.SelectoExplorerClient.toRootPredicateQuery(this.rootState.intent,this.rootPredicateContext);
@@ -2254,6 +2308,262 @@
       target.hidden = !message;
     }
 
+    async freshNestedContext(signal, domainId = this.nestedState?.intent.binding.domain_id || this.nestedDomainId) {
+      if (!this.explorerClient || !domainId) throw new Error("Complete nested Detail unavailable on this publication.");
+      if (this.nestedDomainId && domainId !== this.nestedDomainId) throw new Error("Nested state belongs to a different Console domain.");
+      return this.explorerClient.getNestedDetailContext(domainId, {signal});
+    }
+
+    retainProfileDraft() {
+      const editor = this.root.querySelector("[data-sac-request]");
+      this.profileDrafts[this.queryProfile] = {raw: editor?.value || "", rawDirty: this.state.rawDirty,
+        ...(this.queryProfile === "flat" ? {state: structuredClone(this.state)} : {})};
+    }
+
+    applyQueryProfile() {
+      const nested = this.queryProfile === "nested";
+      this.rootMode = this.queryProfile === "root";
+      const selector = this.root.querySelector("[data-sac-root-mode]"); if (selector) selector.value = this.queryProfile;
+      const method = this.root.querySelector("[data-sac-query-method-badge]"); if (method && nested) method.textContent = "POST";
+      const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = this.queryProfile !== "flat";
+      const panel = this.root.querySelector("[data-sac-nested-builder]"); if (panel) panel.hidden = !nested;
+      const actions = this.root.querySelector("[data-sac-post-editor-actions]"); if (actions) actions.hidden = this.queryProfile === "root";
+      if (nested) this.renderNestedBuilder();
+    }
+
+    async selectQueryProfile(value, fresh = false) {
+      if (!["flat", "root", "nested"].includes(value)) throw new Error("Unknown query profile.");
+      this.retainProfileDraft();
+      if (fresh) delete this.profileDrafts[value];
+      this.cancelQuery();
+      this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+      const sequence = this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
+      this.queryProfile = value;
+      this.blockedInitialRequestText = null;
+      this.state.response = null; this.nestedResult = null;
+      this.clearQueryResult();
+      this.applyQueryProfile();
+      const saved = this.profileDrafts[value];
+      if (value === "flat") {
+        if (saved?.state) Object.assign(this.state, saved.state, {response: null});
+        this.state.rawDirty = Boolean(saved?.rawDirty);
+        this.renderAll();
+        if (saved) {
+          this.root.querySelector("[data-sac-request]").value = saved.raw;
+          this.state.rawDirty = saved.rawDirty;
+          const edited = this.root.querySelector("[data-sac-edited]"); if (edited) edited.hidden = !saved.rawDirty;
+        }
+        this.setImportMessage("Flat Detail draft restored.", "success");
+        this.updateCurl(); return;
+      }
+      if (value === "root") {
+        if (saved) {
+          this.root.querySelector("[data-sac-request]").value = saved.raw;
+          this.state.rawDirty = saved.rawDirty;
+          this.updateCurl(); return;
+        }
+        return this.selectRootMode("root");
+      }
+      if (saved) {
+        this.root.querySelector("[data-sac-request]").value = saved.raw;
+        this.state.rawDirty = saved.rawDirty;
+        this.renderNestedBuilder(); this.updateCurl(); return;
+      }
+      try {
+        const context = await this.freshNestedContext();
+        if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return;
+        this.nestedDetailContext = context;
+        this.nestedState = {format: "selecto.nested-detail-state", format_version: 1,
+          intent: global.SelectoExplorerClient.createNestedDetailIntent(context.features)};
+        this.nestedBlocked = false;
+        this.syncNestedRequest(); this.renderNestedBuilder();
+        this.setImportMessage("New nested draft uses the current authenticated publication.", "success");
+      } catch (error) {
+        if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return;
+        this.nestedBlocked = true;
+        this.setImportMessage(`Nested mode blocked: ${error.message}`, "error");
+      }
+    }
+
+    async restoreNestedState(raw) {
+      this.retainProfileDraft();
+      this.cancelQuery();
+      this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+      const sequence = this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
+      this.queryProfile = "nested"; this.nestedState = null; this.nestedBlocked = true;
+      const editor = this.root.querySelector("[data-sac-request]"); editor.value = raw;
+      const stateEditor = this.root.querySelector("[data-sac-nested-state]"); if (stateEditor) stateEditor.value = raw;
+      this.state.rawDirty = true;
+      this.state.response = null; this.nestedResult = null; this.clearQueryResult();
+      this.applyQueryProfile();
+      try {
+        const state = global.SelectoExplorerClient.decodeNestedDetailState(raw);
+        const context = await this.freshNestedContext(undefined, state.intent.binding.domain_id);
+        if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return false;
+        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context);
+        this.nestedDetailContext = context; this.nestedDomainId = state.intent.binding.domain_id;
+        this.nestedState = state; this.nestedBlocked = false; this.blockedInitialRequestText = null;
+        while (state.intent.filters.some(filter=>filter.id === `nested-filter-${this.nextNestedFilterId}`)) this.nextNestedFilterId++;
+        this.syncNestedRequest(); this.renderNestedBuilder();
+        this.setImportMessage("Nested state restored. Selection, filters, page and exact presentation retained; Run is explicit.", "success");
+        return true;
+      } catch (error) {
+        if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return false;
+        this.setImportMessage(`Nested state blocked: ${error.message}`, "error");
+        this.setStatus(error.message, "error"); return false;
+      }
+    }
+
+    syncNestedRequest() {
+      const payload = this.buildPayload();
+      const editor = this.root.querySelector("[data-sac-request]");
+      editor.value = JSON.stringify(payload, null, 2); editor.readOnly = false;
+      this.nestedStateRequestText = editor.value;
+      const stateEditor = this.root.querySelector("[data-sac-nested-state]");
+      if (stateEditor) stateEditor.value = JSON.stringify(this.nestedState);
+      this.state.rawDirty = false;
+      const edited = this.root.querySelector("[data-sac-edited]"); if (edited) edited.hidden = true;
+      const run = this.root.querySelector("[data-sac-run]"); if (run) run.disabled = false;
+      this.updateCurl();
+    }
+
+    nestedChanged(mutator) {
+      if (!this.nestedState || this.nestedBlocked) return;
+      // Invalid partial builder edits stay visible. Only Run/Save requires a complete intent.
+      mutator(this.nestedState.intent);
+      this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
+      this.cancelQuery(); this.nestedResult = null; this.state.response = null;
+      this.clearQueryResult();
+      const stateEditor = this.root.querySelector("[data-sac-nested-state]");
+      if (stateEditor) stateEditor.value = JSON.stringify(this.nestedState);
+      try { this.syncNestedRequest(); this.setImportMessage("", ""); }
+      catch (error) {
+        this.root.querySelector("[data-sac-run]").disabled = true;
+        this.setImportMessage(`Nested draft incomplete: ${error.message}`, "error");
+      }
+      this.renderNestedBuilder();
+    }
+
+    nestedStateStorageKey() { return `selecto.console.nested-state:${this.base}`; }
+    async nestedStateAction(action) {
+      const stateEditor = this.root.querySelector("[data-sac-nested-state]");
+      try {
+        if (action === "restore") return this.restoreNestedState(stateEditor.value);
+        if (action === "private") {
+          const saved = global.localStorage.getItem(this.nestedStateStorageKey());
+          if (!saved) throw new Error("No private nested state saved.");
+          return this.restoreNestedState(saved);
+        }
+        if (this.queryProfile !== "nested" || this.nestedBlocked || !this.nestedState) throw new Error("Restore a complete nested draft first.");
+        const state = global.SelectoExplorerClient.decodeNestedDetailState(stateEditor.value);
+        const editor = this.root.querySelector("[data-sac-request]");
+        const stateText = stateEditor.value;
+        const matches = () => this.queryProfile === "nested" && stateEditor.value === stateText && editor.value === this.nestedStateRequestText && JSON.stringify(state) === JSON.stringify(this.nestedState);
+        if (!matches()) throw new Error("State and query editor differ. Restore the complete intended nested state before saving or sharing.");
+        const context = await this.freshNestedContext();
+        if (!matches()) throw new Error("Nested draft changed during discovery.");
+        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context);
+        const encoded = global.SelectoExplorerClient.encodeNestedDetailState(state);
+        if (action === "save") {
+          global.localStorage.setItem(this.nestedStateStorageKey(), JSON.stringify(state));
+          // A private action never leaves this payload in a share URL.
+          const url = new URL(global.location.href); const slots = new URLSearchParams(url.hash.slice(1));
+          slots.delete("nested_request"); url.hash = slots.toString();
+          global.history?.replaceState(global.history.state, "", url.href);
+          this.setImportMessage("Private nested state saved in this browser.", "success");
+        } else {
+          const url = new URL(global.location.href); const slots = new URLSearchParams(); slots.set("nested_request", encoded); url.hash = slots.toString();
+          await this.copy(url.href, this.root.querySelector("[data-sac-nested-link]"));
+          this.setImportMessage("Nested state URL copied.", "success");
+        }
+      } catch (error) { this.setImportMessage(`Nested state blocked: ${error.message}`, "error"); }
+    }
+
+    renderNestedBuilder() {
+      const target = this.root.querySelector("[data-sac-nested-builder]");
+      if (!target) return;
+      target.replaceChildren();
+      if (!this.nestedState || this.nestedBlocked) {
+        target.append(element("p", "sac-help", "Nested draft is blocked. Restore valid state or start a new current-publication draft."));
+        const restart = element("button", "sac-text-button", "Start new nested draft"); restart.type = "button";
+        restart.dataset.sacNestedNew = ""; target.append(restart); return;
+      }
+      const intent = this.nestedState.intent, features = this.nestedDetailContext.features, collection = features.collections[0];
+      const roots = new Map(features.root_fields.map(f => [f.id, f])), children = new Map(collection.fields.map(f => [f.id, f]));
+      target.append(element("h2", "", "Complete nested Detail"), element("p", "sac-help", "Choose parent fields and one complete collection. UTC · en-US · exact scalar text."));
+      const button = (text, action, index, group) => {
+        const node = element("button", "sac-text-button", text); node.type = "button";
+        node.dataset.sacNestedAction = action; node.dataset.index = String(index); node.dataset.group = group;
+        return node;
+      };
+      const selector = (label, name, values, selected, index) => {
+        const wrapper = element("label", "", label), select = element("select", "");
+        select.setAttribute("aria-label", label); select.dataset.sacNestedControl = name;
+        if (index !== undefined) select.dataset.index = String(index);
+        appendOptions(select, values, selected); wrapper.append(select); return wrapper;
+      };
+      const choices = [...roots.values()].map(f => ({value:f.id,label:f.label}));
+      target.append(selector("Add parent field", "add-root", [{value:"",label:"Choose parent field"}, ...choices.filter(f => !intent.select.includes(f.value))], ""));
+      const selected = element("ol", "sac-nested-selected");
+      intent.select.forEach((item, i) => {
+        const row = element("li", "", Array.isArray(item) ? collection.label : roots.get(item)?.label || item);
+        row.append(button("Up", "up", i, "select"), button("Down", "down", i, "select"));
+        if (!Array.isArray(item)) row.append(button("Remove", "remove", i, "select"));
+        selected.append(row);
+      }); target.append(selected);
+      const childIds = intent.select.find(Array.isArray);
+      target.append(element("h3", "", collection.label), selector("Add child field", "add-child", [{value:"",label:"Choose child field"}, ...collection.fields.filter(f=>!childIds.includes(f.id)).map(f=>({value:f.id,label:f.label}))], ""));
+      const childList = element("ol", "sac-nested-selected");
+      childIds.forEach((id,i) => {const row=element("li","",children.get(id)?.label || id); row.append(button("Up","up",i,"children"),button("Down","down",i,"children"),button("Remove","remove",i,"children"));childList.append(row);}); target.append(childList);
+      target.append(element("h3", "", "Parent filters (AND)"), button("Add filter", "add-filter", 0, "filters"));
+      intent.filters.forEach((filter,i) => {
+        const field = roots.get(filter.field), row = element("div", "sac-nested-filter");
+        row.append(selector("Filter field", "filter-field", choices, filter.field, i), selector("Operator", "filter-op", field.operators.map(op=>({value:op,label:optionLabel(op)})), filter.op, i));
+        if (!["is_null","is_not_null"].includes(filter.op)) {
+          if (field.type === "boolean") row.append(selector("Filter value", "filter-value", [{value:"true",label:"true"},{value:"false",label:"false"}], String(filter.value), i));
+          else {const label=element("label","","Exact filter value"),input=element("input","");input.type="text";input.value=filter.value;input.dataset.sacNestedControl="filter-value";input.dataset.index=String(i);input.setAttribute("aria-label","Exact filter value");label.append(input);row.append(label);}
+        }
+        row.append(button("Remove", "remove", i, "filters")); target.append(row);
+      });
+      target.append(element("h3", "", "Parent ordering"), button("Add sort", "add-order", 0, "orders"));
+      intent.order_by.forEach((order,i)=>{const row=element("div","sac-nested-filter");row.append(selector("Sort field","order-field",choices,order.field,i),selector("Direction","order-direction",[{value:"asc",label:"Ascending"},{value:"desc",label:"Descending"}],order.direction,i),button("Remove","remove",i,"orders"));target.append(row);});
+      const paging=element("div","sac-inline-controls");
+      for (const [name,min,max] of [["limit",1,25],["offset",0,100000]]) {const label=element("label","",name === "limit" ? "Parent limit" : "Parent offset"),input=element("input","");input.type="number";input.min=String(min);input.max=String(max);input.value=String(intent[name]);input.dataset.sacNestedControl=name;input.setAttribute("aria-label",name === "limit" ? "Parent limit" : "Parent offset");label.append(input);paging.append(label);}
+      paging.append(selector("Row shape","row-format",[{value:"arrays",label:"Ordered arrays"},{value:"objects",label:"JSON objects"}],intent.row_format));
+      paging.append(button("Previous page","previous",0,"page"),button("Next page","next",0,"page"));target.append(paging);
+    }
+
+    nestedControl(target) {
+      const name = target.dataset.sacNestedControl, index = Number(target.dataset.index);
+      this.nestedChanged(intent => {
+        const roots = new Map(this.nestedDetailContext.features.root_fields.map(f=>[f.id,f]));
+        if (name === "add-root" && target.value) intent.select.push(target.value);
+        if (name === "add-child" && target.value) intent.select.find(Array.isArray).push(target.value);
+        if (name === "filter-field") {const f=intent.filters[index];f.field=target.value;f.op="eq";f.value=roots.get(f.field).type === "boolean" ? false : "";}
+        if (name === "filter-op") {const f=intent.filters[index];f.op=target.value;if(["is_null","is_not_null"].includes(f.op))delete f.value;else if(!Object.hasOwn(f,"value"))f.value=roots.get(f.field).type === "boolean" ? false : "";}
+        if (name === "filter-value") {const f=intent.filters[index];f.value=roots.get(f.field).type === "boolean" ? target.value === "true" : target.value;}
+        if (name === "order-field") intent.order_by[index].field=target.value;
+        if (name === "order-direction") intent.order_by[index].direction=target.value;
+        if (["limit","offset"].includes(name)) intent[name]=/^(?:0|[1-9]\d*)$/.test(target.value) ? Number(target.value) : NaN;
+        if (name === "row-format") intent.row_format=target.value;
+      });
+    }
+
+    nestedAction(target) {
+      const action=target.dataset.sacNestedAction,index=Number(target.dataset.index),group=target.dataset.group;
+      if (group === "page" && this.state.rawDirty) {this.setImportMessage("Reset the manual JSON to the complete nested draft before using builder paging.","error");return;}
+      if (group === "page" && action === "next" && (this.nestedResult?.metadata.canonical.hasMore !== true || this.nestedState.intent.offset + this.nestedState.intent.limit > 100000)) {this.setImportMessage("Run the current page before advancing to available rows within the page bound.","error");return;}
+      this.nestedChanged(intent=>{
+        const items=group === "children" ? intent.select.find(Array.isArray) : group === "select" ? intent.select : group === "filters" ? intent.filters : intent.order_by;
+        if (action === "remove") items.splice(index,1);
+        if (action === "up" && index>0) [items[index-1],items[index]]=[items[index],items[index-1]];
+        if (action === "down" && index<items.length-1) [items[index+1],items[index]]=[items[index],items[index+1]];
+        if (action === "add-filter" && intent.filters.length<20) {const f=this.nestedDetailContext.features.root_fields[0];while(intent.filters.some(filter=>filter.id===`nested-filter-${this.nextNestedFilterId}`))this.nextNestedFilterId++;intent.filters.push({id:`nested-filter-${this.nextNestedFilterId++}`,field:f.id,op:"eq",value:f.type==="boolean" ? false : ""});}
+        if (action === "add-order" && intent.order_by.length<10) {const f=this.nestedDetailContext.features.root_fields.find(f=>!intent.order_by.some(o=>o.field===f.id));if(f)intent.order_by.push({field:f.id,direction:"asc"});}
+        if (group === "page") intent.offset=action === "previous" ? Math.max(0,intent.offset-intent.limit) : intent.offset+intent.limit;
+      });
+    }
+
     async freshRootContext(signal) {
       if (!this.explorerClient || !this.explorerMetadata) throw new Error("Recursive root predicates unavailable on this publication.");
       const context = await this.explorerClient.getRootPredicateContext(this.explorerMetadata.domain.id,{signal});
@@ -2262,6 +2572,9 @@
     }
 
     async restoreRootState(raw) {
+      this.queryProfile = "root";
+      this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
+      const nestedBuilder = this.root.querySelector("[data-sac-nested-builder]"); if (nestedBuilder) nestedBuilder.hidden = true;
       const sequence = this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
       const stateEditor = this.root.querySelector("[data-sac-root-state]");
       if (stateEditor) stateEditor.value = raw;
@@ -2295,6 +2608,7 @@
 
     async selectRootMode(value) {
       if (value === "flat") {
+        this.queryProfile = "flat";
         this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
         this.blockedInitialRequestText = null;
         const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = false;
@@ -2342,6 +2656,10 @@
 
     loadRequestIntoChooser() {
       const editor = this.root.querySelector("[data-sac-request]");
+      if (this.queryProfile === "nested") {
+        this.setImportMessage("The nested chooser uses its complete bound state. Restore nested state to change it; the manual query editor remains available.", "error");
+        return false;
+      }
       let payload;
       try {
         payload = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);
@@ -2358,6 +2676,12 @@
     }
 
     syncRequest(force) {
+      if (this.queryProfile === "nested") {
+        if (this.state.rawDirty && !force) return;
+        try { this.syncNestedRequest(); }
+        catch (error) { this.setImportMessage(error.message, "error"); }
+        return;
+      }
       if (this.state.queryMethod === "get" && this.resourcePath) {
         const model = this.buildResourceRequest();
         const editor = this.root.querySelector("[data-sac-request]");
@@ -2406,7 +2730,7 @@
     }
 
     updateCurl() {
-      if (this.state.queryMethod === "get" && this.resourcePath) {
+      if (this.queryProfile !== "nested" && this.state.queryMethod === "get" && this.resourcePath) {
         const model = this.buildResourceRequest();
         const target = this.root.querySelector("[data-sac-curl]");
         if (target) target.textContent = model.path
@@ -2417,6 +2741,8 @@
       const body = editor ? editor.value : JSON.stringify(this.buildPayload(), null, 2);
       const command = this.curlCommand(
         this.queryPath, body, this.state.responseFormat, this.state.responseFilename,
+        this.queryProfile === "nested" && this.nestedDetailContext && !this.nestedBlocked
+          ? {"Selecto-Nested-Detail-Context": global.SelectoCanonicalClient.encodeNestedDetailContext(global.SelectoCanonicalClient.nestedDetailContext(this.nestedDetailContext.features))} : {},
       );
       const target = this.root.querySelector("[data-sac-curl]");
       if (target) target.textContent = command;
@@ -3172,6 +3498,14 @@
     }
 
     onClick(event) {
+      const nestedAction = event.target.closest("[data-sac-nested-action]");
+      if (nestedAction) return this.nestedAction(nestedAction);
+      if (event.target.closest("[data-sac-nested-new]")) {
+        this.nestedState = null; return this.selectQueryProfile("nested", true);
+      }
+      for (const action of ["restore", "link", "save", "private"]) {
+        if (event.target.closest(`[data-sac-nested-${action}]`)) return this.nestedStateAction(action);
+      }
       const mainTab = event.target.closest("[data-sac-main-tab]");
       if (mainTab) return this.switchMainTab(mainTab.dataset.sacMainTab);
       const resultTab = event.target.closest("[data-sac-result-tab]");
@@ -3262,6 +3596,7 @@
 
     onChange(event) {
       const target = event.target;
+      if (target.matches("[data-sac-nested-control]")) return this.nestedControl(target);
       if (target.matches("[data-sac-query-method]")) {
         this.setQueryMethod(target.value);
         return this.renderAll();
@@ -3454,11 +3789,24 @@
         this.updateCurl();
         return;
       }
-      if (target.matches("[data-sac-root-mode]")) return this.selectRootMode(target.value);
+      if (target.matches("[data-sac-root-mode]")) return this.selectQueryProfile(target.value);
       if (target.matches("[data-sac-root-state]")) { this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1; return; }
+      if (target.matches("[data-sac-nested-state]")) {
+        this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
+        this.nestedBlocked = true;
+        if (this.queryProfile === "nested") {
+          this.cancelQuery(); this.nestedResult = null; this.state.response = null;
+          this.clearQueryResult(); this.renderNestedBuilder();
+          this.root.querySelector("[data-sac-run]").disabled = true;
+          this.setImportMessage("Nested state edited. Restore valid state or explicitly start a new draft before Run.", "error");
+        }
+        return;
+      }
       if (target.matches("[data-sac-request]")) {
+        this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
         this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
         this.state.rawDirty = true;
+        if (this.queryProfile === "nested" && !this.nestedBlocked) this.root.querySelector("[data-sac-run]").disabled = false;
         this.root.querySelector("[data-sac-edited]").hidden = false;
         this.setImportMessage("", "");
         this.updateCurl();
@@ -3529,7 +3877,7 @@
     }
 
     async run() {
-      if (this.state.queryMethod === "get" && this.resourcePath) {
+      if (this.queryProfile !== "nested" && this.state.queryMethod === "get" && this.resourcePath) {
         return this.runResource();
       }
       const editor = this.root.querySelector("[data-sac-request]");
@@ -3566,8 +3914,32 @@
       if (cancel) cancel.hidden = false;
       let response;
       let payload;
+      let nestedResult = null;
       try {
-        if (this.remoteMode && (request.format === "selecto.root-predicate-state" || request.format === "selecto.remote-query" && request.format_version === 2)) {
+        if (this.queryProfile === "nested") {
+          if (this.nestedBlocked || !this.nestedState) throw new Error("Nested state remains blocked. Restore valid state or start a new draft.");
+          const retained = structuredClone(this.nestedState);
+          const context = await this.freshNestedContext(controller.signal);
+          if (sequence !== this.querySequence || this.queryProfile !== "nested") return;
+          const binding = global.SelectoExplorerClient.nestedDetailBinding(context.features);
+          if (Object.keys(binding).some(key => retained.intent.binding[key] !== binding[key])) throw new Error("Nested publication or revision changed; retain the draft and explicitly start a new one.");
+          if (!this.state.rawDirty) global.SelectoExplorerClient.assertNestedDetailIntent(retained.intent, context);
+          const selectedContext = global.SelectoCanonicalClient.nestedDetailContext(context.features);
+          const parsed = global.SelectoCanonicalClient.parseNestedDetailRequestText(rawRequestText, {features:context.features,context:selectedContext});
+          if (parsed.request.query.timezone !== "UTC") throw new Error("This nested browser mode requires explicit timezone UTC; retain the raw query or reset to the complete draft.");
+          payload = await this.canonicalClient.queryNestedDetailText(context.manifest, rawRequestText,
+            {features:context.features,context:selectedContext,signal:controller.signal});
+          // The strict selected transport has validated raw numeric tokens first.
+          // This mapping uses only the selected column/shape intent, never raw filters as saved UI state.
+          const renderIntent = global.SelectoExplorerClient.createNestedDetailIntent(context.features);
+          const collection = context.features.collections[0], roots = new Map(context.features.root_fields.map(f=>[f.path,f.id])), children = new Map(collection.fields.map(f=>[f.path,f.id]));
+          renderIntent.select = parsed.request.query.select.map(item=>Array.isArray(item)?item.map(path=>children.get(path)):roots.get(item));
+          renderIntent.limit = parsed.request.query.limit ?? context.features.defaults.limit;
+          renderIntent.offset = parsed.request.query.offset ?? context.features.defaults.offset;
+          renderIntent.row_format = parsed.request.query.row_format || "arrays";
+          nestedResult = global.SelectoExplorerClient.toNestedDetailExplorerResult(payload, renderIntent, context);
+          response = {status:200,statusText:"OK",ok:true};
+        } else if (this.remoteMode && (request.format === "selecto.root-predicate-state" || request.format === "selecto.remote-query" && request.format_version === 2)) {
           const context = await this.freshRootContext(controller.signal);
           if (request.format === "selecto.root-predicate-state") {
             const state = global.SelectoExplorerClient.parseRootPredicateState(rawRequestText,context);
@@ -3633,16 +4005,18 @@
         if (sequence !== this.querySequence) return;
         const elapsed = Math.round(performance.now() - started);
         this.state.response = payload;
+        this.nestedResult = nestedResult;
         this.renderResponse(payload);
         this.setStatus(`${response.status} ${response.statusText} · ${elapsed} ms`, response.ok ? "success" : "error");
       } catch (error) {
         if (sequence !== this.querySequence) return;
+        this.nestedResult = null;
         this.state.response = error.envelope || {ok: false, error: {code: error.name === "AbortError" ? "cancelled" : error.code || "network_error", message: error.message, details: error.details || {}}};
         this.renderResponse(this.state.response);
         this.setStatus(error.status ? `${error.status} · ${error.code}` : error.message, "error");
       } finally {
         if (sequence !== this.querySequence) return;
-        button.disabled = false;
+        button.disabled = this.queryProfile === "nested" && this.nestedBlocked;
         button.classList.remove("is-running");
         this.root.querySelector("[data-sac-run-label]").textContent = "Run query";
         if (cancel) cancel.hidden = true;
@@ -3726,6 +4100,47 @@
       this.renderResponse(this.state.response);
     }
 
+    clearQueryResult() {
+      for (const selector of ["[data-sac-result-head]", "[data-sac-result-body]"]) this.root.querySelector(selector)?.replaceChildren();
+      const json = this.root.querySelector("[data-sac-response-json]"); if (json) json.textContent = "";
+      const empty = this.root.querySelector("[data-sac-empty-response]"); if (empty) empty.hidden = false;
+      const page = this.root.querySelector("[data-sac-page-info]"); if (page) {page.hidden = true;page.textContent = "";}
+    }
+
+    renderNestedResponse(result, head, body) {
+      const scalar = value => value === null ? "NULL" : String(value);
+      const childHeader = fields => {
+        const tr = element("tr", ""); fields.forEach(field=>tr.append(element("th","",field.label))); return tr;
+      };
+      const header = element("tr", "");
+      result.columns.forEach(column=>{
+        const th=element("th","sac-nested-header",column.label);
+        if(column.type === "nested") {
+          const schema=element("table","sac-nested-schema"),thead=element("thead","");
+          schema.setAttribute("aria-label",`${column.label} selected child columns`);
+          thead.append(childHeader(column.nestedFields));schema.append(thead);th.append(schema);
+        }
+        header.append(th);
+      });head.append(header);
+      if(!result.rows.length) {const tr=element("tr",""),td=element("td","","No rows");td.colSpan=result.columns.length;tr.append(td);body.append(tr);}
+      result.rows.forEach(row=>{
+        const tr=element("tr","");
+        result.columns.forEach(column=>{
+          const td=element("td","sac-nested-scalar"),value=row[column.id];
+          if(column.type !== "nested") td.textContent=scalar(value);
+          else if(!value.length) td.textContent="No children";
+          else {
+            const table=element("table","sac-nested-results"),thead=element("thead",""),tbody=element("tbody","");
+            table.setAttribute("aria-label",`${column.label} complete children`);thead.append(childHeader(column.nestedFields));
+            value.forEach(child=>{const cr=element("tr","");column.nestedFields.forEach(field=>cr.append(element("td","",scalar(child[field.id]))));tbody.append(cr);});
+            table.append(thead,tbody);td.append(table);
+          }tr.append(td);
+        });body.append(tr);
+      });
+      const info=this.root.querySelector("[data-sac-page-info]");
+      if(info) {info.hidden=false;info.textContent=result.metadata.canonical.hasMore ? "More rows available" : "No more rows";}
+    }
+
     renderResponse(payload) {
       this.root.querySelector("[data-sac-empty-response]").hidden = true;
       this.root.querySelector("[data-sac-response-json]").textContent = JSON.stringify(payload, null, 2);
@@ -3734,6 +4149,10 @@
       const body = this.root.querySelector("[data-sac-result-body]");
       head.replaceChildren();
       body.replaceChildren();
+      if (this.queryProfile === "nested" && this.nestedResult) {
+        this.renderNestedResponse(this.nestedResult, head, body);
+        this.switchResultTab("table"); return;
+      }
       const data = payload && payload.data;
       const pageInfo = this.root.querySelector("[data-sac-page-info]");
       if (pageInfo) {
@@ -3834,6 +4253,7 @@
     mountAll,
     normalizeAPIBase,
     requestPayloadFromLocation,
+    nestedStateFromLocation,
     operatorsForType,
     writeControlKind,
     writeFieldRequired,

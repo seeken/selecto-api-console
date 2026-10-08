@@ -162,3 +162,34 @@ the existing `#request=` key with the full root-state envelope. Discovery and
 publication binding refresh before execution; changed identity blocks retained
 state instead of silently rebinding. The ordinary flat v1 chooser, snapshots,
 writes, actions and legacy bare query behavior remain separate.
+
+## Complete nested Detail
+
+Canonical hosts can advertise `getNestedDetailFeatures` for the explicit
+`canonical_nested_detail.v1` sidecar over `remote_query.v1`. Select **Complete
+nested Detail (v1)** in Query profile to use a separate bound draft. The builder
+retains ordered parent columns and one collection, ordered child columns, flat
+parent filters, parent ordering, page and row shape. It uses only published
+opaque field IDs and UTC/en-US exact scalar display. Child tables are complete;
+empty pages retain child schema headers and empty collections show `No children`.
+
+Every Run refreshes authenticated catalog, manifest, full domain and sidecar.
+Publication or revision drift blocks submission and retains the draft. The raw
+query editor uses strict selected-profile validation and sends valid pasted
+bytes unchanged. This first browser mode requires explicit `timezone: "UTC"`
+in manual JSON too; the wider HTTP timezone contract is unchanged. Unsupported members, duplicate keys or invalid numeric tokens
+refuse locally; **Reset JSON** returns to the retained complete builder draft.
+Omitted limit and offset use the published defaults when mapping the response;
+the transmitted raw request remains unchanged.
+Basic, recursive and nested drafts remain separate when modes change, and a
+cancelled or stale result cannot render into another mode.
+
+Nested state uses the isolated `nested_request` fragment slot. Restore fills the
+controls without running; Run is a separate action. Editing the state text
+cancels pending work and blocks Run until an explicit successful restore or a
+new current-publication draft. Save/Copy require a complete matching state and
+query editor. Private state uses a separate local-storage key and removes the
+nested share payload from the current URL. The 64KiB encoded
+state bound applies to persistence; execution retains the selected HTTP 1MiB
+request bound. These consumer checks do not certify a native API or rendered
+browser cohort.
