@@ -170,9 +170,23 @@ export function createExplorerClient(options = {}) {
     if (!entry) refuse("domainId", "domain is unavailable in the current publication", "operation_forbidden");
     const [manifest, value] = await Promise.all([client.manifest(entry.manifest, signal), client.metadata(entry.explorer_metadata, signal)]);
     const domain = await client.domain(manifest, signal);
-    return {manifest, metadata: assertExplorerMetadata(value, manifest, entry, domain)};
+    return {entry, manifest, canonicalDomain:domain, metadata: assertExplorerMetadata(value, manifest, entry, domain)};
+  }
+  async function rootPublication(id, signal) {
+    const context = await publication(id,signal);
+    const features = await client.rootPredicateFeatures(context.manifest,signal);
+    canonical.assertRootPredicateFeatures(features,{...context,domain:context.metadata.domain});
+    return {...context,features,binding:rootPredicateBinding(features)};
   }
   return {
+    async getRootPredicateContext(id, requestOptions = {}) {return rootPublication(id,requestOptions.signal);},
+    async executeRootPredicateIntent(intent, requestOptions = {}) {
+      const retained = canonical.parseStrictJSON(JSON.stringify(intent));
+      const context = await rootPublication(retained.binding.domain_id,requestOptions.signal);
+      const query = toRootPredicateQuery(retained,context);
+      const result = await client.queryRootPredicate(context.manifest,query,{...requestOptions,features:context.features,fingerprint:retained.binding.fingerprint});
+      return toRootPredicateExplorerResult(result,retained,context);
+    },
     async listDomains() {
       const catalog = await client.catalog();
       return Promise.all(catalog.domains.map(async (entry) => {
@@ -189,4 +203,141 @@ export function createExplorerClient(options = {}) {
       return toExplorerResult(result, request, metadata);
     },
   };
+}
+
+function requiredKeys(value, required, path) {
+  keys(value, required, path);
+  if (required.some((key) => !Object.hasOwn(value,key))) refuse(path,"missing required member","invalid_query");
+}
+export function rootPredicateBinding(features) {
+  canonical.assertRootPredicateFeatures(features);
+  return {domain_id:features.domain.id, fingerprint:features.domain.fingerprint, publication:features.domain.publication,
+    wire_profile:features.wire_profile, feature_profile:features.profile, feature_revision:features.revision};
+}
+function assertIntentShape(intent) {
+  requiredKeys(intent,["format","format_version","mode","binding","select","predicate","order_by","limit","offset","presentation"],"intent");
+  if (intent.format !== "selecto.root-predicate-ui-intent" || intent.format_version !== 1 || intent.mode !== "recursive") refuse("intent","unknown root intent format/version/mode","invalid_query");
+  requiredKeys(intent.binding,["domain_id","fingerprint","publication","wire_profile","feature_profile","feature_revision"],"intent.binding");
+  Object.values(intent.binding).forEach((value) => canonical.assertUnicode(nonEmptyString(value,"intent.binding"),"intent.binding",16384));
+  if (intent.binding.wire_profile !== "remote_query.v2" || intent.binding.feature_profile !== "canonical_root_predicates.v1") refuse("intent.binding","unsupported bound profile","invalid_query");
+  if (!Array.isArray(intent.select) || !intent.select.length || intent.select.length > 100 || new Set(intent.select).size !== intent.select.length) refuse("intent.select","unique nonempty selection required","invalid_query");
+  intent.select.forEach((id) => canonical.assertUnicode(nonEmptyString(id,"intent.select"),"intent.select",16384));
+  requiredKeys(intent.predicate,intent.predicate?.kind === "absent" ? ["kind"] : ["kind","tree"],"intent.predicate");
+  if (!["absent","tree"].includes(intent.predicate.kind)) refuse("intent.predicate","unknown predicate kind","invalid_query");
+  let count = 0;
+  function visit(node,depth) {
+    record(node,"intent.predicate.tree"); if (++count > 20 || depth > 4) refuse("intent.predicate.tree","node/depth bound exceeded","invalid_query");
+    const groups = ["and","or"].filter((key) => Object.hasOwn(node,key));
+    if (groups.length) {
+      if (groups.length !== 1) refuse("intent.predicate.tree","mixed group kinds","invalid_query");
+      requiredKeys(node,groups,"intent.predicate.tree");
+      if (!Array.isArray(node[groups[0]]) || !node[groups[0]].length) refuse("intent.predicate.tree","empty executable group","invalid_query");
+      node[groups[0]].forEach((child) => visit(child,depth+1)); return;
+    }
+    const nullTest = ["is_null","is_not_null"].includes(node.op);
+    requiredKeys(node,nullTest ? ["field","op"] : ["field","op","value"],"intent.predicate.tree");
+    if (!["eq","ne","gt","gte","lt","lte","is_null","is_not_null"].includes(node.op)) refuse("intent.predicate.tree.op","unsupported operator");
+    canonical.assertUnicode(nonEmptyString(node.field,"intent.predicate.tree.field"),"intent.predicate.tree.field",16384);
+    if (!nullTest && typeof node.value !== "string" && typeof node.value !== "boolean") refuse("intent.predicate.tree.value","typed text or boolean required","invalid_query");
+    if (typeof node.value === "string") canonical.assertUnicode(node.value,"intent.predicate.tree.value",16384);
+  }
+  if (intent.predicate.kind === "tree") visit(intent.predicate.tree,1);
+  if (!Array.isArray(intent.order_by) || intent.order_by.length > 10) refuse("intent.order_by","order bound exceeded","invalid_query");
+  const ordered = new Set(); intent.order_by.forEach((order) => {
+    requiredKeys(order,["field","direction"],"intent.order_by");
+    canonical.assertUnicode(nonEmptyString(order.field,"intent.order_by.field"),"intent.order_by.field",16384);
+    if (ordered.has(order.field) || !["asc","desc"].includes(order.direction)) refuse("intent.order_by","duplicate or invalid order","invalid_query"); ordered.add(order.field);
+  });
+  integer(intent.limit,"intent.limit",1); integer(intent.offset,"intent.offset");
+  if (intent.limit > 100 || intent.offset > 100000) refuse("intent","paging bound exceeded","invalid_query");
+  requiredKeys(intent.presentation,["timezone","locale"],"intent.presentation");
+  canonical.assertTimezone(intent.presentation.timezone);
+  canonical.assertUnicode(nonEmptyString(intent.presentation.locale,"intent.presentation.locale"),"intent.presentation.locale",16384);
+  try {new Intl.NumberFormat(intent.presentation.locale);} catch {refuse("intent.presentation.locale","unknown locale","invalid_query");}
+  return intent;
+}
+function rootContextFeatures(context) {
+  const features = context?.features;
+  if (!features) refuse("features","recursive mode unavailable");
+  const trusted = context.canonical_fields ? context : {domain:context.metadata?.domain ?? features.domain, manifest:context.manifest, canonicalDomain:context.canonicalDomain};
+  canonical.assertRootPredicateFeatures(features,trusted);
+  return features;
+}
+export function assertRootPredicateIntent(intent, context) {
+  assertIntentShape(intent);
+  const features = rootContextFeatures(context);
+  const binding = rootPredicateBinding(features);
+  if (Object.keys(binding).some((key) => intent.binding[key] !== binding[key])) refuse("intent.binding","publication or feature revision changed; retain state and reload","stale_domain_fingerprint");
+  const byId = new Map(features.fields.map((field) => [field.id,field]));
+  const field = (id) => {const value = byId.get(id); if (!value) refuse("intent.field","unresolved opaque field ID","invalid_field"); return value;};
+  intent.select.forEach(field); intent.order_by.forEach((order) => field(order.field));
+  function visit(node) {
+    if (Object.hasOwn(node,"and") || Object.hasOwn(node,"or")) { (node.and ?? node.or).forEach(visit); return; }
+    const selected = field(node.field);
+    if (!selected.operators.includes(node.op)) refuse("intent.predicate.tree.op","operator unavailable for field");
+    if (!["is_null","is_not_null"].includes(node.op)) canonical.assertRootScalar(node.value,selected,"intent.predicate.tree.value",true);
+  }
+  if (intent.predicate.kind === "tree") visit(intent.predicate.tree);
+  return intent;
+}
+export function toRootPredicateQuery(intent, context) {
+  assertRootPredicateIntent(intent,context);
+  const byId = new Map(context.features.fields.map((field) => [field.id,field]));
+  function translate(node) {
+    if (Object.hasOwn(node,"and")) return {and:node.and.map(translate)};
+    if (Object.hasOwn(node,"or")) return {or:node.or.map(translate)};
+    const result = {field:byId.get(node.field).path,op:node.op};
+    if (Object.hasOwn(node,"value")) result.value = node.value;
+    return result;
+  }
+  const query = {select:intent.select.map((id) => byId.get(id).path),order_by:intent.order_by.map((order) => ({field:byId.get(order.field).path,direction:order.direction})),limit:intent.limit,offset:intent.offset,timezone:intent.presentation.timezone};
+  if (intent.predicate.kind === "tree") query.where = translate(intent.predicate.tree);
+  canonical.assertRootPredicateQuery(query,context.features);
+  return query;
+}
+export function parseRootPredicateState(text, context) {
+  const {value,numberTokens} = canonical.parseStrictJSON(text,{tokens:true,maxBytes:65536});
+  requiredKeys(value,["format","format_version","intent"],"state");
+  if (value.format !== "selecto.root-predicate-state" || value.format_version !== 1 || numberTokens.get("/format_version") !== "1" || numberTokens.get("/intent/format_version") !== "1") refuse("state","unknown/noninteger root state version","invalid_query");
+  assertIntentShape(value.intent);
+  if (context) assertRootPredicateIntent(value.intent,context);
+  return value;
+}
+export function encodeRootPredicateState(state) {
+  const text = JSON.stringify(state); parseRootPredicateState(text);
+  const encoded = encodeURIComponent(text);
+  if (encoded.length > 65536) refuse("state","encoded state exceeds 64KiB","invalid_query");
+  return encoded;
+}
+export function decodeRootPredicateState(encodedOrRaw, context) {
+  if (typeof encodedOrRaw !== "string" || encodedOrRaw.length > 65536) refuse("state","encoded state exceeds 64KiB","invalid_query");
+  let text = encodedOrRaw;
+  if (!text.trimStart().startsWith("{")) {
+    try {text = decodeURIComponent(text);} catch {refuse("state","invalid URI escaping","invalid_query");}
+  }
+  return parseRootPredicateState(text,context);
+}
+/** Transparent facade for independently supplied local validator inputs. */
+export function validateRootPredicateFeaturesAndMap(features, context, authorSelect, authorTree) {
+  const validated_features = canonical.assertRootPredicateFeatures(features,context);
+  const intent = {format:"selecto.root-predicate-ui-intent",format_version:1,mode:"recursive",binding:rootPredicateBinding(features),select:authorSelect,predicate:{kind:"tree",tree:authorTree},order_by:[],limit:100,offset:0,presentation:{timezone:"UTC",locale:"en-US"}};
+  const query = toRootPredicateQuery(intent,{...context,features});
+  return {validated_features,translated_select:query.select,translated_where:query.where};
+}
+export function toRootPredicateExplorerResult(envelope,intent,context) {
+  const query = toRootPredicateQuery(intent,context);
+  canonical.assertRootPredicateResult(envelope,{fingerprint:intent.binding.fingerprint,query,features:context.features});
+  const byPath = new Map(context.features.fields.map((field) => [field.path,field]));
+  const columns = envelope.data.columns.map((column) => ({id:byPath.get(column.field).id,label:column.label,type:column.type === "string" ? "text" : column.type,encoding:column.encoding}));
+  const rows = envelope.data.rows.map((row) => Object.fromEntries(envelope.data.columns.map((column,i) => [columns[i].id,Array.isArray(row) ? row[i] : row[column.id]])));
+  return {schema:"selecto.spa.query-response/v1",columns,rows,page:{number:Math.floor(intent.offset/intent.limit)+1,size:intent.limit},metadata:{canonical:{fingerprint:intent.binding.fingerprint,publication:intent.binding.publication,hasMore:envelope.data.page.has_more}}};
+}
+
+/** Read the existing closed flat snapshot without upgrading its request profile. */
+export function flatSnapshotToRequest(snapshot) {
+  keys(snapshot,["version","domainId","view","state","filters","page","publication","presentation"],"snapshot");
+  if (snapshot.version !== 2) refuse("snapshot.version","unknown flat snapshot version","invalid_query");
+  for (const key of ["domainId","view","state","filters","page"]) if (!Object.hasOwn(snapshot,key)) refuse(`snapshot.${key}`,"missing required member","invalid_query");
+  const {version,...request} = snapshot;
+  return {schema:"selecto.spa.query-request/v1",...request};
 }

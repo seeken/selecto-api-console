@@ -624,3 +624,8 @@ code, pre, textarea.sac-request-editor {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
+.sac-root-controls { margin-bottom: 1rem; }
+.sac-root-controls label { display: block; margin: .5rem 0; }
+.sac-root-controls textarea { width: 100%; min-height: 12rem; font-family: monospace; }
+.sac-root-controls button { margin: .25rem .5rem .25rem 0; }

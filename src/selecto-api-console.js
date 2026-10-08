@@ -42,6 +42,7 @@
 
   function normalizeAPIBase(value, fallback) {
     const candidate = String(value || fallback || "/api/v1/selecto").replace(/\/+$/, "");
+    if (global.SelectoCanonicalClient) {try {global.SelectoCanonicalClient.safePath(candidate);} catch {throw new Error("The API console requires an absolute same-origin API path.");}}
     const invalidSegment = candidate.split("/").some((segment) => {
       try {
         const decoded = decodeURIComponent(segment);
@@ -63,11 +64,16 @@
     if (encoded === null) return null;
     let payload;
     try {
-      payload = JSON.parse(encoded);
+      payload = global.SelectoCanonicalClient ? global.SelectoCanonicalClient.parseStrictJSON(encoded, {maxBytes: 65536}) : JSON.parse(encoded);
     } catch (error) {
       throw new Error(`The Explorer request in this URL is not valid JSON: ${error.message}`);
     }
     if (!isPlainObject(payload)) throw new Error("The Explorer request in this URL must be a JSON object.");
+    if (payload.format === "selecto.root-predicate-state") {
+      const part = hash.split("&").find((part) => new URLSearchParams(part).has("request"));
+      const originalEncoded = part.slice(part.indexOf("=") + 1).replace(/\+/g,"%20");
+      return global.SelectoExplorerClient.decodeRootPredicateState(originalEncoded);
+    }
     return payload;
   }
 
@@ -644,6 +650,12 @@
           // their existing explicit bare-query mode on hosts without the profile.
           this.queryResponseFormats = [Object.assign({}, QUERY_RESPONSE_FORMATS[0])];
         }
+        if (this.remoteMode && this.explorerMetadata) {
+          const catalogRoute = this.manifest.routes.find((route) => route.operation_id === "getDomainCatalog" && route.method === "GET");
+          this.explorerClient = global.SelectoExplorerClient.createExplorerClient({baseUrl:this.base,
+            ...(catalogRoute ? {catalogPath:catalogRoute.path} : {}),headers:() => ({"X-CSRF-Token":this.csrfToken})});
+          if (this.manifest.profiles.includes("remote_query.v2")) this.rootPredicateContext = await this.explorerClient.getRootPredicateContext(this.explorerMetadata.domain.id);
+        }
         this.state.responseFormat = this.queryResponseFormats[0].id;
         this.state.responseFilename = suggestedDownloadFilename(
           this.domain.name, this.responseFormat(this.state.responseFormat).extension,
@@ -653,19 +665,25 @@
         this.filterFields = collectFilterFields(discovery.domain, this.fields);
         this.filterFieldMap = new Map(this.filterFields.map((field) => [field.path, field]));
         this.seedState();
+        const initialRequestRaw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
         let initialRequest = null;
         let initialRequestError = null;
         try {
           initialRequest = requestPayloadFromLocation(global.location);
-          if (initialRequest) this.loadPayloadIntoChooser(initialRequest);
+          if (initialRequest && initialRequest.format !== "selecto.root-predicate-state") this.loadPayloadIntoChooser(initialRequest);
         } catch (error) {
           initialRequestError = error;
+          this.blockedInitialRequestText = initialRequestRaw;
         }
         this.render();
-        if (initialRequestError) {
-          if (initialRequest) {
+        if (initialRequest?.format === "selecto.root-predicate-state") {
+          const raw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
+          await this.restoreRootState(raw);
+        } else if (initialRequestError) {
+          if (initialRequest || initialRequestRaw) {
+            const stateEditor = this.root.querySelector("[data-sac-root-state]"); if (stateEditor) stateEditor.value = initialRequestRaw;
             const editor = this.root.querySelector("[data-sac-request]");
-            editor.value = JSON.stringify(initialRequest, null, 2);
+            editor.value = initialRequestRaw || JSON.stringify(initialRequest, null, 2);
             this.state.rawDirty = true;
             this.root.querySelector("[data-sac-edited]").hidden = false;
             this.updateCurl();
@@ -700,6 +718,9 @@
         throw new Error(`${response.status} ${response.statusText}: the server did not return JSON.`);
       }
       if (!response.ok) {
+        if (global.SelectoCanonicalClient && payload?.ok === false && payload.error?.code && payload.error?.details) {
+          throw new global.SelectoCanonicalClient.CanonicalHttpError(response.status,global.SelectoCanonicalClient.assertError(payload));
+        }
         const message = payload && payload.error && payload.error.message;
         throw new Error(message || `${response.status} ${response.statusText}`);
       }
@@ -871,12 +892,20 @@
                   <div class="sac-compact-actions"><span class="sac-edited" data-sac-edited hidden>Manually edited</span><span data-sac-post-editor-actions><button type="button" class="sac-text-button" data-sac-load-json>Load into chooser</button><button type="button" class="sac-text-button" data-sac-reset-json>Reset JSON</button></span><button type="button" class="sac-text-button" data-sac-copy-request>Copy</button></div>
                 </div>
                 <div class="sac-import-message" data-sac-import-message hidden></div>
+                ${this.remoteMode ? `<div class="sac-root-controls">
+                  <label>Query profile<select aria-label="Query profile" data-sac-root-mode><option value="flat">Flat Detail (v1)</option><option value="root" ${this.rootPredicateContext ? "" : "disabled"}>Recursive root predicates (v2)</option></select></label>
+                  <p data-sac-root-availability>${this.rootPredicateContext ? "Recursive root predicates available; opt in explicitly." : "Recursive root predicates unavailable on this publication."}</p>
+                  <details><summary>Root predicate state</summary><label>Root predicate state<textarea aria-label="Root predicate state" data-sac-root-state spellcheck="false"></textarea></label>
+                    <button type="button" data-sac-root-restore>Restore root state</button><button type="button" data-sac-root-link>Copy root state link</button>
+                    <button type="button" data-sac-root-save>Save private root state</button><button type="button" data-sac-root-private>Restore private root state</button>
+                  </details>
+                </div>` : ""}
                 <textarea class="sac-request-editor" spellcheck="false" aria-label="Query request" data-sac-request></textarea>
                 <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button" data-sac-cancel-query hidden>Cancel query</button><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
               </section>
               <section class="sac-response-card">
                 <div class="sac-response-heading">
-                  <div><h2>Response</h2><span class="sac-response-status" data-sac-response-status>Ready</span></div>
+                  <div><h2>Response</h2><span class="sac-response-status" data-sac-response-status>Ready</span><p data-sac-page-info hidden></p></div>
                   <div class="sac-result-tabs" role="tablist">
                     <button type="button" class="is-active" data-sac-result-tab="table">Table</button>
                     <button type="button" data-sac-result-tab="json">JSON</button>
@@ -1965,6 +1994,11 @@
     }
 
     buildPayload() {
+      if (this.rootMode && !this.rootState) throw new Error("Root state remains blocked; restore valid bound state or explicitly select Flat Detail.");
+      if (this.rootState && this.rootMode) {
+        const query = global.SelectoExplorerClient.toRootPredicateQuery(this.rootState.intent,this.rootPredicateContext);
+        return global.SelectoCanonicalClient.buildRootPredicateRequest(this.rootState.intent.binding.fingerprint,query,{features:this.rootPredicateContext.features});
+      }
       const payload = {};
       if (this.state.mode === "select") {
         const selectedFields = this.state.selectedFields.map((selection) => {
@@ -2048,6 +2082,7 @@
 
     chooserStateFromPayload(payload) {
       if (!isPlainObject(payload)) throw new Error("The request must be a JSON object.");
+      if (payload.version === 2 && payload.domainId) payload = global.SelectoExplorerClient.flatSnapshotToRequest(payload);
       if (payload.schema === "selecto.spa.query-request/v1") {
         if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
         payload = global.SelectoExplorerClient.toCanonicalQuery(payload, this.explorerMetadata);
@@ -2219,11 +2254,99 @@
       target.hidden = !message;
     }
 
+    async freshRootContext(signal) {
+      if (!this.explorerClient || !this.explorerMetadata) throw new Error("Recursive root predicates unavailable on this publication.");
+      const context = await this.explorerClient.getRootPredicateContext(this.explorerMetadata.domain.id,{signal});
+      this.rootPredicateContext = context;
+      return context;
+    }
+
+    async restoreRootState(raw) {
+      const sequence = this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+      const stateEditor = this.root.querySelector("[data-sac-root-state]");
+      if (stateEditor) stateEditor.value = raw;
+      const editor = this.root.querySelector("[data-sac-request]");
+      // Retain the input before asynchronous discovery or refusal.
+      editor.value = raw;
+      this.state.rawDirty = true;
+      this.rootState = null;
+      this.rootMode = true;
+      this.rootStateRequestText = null;
+      try {
+        const state = global.SelectoExplorerClient.parseRootPredicateState(raw);
+        const context = await this.freshRootContext();
+        if (sequence !== this.rootRestoreSequence) return false;
+        global.SelectoExplorerClient.assertRootPredicateIntent(state.intent,context);
+        this.blockedInitialRequestText = null;
+        this.rootState = state; this.rootMode = true;
+        const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = true;
+        const selector = this.root.querySelector("[data-sac-root-mode]"); if (selector) selector.value = "root";
+        editor.value = JSON.stringify(this.buildPayload(),null,2);
+        this.rootStateRequestText = editor.value;
+        this.root.querySelector("[data-sac-edited]").hidden = false;
+        this.setImportMessage("Bound root state restored. Tree and presentation retained.","success");
+        this.updateCurl(); return true;
+      } catch (error) {
+        if (sequence !== this.rootRestoreSequence) return false;
+        this.setImportMessage(`Root state blocked: ${error.message}`,"error");
+        this.setStatus(error.message,"error"); return false;
+      }
+    }
+
+    async selectRootMode(value) {
+      if (value === "flat") {
+        this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+        this.blockedInitialRequestText = null;
+        const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = false;
+        this.rootMode = false; this.rootState = null; this.rootStateRequestText = null;
+        this.state.rawDirty = false; this.syncRequest(true); return;
+      }
+      const sequence = this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+      try {
+        const context = await this.freshRootContext();
+        if (sequence !== this.rootRestoreSequence) return;
+        const intent = {format:"selecto.root-predicate-ui-intent",format_version:1,mode:"recursive",binding:{...context.binding},select:context.features.default_select.slice(),predicate:{kind:"absent"},order_by:[],limit:100,offset:0,presentation:{timezone:this.state.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,locale:navigator.language || "en-US"}};
+        await this.restoreRootState(JSON.stringify({format:"selecto.root-predicate-state",format_version:1,intent}));
+      } catch (error) {this.setImportMessage(error.message,"error");}
+    }
+
+    rootStateStorageKey() {return `selecto.console.root-state:${this.base}`;}
+    async rootStateAction(action) {
+      const stateEditor = this.root.querySelector("[data-sac-root-state]");
+      try {
+        if (action === "restore") return this.restoreRootState(stateEditor.value);
+        if (action === "private") {
+          const saved = global.localStorage.getItem(this.rootStateStorageKey());
+          if (!saved) throw new Error("No private root state saved.");
+          return this.restoreRootState(saved);
+        }
+        // Save only a complete bound state. Never infer a binding from raw text.
+        const state = global.SelectoExplorerClient.parseRootPredicateState(stateEditor.value);
+        const queryEditor = this.root.querySelector("[data-sac-request]");
+        const editorsMatch = () => this.rootState && queryEditor.value === this.rootStateRequestText && JSON.stringify(state) === JSON.stringify(this.rootState);
+        if (!editorsMatch()) throw new Error("State and query editor differ. Restore the complete intended root state before saving or sharing.");
+        const context = await this.freshRootContext();
+        if (!editorsMatch()) throw new Error("State and query editor differ. Restore the complete intended root state before saving or sharing.");
+        global.SelectoExplorerClient.assertRootPredicateIntent(state.intent,context);
+        const encoded = global.SelectoExplorerClient.encodeRootPredicateState(state);
+        if (action === "save") {
+          global.localStorage.setItem(this.rootStateStorageKey(),JSON.stringify(state));
+          this.setImportMessage("Private root state saved in this browser.","success");
+        } else {
+          const url = new URL(global.location.href); url.hash = `request=${encoded}`;
+          await this.copy(url.href,this.root.querySelector("[data-sac-root-link]"));
+          this.setImportMessage("Root state URL copied.","success");
+        }
+      } catch (error) {this.setImportMessage(`Root state blocked: ${error.message}`,"error");}
+    }
+
     loadRequestIntoChooser() {
       const editor = this.root.querySelector("[data-sac-request]");
       let payload;
       try {
-        payload = JSON.parse(editor.value);
+        payload = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);
+        if (payload.format === "selecto.root-predicate-state") return this.restoreRootState(editor.value);
+        if (payload.format === "selecto.remote-query" && payload.format_version === 2) throw new Error("Recursive v2 stays in the raw editor; this chooser is unavailable for the complete tree.");
         this.loadPayloadIntoChooser(payload);
       } catch (error) {
         this.setImportMessage(`The chooser cannot represent this JSON: ${error.message} You can still run it, but the chooser will not track it; you are in manual JSON mode.`, "error");
@@ -3093,6 +3216,10 @@
         this.changed();
         return;
       }
+      if (event.target.closest("[data-sac-root-restore]")) return this.rootStateAction("restore");
+      if (event.target.closest("[data-sac-root-link]")) return this.rootStateAction("link");
+      if (event.target.closest("[data-sac-root-save]")) return this.rootStateAction("save");
+      if (event.target.closest("[data-sac-root-private]")) return this.rootStateAction("private");
       if (event.target.closest("[data-sac-load-json]")) return this.loadRequestIntoChooser();
       if (event.target.closest("[data-sac-reset-json]")) return this.syncRequest(true);
       if (event.target.closest("[data-sac-run]")) return this.run();
@@ -3327,7 +3454,10 @@
         this.updateCurl();
         return;
       }
+      if (target.matches("[data-sac-root-mode]")) return this.selectRootMode(target.value);
+      if (target.matches("[data-sac-root-state]")) { this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1; return; }
       if (target.matches("[data-sac-request]")) {
+        this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
         this.state.rawDirty = true;
         this.root.querySelector("[data-sac-edited]").hidden = false;
         this.setImportMessage("", "");
@@ -3405,12 +3535,14 @@
       const editor = this.root.querySelector("[data-sac-request]");
       let request;
       try {
-        request = JSON.parse(editor.value);
+        if (this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText) throw new Error("URL state remains blocked. Restore valid bound state or explicitly start a new query.");
+        request = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);
       } catch (error) {
         this.setStatus("Invalid request JSON", "error");
         this.showLocalError(error.message);
         return;
       }
+      const rawRequestText = editor.value;
       const format = this.responseFormat(this.state.responseFormat);
       const filenameValidation = validateDownloadFilename(this.state.responseFilename, format);
       if (filenameValidation.error) {
@@ -3435,10 +3567,26 @@
       let response;
       let payload;
       try {
-        if (this.remoteMode) {
+        if (this.remoteMode && (request.format === "selecto.root-predicate-state" || request.format === "selecto.remote-query" && request.format_version === 2)) {
+          const context = await this.freshRootContext(controller.signal);
+          if (request.format === "selecto.root-predicate-state") {
+            const state = global.SelectoExplorerClient.parseRootPredicateState(rawRequestText,context);
+            const query = global.SelectoExplorerClient.toRootPredicateQuery(state.intent,context);
+            payload = await this.canonicalClient.queryRootPredicate(context.manifest,query,{features:context.features,signal:controller.signal,fingerprint:state.intent.binding.fingerprint});
+          } else {
+            if (this.rootState) global.SelectoExplorerClient.assertRootPredicateIntent(this.rootState.intent,context);
+            payload = await this.canonicalClient.queryText(context.manifest,rawRequestText,{features:context.features,signal:controller.signal});
+          }
+          response = {status:200,statusText:"OK",ok:true};
+        } else if (this.remoteMode) {
+          if (this.explorerClient && this.explorerMetadata) {
+            const descriptor = await this.explorerClient.getDomain(this.explorerMetadata.domain.id);
+            if (descriptor.release.fingerprint !== this.manifest.domain.fingerprint || descriptor.release.id !== this.explorerMetadata.domain.publication) throw new Error("Publication changed; retain the request and reload.");
+          }
           let query;
           let fingerprint = this.manifest.domain.fingerprint;
           let requestId;
+          if (request.version === 2 && request.domainId) request = global.SelectoExplorerClient.flatSnapshotToRequest(request);
           if (request.schema === "selecto.spa.query-request/v1") {
             if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
             query = global.SelectoExplorerClient.toCanonicalQuery(request, this.explorerMetadata);
@@ -3587,6 +3735,11 @@
       head.replaceChildren();
       body.replaceChildren();
       const data = payload && payload.data;
+      const pageInfo = this.root.querySelector("[data-sac-page-info]");
+      if (pageInfo) {
+        pageInfo.hidden = typeof data?.page?.has_more !== "boolean";
+        pageInfo.textContent = data?.page?.has_more ? "More rows available" : "No more rows";
+      }
       let columns = data && Array.isArray(data.columns) ? data.columns : [];
       let rows = data && Array.isArray(data.rows) ? data.rows : [];
       if (this.state.queryMethod === "get" && payload && payload.ok && isPlainObject(data)) {
@@ -3636,7 +3789,7 @@
     renderFatal(error) {
       this.root.replaceChildren();
       const panel = element("section", "sac-fatal");
-      panel.append(element("span", "sac-kicker", "API Console"), element("h1", "", "Could not load the API"), element("p", "", error.message || String(error)));
+      panel.append(element("span", "sac-kicker", "API Console"), element("h1", "", "Could not load the API"), element("p", "", error.status ? `${error.status} ${error.code}: ${error.message}` : error.message || String(error)));
       const retry = element("button", "sac-button sac-primary", "Retry");
       retry.type = "button";
       retry.addEventListener("click", () => global.location.reload());

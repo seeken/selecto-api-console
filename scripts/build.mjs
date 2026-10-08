@@ -14,16 +14,14 @@ for (const file of files) {
   if (file !== "selecto-api-console.js") { await copyFile(sourcePath(file), distPath(file)); continue; }
   // Include the exact workspace sources in the distributable classic script.
   // Native hosts need only the existing single Console asset.
-  const names = {
-    "canonical-client": ["CanonicalWireError", "CanonicalHttpError", "safePath", "record", "nonEmptyString", "integer", "keys", "assertCatalog", "assertManifest", "assertDomain", "routePath", "assertError", "assertColumn", "assertScalar", "assertQueryResult", "buildRemoteRequest", "createCanonicalClient"],
-    "explorer-client": ["ExplorerIntentError", "assertExplorerMetadata", "toExplorerDescriptor", "toCanonicalQuery", "toExplorerResult", "createExplorerClient"],
-  };
   let bundled = "(function(global) {\n";
   for (const name of ["canonical-client", "explorer-client"]) {
-    const content = (await readFile(resolve(packageRoot, "packages", name, "src/index.js"), "utf8"))
+    const source = await readFile(resolve(packageRoot, "packages", name, "src/index.js"), "utf8");
+    const names = [...source.matchAll(/^export (?:function|class) (\w+)/gm)].map((match) => match[1]);
+    const content = source
       .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
     const globalName = name === "canonical-client" ? "SelectoCanonicalClient" : "SelectoExplorerClient";
-    bundled += `global.${globalName} = (function() {\n${name === "explorer-client" ? "const canonical = global.SelectoCanonicalClient;\n" : ""}${content}\nreturn {${names[name].join(",")}};\n})();\n`;
+    bundled += `global.${globalName} = (function() {\n${name === "explorer-client" ? "const canonical = global.SelectoCanonicalClient;\n" : ""}${content}\nreturn {${names.join(",")}};\n})();\n`;
   }
   bundled += "})(typeof globalThis !== 'undefined' ? globalThis : this);\n";
   await writeFile(distPath(file), bundled + await readFile(sourcePath(file), "utf8"));

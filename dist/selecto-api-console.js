@@ -28,7 +28,7 @@ function safePath(value) {
   }
   for (const segment of value.split("/")) {
     let decoded;
-    try { decoded = decodeURIComponent(segment); } catch { throw new CanonicalWireError("path", "invalid escaping"); }
+    try { decoded = segment; for (let pass = 0; pass < 16; pass++) { const next = decodeURIComponent(decoded); if (next === decoded) break; decoded = next; if (pass === 15) throw new Error("escaping depth"); } } catch { throw new CanonicalWireError("path", "invalid escaping"); }
     // Encoded separators can be interpreted differently by a proxy or host.
     if (decoded === "." || decoded === ".." || /[\\/\u0000-\u0020]/.test(decoded)) {
       throw new CanonicalWireError("path", "unsafe path segment");
@@ -95,7 +95,7 @@ function assertManifest(value) {
     nonEmptyString(route.operation_id, "manifest.route.operation_id");
     nonEmptyString(route.method, "manifest.route.method");
     // Parameterized write/action routes are outside the read client.
-    if (["queryDomain", "getDomain", "getOpenApi", "getExplorerMetadata", "getDomainCatalog"].includes(route.operation_id)) safePath(route.path);
+    if (["queryDomain", "getDomain", "getOpenApi", "getExplorerMetadata", "getDomainCatalog", "getRootPredicateFeatures"].includes(route.operation_id)) safePath(route.path);
     if (operations.has(route.operation_id)) throw new CanonicalWireError("manifest.routes", "duplicate operation id");
     operations.add(route.operation_id);
   });
@@ -239,8 +239,8 @@ function createCanonicalClient(options = {}) {
     headers.set("accept", "application/json");
     if (init.body !== undefined) headers.set("content-type", "application/json");
     new Headers(init.headers).forEach((value, key) => headers.set(key, value));
-    const response = await transport(safePath(path), {...init, headers, credentials: "same-origin"});
-    const payload = await response.json().catch((error) => {
+    const response = await transport(safePath(path), {...init, headers, credentials: "same-origin", redirect: "error"});
+    const payload = await response.arrayBuffer().then((bytes) => parseStrictJSON(new TextDecoder("utf-8", {fatal:true}).decode(bytes), {maxBytes: Number.POSITIVE_INFINITY})).catch((error) => {
       if (error?.name === "AbortError") throw error;
       throw new CanonicalWireError("response", "server did not return JSON");
     });
@@ -260,11 +260,261 @@ function createCanonicalClient(options = {}) {
       assertQueryResult(result.payload, envelope.domain.fingerprint, query);
       return result.payload;
     },
+    async rootPredicateFeatures(manifest, signal) {
+      if (!manifest.profiles.includes("remote_query.v2")) throw new CanonicalWireError("manifest.profiles", "remote_query.v2 unavailable");
+      return assertRootPredicateFeatures((await request(routePath(manifest,"getRootPredicateFeatures","GET"), {signal})).payload);
+    },
+    async queryRootPredicate(manifest, query, requestOptions = {}) {
+      const envelope = buildRootPredicateRequest(requestOptions.fingerprint ?? manifest.domain.fingerprint,query,requestOptions);
+      return this.queryText(manifest,JSON.stringify(envelope),requestOptions);
+    },
+    async queryText(manifest, text, requestOptions = {}) {
+      const parsed = parseCanonicalRequestText(text,{manifest,features:requestOptions.features});
+      const result = await request(routePath(manifest,"queryDomain","POST"),{method:"POST",body:parsed.raw,signal:requestOptions.signal});
+      if (parsed.request.format_version === 2) assertRootPredicateResult(result.payload,{fingerprint:parsed.request.domain.fingerprint,query:parsed.request.query,features:requestOptions.features});
+      else assertQueryResult(result.payload,parsed.request.domain.fingerprint,parsed.request.query);
+      return result.payload;
+    },
     request,
   };
 }
 
-return {CanonicalWireError,CanonicalHttpError,safePath,record,nonEmptyString,integer,keys,assertCatalog,assertManifest,assertDomain,routePath,assertError,assertColumn,assertScalar,assertQueryResult,buildRemoteRequest,createCanonicalClient};
+/** Unicode scalar validation, without replacing malformed UTF-16. */
+function assertUnicode(value, path = "string", maximum = Infinity, allowNul = false) {
+  if (typeof value !== "string") throw new CanonicalWireError(path, "expected a string");
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(++i);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new CanonicalWireError(path, "unpaired UTF-16 surrogate");
+    } else if (code >= 0xdc00 && code <= 0xdfff) throw new CanonicalWireError(path, "unpaired UTF-16 surrogate");
+  }
+  if (!allowNul && value.includes("\0")) throw new CanonicalWireError(path, "NUL is unavailable");
+  if (new TextEncoder().encode(value).length > maximum) throw new CanonicalWireError(path, "UTF-8 byte limit exceeded");
+  return value;
+}
+
+/** Parse structure once, reject decoded duplicate keys, and retain numeric lexemes. */
+function parseStrictJSON(text, options = {}) {
+  assertUnicode(text, "JSON", options.maxBytes ?? 1048576, true);
+  let at = 0;
+  const numberTokens = new Map();
+  const fail = (message) => { throw new CanonicalWireError("JSON", `${message} at character ${at}`); };
+  const space = () => { while (/[\t\n\r ]/.test(text[at] ?? "x")) at++; };
+  function string() {
+    const start = at++;
+    while (at < text.length) {
+      const c = text[at++];
+      if (c === '"') {
+        let value;
+        try { value = JSON.parse(text.slice(start, at)); } catch { fail("invalid string"); }
+        assertUnicode(value, "JSON string", Infinity, true);
+        return value;
+      }
+      if (c === "\\") at++;
+    }
+    fail("unterminated string");
+  }
+  function value(path, depth) {
+    if (depth > 128) fail("JSON nesting limit exceeded");
+    space(); const c = text[at];
+    if (c === '"') return string();
+    if (c === "{") {
+      at++; space(); const result = {}; const seen = new Set();
+      if (text[at] === "}") {at++; return result;}
+      while (true) {
+        space(); if (text[at] !== '"') fail("object key required");
+        const key = string(); if (seen.has(key)) fail(`duplicate key ${JSON.stringify(key)}`); seen.add(key);
+        space(); if (text[at++] !== ":") fail("colon required");
+        Object.defineProperty(result, key, {value: value(`${path}/${key.replace(/~/g,"~0").replace(/\//g,"~1")}`, depth + 1), enumerable:true, writable:true, configurable:true});
+        space(); const next = text[at++]; if (next === "}") return result; if (next !== ",") fail("comma required");
+      }
+    }
+    if (c === "[") {
+      at++; space(); const result = []; if (text[at] === "]") {at++; return result;}
+      while (true) {
+        result.push(value(`${path}/${result.length}`, depth + 1)); space(); const next = text[at++];
+        if (next === "]") return result; if (next !== ",") fail("comma required");
+      }
+    }
+    for (const [literal, decoded] of [["true",true],["false",false],["null",null]]) if (text.startsWith(literal, at)) {at += literal.length; return decoded;}
+    const token = text.slice(at).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!token) fail("value required");
+    at += token[0].length; numberTokens.set(path, token[0]);
+    const decoded = Number(token[0]); if (!Number.isFinite(decoded)) fail("non-finite number"); return decoded;
+  }
+  const decoded = value("", 0); space(); if (at !== text.length) fail("unexpected trailing input");
+  return options.tokens ? {value: decoded, numberTokens} : decoded;
+}
+
+const rootOps = ["eq", "ne", "gt", "gte", "lt", "lte", "is_null", "is_not_null"];
+const rootLimits = {max_limit:100, default_limit:100, max_offset:100000, default_offset:0, max_nodes:20, max_depth:4, root_depth:1, max_select:100, max_orders:10, max_string_utf8_bytes:16384, max_raw_request_bytes:1048576};
+const rootSupports = {where:true, and:true, or:true, flat_filters:false, nested:false, not:false, ranges:false, named_definitions:false, analytics:false};
+function exactKeys(value, required, path) {
+  keys(value, required, path);
+  if (required.some((key) => !Object.hasOwn(value, key))) throw new CanonicalWireError(path, "missing required member");
+}
+function rootPair(field, path) {
+  const allowed = {integer:["json","decimal-string"],decimal:["decimal-string"],string:["string"],boolean:["json"],date:["string"]};
+  if (!allowed[field.type]?.includes(field.encoding)) throw new CanonicalWireError(path, "unsupported type/encoding pair");
+  if (typeof field.nullable !== "boolean") throw new CanonicalWireError(path, "nullable must be boolean");
+}
+function canonicalRootFields(domain) {
+  record(domain?.source?.columns, "domain.source.columns");
+  return array(domain.source.fields, "domain.source.fields").map((path) => {
+    const column = record(domain.source.columns[path], `domain.source.columns.${path}`);
+    const type = ({int:"integer",bigint:"integer",text:"string",varchar:"string",numeric:"decimal",bool:"boolean"})[column.type] ?? column.type;
+    return {path, type, encoding: column.encoding ?? ({integer:"json",decimal:"decimal-string",boolean:"json",string:"string",date:"string"})[type], nullable: column.nullable ?? false};
+  });
+}
+
+function assertRootPredicateFeatures(value, context) {
+  exactKeys(value, ["format","format_version","domain","profile","revision","wire_profile","request_format_version","result","fields","default_select","limits","supports"], "features");
+  format(value, "selecto.root-predicate-features", "features");
+  if (value.profile !== "canonical_root_predicates.v1" || value.wire_profile !== "remote_query.v2" || value.request_format_version !== 2) throw new CanonicalWireError("features.profile", "unsupported root predicate profile");
+  assertUnicode(nonEmptyString(value.revision, "features.revision"), "features.revision");
+  exactKeys(value.domain, ["id","fingerprint","publication"], "features.domain");
+  Object.values(value.domain).forEach((item) => assertUnicode(nonEmptyString(item,"features.domain"),"features.domain"));
+  exactKeys(value.result, ["format","format_version"], "features.result"); format(value.result,"selecto.remote-query-result","features.result");
+  for (const [name, expected] of [["limits",rootLimits],["supports",rootSupports]]) {
+    exactKeys(value[name],Object.keys(expected),`features.${name}`);
+    for (const [key, wanted] of Object.entries(expected)) if (value[name][key] !== wanted) throw new CanonicalWireError(`features.${name}.${key}`, "unsupported capability or bound");
+  }
+  const ids = new Set(), paths = new Set();
+  const fields = array(value.fields,"features.fields"); if (!fields.length) throw new CanonicalWireError("features.fields","empty fields");
+  fields.forEach((field, i) => {
+    const path = `features.fields.${i}`;
+    exactKeys(field,["id","path","label","type","encoding","nullable","operators"],path);
+    assertUnicode(nonEmptyString(field.id,`${path}.id`),`${path}.id`,16384);
+    assertUnicode(nonEmptyString(field.label,`${path}.label`),`${path}.label`,16384);
+    if (typeof field.path !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(field.path)) throw new CanonicalWireError(`${path}.path`,"expected public root path");
+    rootPair(field,path);
+    const ops = array(field.operators,`${path}.operators`);
+    const supported = field.type === "boolean" ? ["eq","ne","is_null","is_not_null"] : rootOps;
+    if (!ops.length || new Set(ops).size !== ops.length || ops.some((op) => !supported.includes(op))) throw new CanonicalWireError(`${path}.operators`,"unsupported operators");
+    if (ids.has(field.id) || paths.has(field.path)) throw new CanonicalWireError(path,"duplicate field ID or path"); ids.add(field.id); paths.add(field.path);
+  });
+  const selected = array(value.default_select,"features.default_select");
+  if (!selected.length || selected.length > 100 || new Set(selected).size !== selected.length || selected.some((id) => !ids.has(id))) throw new CanonicalWireError("features.default_select","unresolved or duplicate default selection");
+  if (context) {
+    const expected = context.domain ?? context.metadata?.domain;
+    if (!expected || ["id","fingerprint","publication"].some((key) => expected[key] !== value.domain[key])) throw new CanonicalWireError("features.domain","publication binding mismatch");
+    if ((context.profile !== undefined && context.profile !== value.profile) || (context.revision !== undefined && context.revision !== value.revision)) throw new CanonicalWireError("features.revision","active feature binding mismatch");
+    if (context.manifest && (!context.manifest.profiles.includes("remote_query.v2") || context.manifest.domain.fingerprint !== value.domain.fingerprint)) throw new CanonicalWireError("features.domain","manifest binding mismatch");
+    const published = context.canonical_fields ?? (context.canonicalDomain ? canonicalRootFields(context.canonicalDomain) : undefined);
+    if (!published) throw new CanonicalWireError("features.fields","canonical field context required");
+    const byPath = new Map(published.map((field) => [field.path,field]));
+    fields.forEach((field) => {
+      const actual = byPath.get(field.path);
+      if (!actual || ["type","encoding","nullable"].some((key) => actual[key] !== field[key])) throw new CanonicalWireError("features.fields","canonical path/type/codec binding mismatch");
+    });
+  }
+  return value;
+}
+
+function assertRootScalar(value, field, path = "value", author = false) {
+  rootPair(field,path);
+  if (typeof value === "string") assertUnicode(value,path,16384);
+  if (author && typeof value !== "string" && typeof value !== "boolean") throw new CanonicalWireError(path,"author scalar must be typed text or boolean");
+  let valid = false;
+  if (field.type === "integer") {
+    if (typeof value === "number") valid = Number.isSafeInteger(value);
+    else if (typeof value === "string" && /^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(value)) {
+      const exact = BigInt(value); valid = exact >= -9223372036854775808n && exact <= 9223372036854775807n;
+    }
+  } else if (field.type === "decimal") valid = typeof value === "number" ? Number.isSafeInteger(value) : typeof value === "string" && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value);
+  else if (field.type === "boolean") valid = typeof value === "boolean";
+  else if (field.type === "string") valid = typeof value === "string";
+  else if (field.type === "date") valid = typeof value === "string" && !value.startsWith("0000-") && validDate(value);
+  if (!valid) throw new CanonicalWireError(path,`invalid exact ${field.type} scalar`);
+  return value;
+}
+
+function assertRootPredicateQuery(query, features, options = {}) {
+  assertRootPredicateFeatures(features);
+  keys(query,["select","where","order_by","limit","offset","timezone","row_format"],"query");
+  const byPath = new Map(features.fields.map((field) => [field.path,field]));
+  const selected = array(query.select,"query.select");
+  if (!selected.length || selected.length > 100 || new Set(selected).size !== selected.length || selected.some((path) => !byPath.has(path))) throw new CanonicalWireError("query.select","unresolved, duplicate or excessive root selection");
+  let count = 0;
+  function node(value, depth, path) {
+    record(value,path); if (++count > 20 || depth > 4) throw new CanonicalWireError(path,"predicate node/depth bound exceeded");
+    const group = ["and","or"].filter((key) => Object.hasOwn(value,key));
+    if (group.length) {
+      exactKeys(value,group.length === 1 ? group : [],path);
+      const children = array(value[group[0]],path); if (!children.length) throw new CanonicalWireError(path,"empty executable group");
+      children.forEach((child,i) => node(child,depth+1,`${path}/${group[0]}/${i}`)); return;
+    }
+    const nullOp = ["is_null","is_not_null"].includes(value.op);
+    exactKeys(value,nullOp ? ["field","op"] : ["field","op","value"],path);
+    const field = byPath.get(value.field); if (!field) throw new CanonicalWireError(path,"unresolved root field");
+    if (!field.operators.includes(value.op)) throw new CanonicalWireError(path,"operator unavailable for field");
+    if (!nullOp) {
+      assertRootScalar(value.value,field,`${path}/value`);
+      const token = options.numberTokens?.get(`${path}/value`);
+      if (token && !/^-?(?:0|[1-9]\d*)$/.test(token)) throw new CanonicalWireError(path,"fraction/exponent numeric token unavailable");
+    }
+  }
+  if (Object.hasOwn(query,"where")) node(query.where,1,"/query/where");
+  if (Object.hasOwn(query,"order_by")) {
+    const orders = array(query.order_by,"query.order_by"); if (orders.length > 10) throw new CanonicalWireError("query.order_by","order bound exceeded");
+    const seen = new Set(); orders.forEach((order) => {exactKeys(order,["field","direction"],"order"); if (!byPath.has(order.field) || seen.has(order.field) || !["asc","desc"].includes(order.direction)) throw new CanonicalWireError("order","invalid or duplicate root order"); seen.add(order.field);});
+  }
+  for (const [key,max,min] of [["limit",100,1],["offset",100000,0]]) if (Object.hasOwn(query,key)) {
+    integer(query[key],`query.${key}`,min); if (query[key] > max) throw new CanonicalWireError(`query.${key}`,"paging bound exceeded");
+    const token = options.numberTokens?.get(`/query/${key}`); if (token && !/^(?:0|[1-9]\d*)$/.test(token)) throw new CanonicalWireError(`query.${key}`,"integer token required");
+  }
+  if (Object.hasOwn(query,"row_format")) oneOf(query.row_format,["arrays","objects"],"query.row_format");
+  if (Object.hasOwn(query,"timezone")) assertTimezone(query.timezone);
+  return query;
+}
+function assertTimezone(value) {
+  assertUnicode(nonEmptyString(value,"timezone"),"timezone",16384);
+  try { new Intl.DateTimeFormat("en-US",{timeZone:value}); } catch { throw new CanonicalWireError("timezone","unknown IANA timezone"); }
+  return value;
+}
+function assertRootRequestId(value) {
+  assertUnicode(nonEmptyString(value,"request_id"),"request_id",128);
+  if (/[\r\n]/.test(value)) throw new CanonicalWireError("request_id","line breaks unavailable");
+}
+function buildRootPredicateRequest(fingerprint, query, options = {}) {
+  assertUnicode(nonEmptyString(fingerprint,"domain.fingerprint"),"domain.fingerprint");
+  if (!options.features) throw new CanonicalWireError("features","root feature context required");
+  assertRootPredicateQuery(query,options.features);
+  const request = {format:"selecto.remote-query",format_version:2,domain:{fingerprint},query};
+  if (options.requestId !== undefined) {assertRootRequestId(options.requestId); request.request_id = options.requestId;}
+  parseStrictJSON(JSON.stringify(request));
+  return request;
+}
+function parseCanonicalRequestText(text, context) {
+  const {value,numberTokens} = parseStrictJSON(text,{tokens:true});
+  exactKeys(value,Object.hasOwn(value,"request_id") ? ["format","format_version","domain","query","request_id"] : ["format","format_version","domain","query"],"request");
+  if (value.format !== "selecto.remote-query") throw new CanonicalWireError("request.format","remote envelope required");
+  exactKeys(value.domain,["fingerprint"],"request.domain"); assertUnicode(nonEmptyString(value.domain.fingerprint,"request.domain.fingerprint"),"request.domain.fingerprint");
+  if (value.request_id !== undefined) assertRootRequestId(value.request_id);
+  if (value.format_version === 2) {
+    if (numberTokens.get("/format_version") !== "2" || !context.manifest?.profiles.includes("remote_query.v2")) throw new CanonicalWireError("request.format_version","root v2 unavailable or noninteger token");
+    if (!context.features) throw new CanonicalWireError("features","root features unavailable");
+    assertRootPredicateQuery(value.query,context.features,{numberTokens});
+  } else if (value.format_version === 1) buildRemoteRequest(value.domain.fingerprint,value.query,value.request_id);
+  else throw new CanonicalWireError("request.format_version","unsupported protocol version");
+  return {request:value,raw:text};
+}
+function assertRootPredicateResult(value, context) {
+  const {fingerprint,query,features} = context;
+  assertQueryResult(value,fingerprint,query);
+  const byPath = new Map(features.fields.map((field) => [field.path,field]));
+  if (value.data.columns.length !== query.select.length) throw new CanonicalWireError("response.columns","selection width mismatch");
+  value.data.columns.forEach((column,i) => {
+    const field = byPath.get(query.select[i]);
+    if (!field || column.id !== field.path || column.field !== field.path || column.label !== field.label || column.type !== field.type || column.nullable !== field.nullable || !(column.encoding === field.encoding || (field.type === "integer" && field.encoding === "json" && column.encoding === "decimal-string"))) throw new CanonicalWireError("response.columns","selection/type/codec binding mismatch");
+
+  });
+  if (value.data.page.limit !== (query.limit ?? 100) || value.data.page.offset !== (query.offset ?? 0)) throw new CanonicalWireError("response.page","effective page mismatch");
+  return value;
+}
+
+return {CanonicalWireError,CanonicalHttpError,safePath,record,nonEmptyString,integer,keys,assertCatalog,assertManifest,routePath,assertDomain,assertError,assertColumn,assertScalar,assertQueryResult,buildRemoteRequest,createCanonicalClient,assertUnicode,parseStrictJSON,canonicalRootFields,assertRootPredicateFeatures,assertRootScalar,assertRootPredicateQuery,assertTimezone,buildRootPredicateRequest,parseCanonicalRequestText,assertRootPredicateResult};
 })();
 global.SelectoExplorerClient = (function() {
 const canonical = global.SelectoCanonicalClient;
@@ -439,9 +689,23 @@ function createExplorerClient(options = {}) {
     if (!entry) refuse("domainId", "domain is unavailable in the current publication", "operation_forbidden");
     const [manifest, value] = await Promise.all([client.manifest(entry.manifest, signal), client.metadata(entry.explorer_metadata, signal)]);
     const domain = await client.domain(manifest, signal);
-    return {manifest, metadata: assertExplorerMetadata(value, manifest, entry, domain)};
+    return {entry, manifest, canonicalDomain:domain, metadata: assertExplorerMetadata(value, manifest, entry, domain)};
+  }
+  async function rootPublication(id, signal) {
+    const context = await publication(id,signal);
+    const features = await client.rootPredicateFeatures(context.manifest,signal);
+    canonical.assertRootPredicateFeatures(features,{...context,domain:context.metadata.domain});
+    return {...context,features,binding:rootPredicateBinding(features)};
   }
   return {
+    async getRootPredicateContext(id, requestOptions = {}) {return rootPublication(id,requestOptions.signal);},
+    async executeRootPredicateIntent(intent, requestOptions = {}) {
+      const retained = canonical.parseStrictJSON(JSON.stringify(intent));
+      const context = await rootPublication(retained.binding.domain_id,requestOptions.signal);
+      const query = toRootPredicateQuery(retained,context);
+      const result = await client.queryRootPredicate(context.manifest,query,{...requestOptions,features:context.features,fingerprint:retained.binding.fingerprint});
+      return toRootPredicateExplorerResult(result,retained,context);
+    },
     async listDomains() {
       const catalog = await client.catalog();
       return Promise.all(catalog.domains.map(async (entry) => {
@@ -460,7 +724,144 @@ function createExplorerClient(options = {}) {
   };
 }
 
-return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanonicalQuery,toExplorerResult,createExplorerClient};
+function requiredKeys(value, required, path) {
+  keys(value, required, path);
+  if (required.some((key) => !Object.hasOwn(value,key))) refuse(path,"missing required member","invalid_query");
+}
+function rootPredicateBinding(features) {
+  canonical.assertRootPredicateFeatures(features);
+  return {domain_id:features.domain.id, fingerprint:features.domain.fingerprint, publication:features.domain.publication,
+    wire_profile:features.wire_profile, feature_profile:features.profile, feature_revision:features.revision};
+}
+function assertIntentShape(intent) {
+  requiredKeys(intent,["format","format_version","mode","binding","select","predicate","order_by","limit","offset","presentation"],"intent");
+  if (intent.format !== "selecto.root-predicate-ui-intent" || intent.format_version !== 1 || intent.mode !== "recursive") refuse("intent","unknown root intent format/version/mode","invalid_query");
+  requiredKeys(intent.binding,["domain_id","fingerprint","publication","wire_profile","feature_profile","feature_revision"],"intent.binding");
+  Object.values(intent.binding).forEach((value) => canonical.assertUnicode(nonEmptyString(value,"intent.binding"),"intent.binding",16384));
+  if (intent.binding.wire_profile !== "remote_query.v2" || intent.binding.feature_profile !== "canonical_root_predicates.v1") refuse("intent.binding","unsupported bound profile","invalid_query");
+  if (!Array.isArray(intent.select) || !intent.select.length || intent.select.length > 100 || new Set(intent.select).size !== intent.select.length) refuse("intent.select","unique nonempty selection required","invalid_query");
+  intent.select.forEach((id) => canonical.assertUnicode(nonEmptyString(id,"intent.select"),"intent.select",16384));
+  requiredKeys(intent.predicate,intent.predicate?.kind === "absent" ? ["kind"] : ["kind","tree"],"intent.predicate");
+  if (!["absent","tree"].includes(intent.predicate.kind)) refuse("intent.predicate","unknown predicate kind","invalid_query");
+  let count = 0;
+  function visit(node,depth) {
+    record(node,"intent.predicate.tree"); if (++count > 20 || depth > 4) refuse("intent.predicate.tree","node/depth bound exceeded","invalid_query");
+    const groups = ["and","or"].filter((key) => Object.hasOwn(node,key));
+    if (groups.length) {
+      if (groups.length !== 1) refuse("intent.predicate.tree","mixed group kinds","invalid_query");
+      requiredKeys(node,groups,"intent.predicate.tree");
+      if (!Array.isArray(node[groups[0]]) || !node[groups[0]].length) refuse("intent.predicate.tree","empty executable group","invalid_query");
+      node[groups[0]].forEach((child) => visit(child,depth+1)); return;
+    }
+    const nullTest = ["is_null","is_not_null"].includes(node.op);
+    requiredKeys(node,nullTest ? ["field","op"] : ["field","op","value"],"intent.predicate.tree");
+    if (!["eq","ne","gt","gte","lt","lte","is_null","is_not_null"].includes(node.op)) refuse("intent.predicate.tree.op","unsupported operator");
+    canonical.assertUnicode(nonEmptyString(node.field,"intent.predicate.tree.field"),"intent.predicate.tree.field",16384);
+    if (!nullTest && typeof node.value !== "string" && typeof node.value !== "boolean") refuse("intent.predicate.tree.value","typed text or boolean required","invalid_query");
+    if (typeof node.value === "string") canonical.assertUnicode(node.value,"intent.predicate.tree.value",16384);
+  }
+  if (intent.predicate.kind === "tree") visit(intent.predicate.tree,1);
+  if (!Array.isArray(intent.order_by) || intent.order_by.length > 10) refuse("intent.order_by","order bound exceeded","invalid_query");
+  const ordered = new Set(); intent.order_by.forEach((order) => {
+    requiredKeys(order,["field","direction"],"intent.order_by");
+    canonical.assertUnicode(nonEmptyString(order.field,"intent.order_by.field"),"intent.order_by.field",16384);
+    if (ordered.has(order.field) || !["asc","desc"].includes(order.direction)) refuse("intent.order_by","duplicate or invalid order","invalid_query"); ordered.add(order.field);
+  });
+  integer(intent.limit,"intent.limit",1); integer(intent.offset,"intent.offset");
+  if (intent.limit > 100 || intent.offset > 100000) refuse("intent","paging bound exceeded","invalid_query");
+  requiredKeys(intent.presentation,["timezone","locale"],"intent.presentation");
+  canonical.assertTimezone(intent.presentation.timezone);
+  canonical.assertUnicode(nonEmptyString(intent.presentation.locale,"intent.presentation.locale"),"intent.presentation.locale",16384);
+  try {new Intl.NumberFormat(intent.presentation.locale);} catch {refuse("intent.presentation.locale","unknown locale","invalid_query");}
+  return intent;
+}
+function rootContextFeatures(context) {
+  const features = context?.features;
+  if (!features) refuse("features","recursive mode unavailable");
+  const trusted = context.canonical_fields ? context : {domain:context.metadata?.domain ?? features.domain, manifest:context.manifest, canonicalDomain:context.canonicalDomain};
+  canonical.assertRootPredicateFeatures(features,trusted);
+  return features;
+}
+function assertRootPredicateIntent(intent, context) {
+  assertIntentShape(intent);
+  const features = rootContextFeatures(context);
+  const binding = rootPredicateBinding(features);
+  if (Object.keys(binding).some((key) => intent.binding[key] !== binding[key])) refuse("intent.binding","publication or feature revision changed; retain state and reload","stale_domain_fingerprint");
+  const byId = new Map(features.fields.map((field) => [field.id,field]));
+  const field = (id) => {const value = byId.get(id); if (!value) refuse("intent.field","unresolved opaque field ID","invalid_field"); return value;};
+  intent.select.forEach(field); intent.order_by.forEach((order) => field(order.field));
+  function visit(node) {
+    if (Object.hasOwn(node,"and") || Object.hasOwn(node,"or")) { (node.and ?? node.or).forEach(visit); return; }
+    const selected = field(node.field);
+    if (!selected.operators.includes(node.op)) refuse("intent.predicate.tree.op","operator unavailable for field");
+    if (!["is_null","is_not_null"].includes(node.op)) canonical.assertRootScalar(node.value,selected,"intent.predicate.tree.value",true);
+  }
+  if (intent.predicate.kind === "tree") visit(intent.predicate.tree);
+  return intent;
+}
+function toRootPredicateQuery(intent, context) {
+  assertRootPredicateIntent(intent,context);
+  const byId = new Map(context.features.fields.map((field) => [field.id,field]));
+  function translate(node) {
+    if (Object.hasOwn(node,"and")) return {and:node.and.map(translate)};
+    if (Object.hasOwn(node,"or")) return {or:node.or.map(translate)};
+    const result = {field:byId.get(node.field).path,op:node.op};
+    if (Object.hasOwn(node,"value")) result.value = node.value;
+    return result;
+  }
+  const query = {select:intent.select.map((id) => byId.get(id).path),order_by:intent.order_by.map((order) => ({field:byId.get(order.field).path,direction:order.direction})),limit:intent.limit,offset:intent.offset,timezone:intent.presentation.timezone};
+  if (intent.predicate.kind === "tree") query.where = translate(intent.predicate.tree);
+  canonical.assertRootPredicateQuery(query,context.features);
+  return query;
+}
+function parseRootPredicateState(text, context) {
+  const {value,numberTokens} = canonical.parseStrictJSON(text,{tokens:true,maxBytes:65536});
+  requiredKeys(value,["format","format_version","intent"],"state");
+  if (value.format !== "selecto.root-predicate-state" || value.format_version !== 1 || numberTokens.get("/format_version") !== "1" || numberTokens.get("/intent/format_version") !== "1") refuse("state","unknown/noninteger root state version","invalid_query");
+  assertIntentShape(value.intent);
+  if (context) assertRootPredicateIntent(value.intent,context);
+  return value;
+}
+function encodeRootPredicateState(state) {
+  const text = JSON.stringify(state); parseRootPredicateState(text);
+  const encoded = encodeURIComponent(text);
+  if (encoded.length > 65536) refuse("state","encoded state exceeds 64KiB","invalid_query");
+  return encoded;
+}
+function decodeRootPredicateState(encodedOrRaw, context) {
+  if (typeof encodedOrRaw !== "string" || encodedOrRaw.length > 65536) refuse("state","encoded state exceeds 64KiB","invalid_query");
+  let text = encodedOrRaw;
+  if (!text.trimStart().startsWith("{")) {
+    try {text = decodeURIComponent(text);} catch {refuse("state","invalid URI escaping","invalid_query");}
+  }
+  return parseRootPredicateState(text,context);
+}
+/** Transparent facade for independently supplied local validator inputs. */
+function validateRootPredicateFeaturesAndMap(features, context, authorSelect, authorTree) {
+  const validated_features = canonical.assertRootPredicateFeatures(features,context);
+  const intent = {format:"selecto.root-predicate-ui-intent",format_version:1,mode:"recursive",binding:rootPredicateBinding(features),select:authorSelect,predicate:{kind:"tree",tree:authorTree},order_by:[],limit:100,offset:0,presentation:{timezone:"UTC",locale:"en-US"}};
+  const query = toRootPredicateQuery(intent,{...context,features});
+  return {validated_features,translated_select:query.select,translated_where:query.where};
+}
+function toRootPredicateExplorerResult(envelope,intent,context) {
+  const query = toRootPredicateQuery(intent,context);
+  canonical.assertRootPredicateResult(envelope,{fingerprint:intent.binding.fingerprint,query,features:context.features});
+  const byPath = new Map(context.features.fields.map((field) => [field.path,field]));
+  const columns = envelope.data.columns.map((column) => ({id:byPath.get(column.field).id,label:column.label,type:column.type === "string" ? "text" : column.type,encoding:column.encoding}));
+  const rows = envelope.data.rows.map((row) => Object.fromEntries(envelope.data.columns.map((column,i) => [columns[i].id,Array.isArray(row) ? row[i] : row[column.id]])));
+  return {schema:"selecto.spa.query-response/v1",columns,rows,page:{number:Math.floor(intent.offset/intent.limit)+1,size:intent.limit},metadata:{canonical:{fingerprint:intent.binding.fingerprint,publication:intent.binding.publication,hasMore:envelope.data.page.has_more}}};
+}
+
+/** Read the existing closed flat snapshot without upgrading its request profile. */
+function flatSnapshotToRequest(snapshot) {
+  keys(snapshot,["version","domainId","view","state","filters","page","publication","presentation"],"snapshot");
+  if (snapshot.version !== 2) refuse("snapshot.version","unknown flat snapshot version","invalid_query");
+  for (const key of ["domainId","view","state","filters","page"]) if (!Object.hasOwn(snapshot,key)) refuse(`snapshot.${key}`,"missing required member","invalid_query");
+  const {version,...request} = snapshot;
+  return {schema:"selecto.spa.query-request/v1",...request};
+}
+
+return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanonicalQuery,toExplorerResult,createExplorerClient,rootPredicateBinding,assertRootPredicateIntent,toRootPredicateQuery,parseRootPredicateState,encodeRootPredicateState,decodeRootPredicateState,validateRootPredicateFeaturesAndMap,toRootPredicateExplorerResult,flatSnapshotToRequest};
 })();
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 (function (global) {
@@ -507,6 +908,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
 
   function normalizeAPIBase(value, fallback) {
     const candidate = String(value || fallback || "/api/v1/selecto").replace(/\/+$/, "");
+    if (global.SelectoCanonicalClient) {try {global.SelectoCanonicalClient.safePath(candidate);} catch {throw new Error("The API console requires an absolute same-origin API path.");}}
     const invalidSegment = candidate.split("/").some((segment) => {
       try {
         const decoded = decodeURIComponent(segment);
@@ -528,11 +930,16 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     if (encoded === null) return null;
     let payload;
     try {
-      payload = JSON.parse(encoded);
+      payload = global.SelectoCanonicalClient ? global.SelectoCanonicalClient.parseStrictJSON(encoded, {maxBytes: 65536}) : JSON.parse(encoded);
     } catch (error) {
       throw new Error(`The Explorer request in this URL is not valid JSON: ${error.message}`);
     }
     if (!isPlainObject(payload)) throw new Error("The Explorer request in this URL must be a JSON object.");
+    if (payload.format === "selecto.root-predicate-state") {
+      const part = hash.split("&").find((part) => new URLSearchParams(part).has("request"));
+      const originalEncoded = part.slice(part.indexOf("=") + 1).replace(/\+/g,"%20");
+      return global.SelectoExplorerClient.decodeRootPredicateState(originalEncoded);
+    }
     return payload;
   }
 
@@ -1109,6 +1516,12 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
           // their existing explicit bare-query mode on hosts without the profile.
           this.queryResponseFormats = [Object.assign({}, QUERY_RESPONSE_FORMATS[0])];
         }
+        if (this.remoteMode && this.explorerMetadata) {
+          const catalogRoute = this.manifest.routes.find((route) => route.operation_id === "getDomainCatalog" && route.method === "GET");
+          this.explorerClient = global.SelectoExplorerClient.createExplorerClient({baseUrl:this.base,
+            ...(catalogRoute ? {catalogPath:catalogRoute.path} : {}),headers:() => ({"X-CSRF-Token":this.csrfToken})});
+          if (this.manifest.profiles.includes("remote_query.v2")) this.rootPredicateContext = await this.explorerClient.getRootPredicateContext(this.explorerMetadata.domain.id);
+        }
         this.state.responseFormat = this.queryResponseFormats[0].id;
         this.state.responseFilename = suggestedDownloadFilename(
           this.domain.name, this.responseFormat(this.state.responseFormat).extension,
@@ -1118,19 +1531,25 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         this.filterFields = collectFilterFields(discovery.domain, this.fields);
         this.filterFieldMap = new Map(this.filterFields.map((field) => [field.path, field]));
         this.seedState();
+        const initialRequestRaw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
         let initialRequest = null;
         let initialRequestError = null;
         try {
           initialRequest = requestPayloadFromLocation(global.location);
-          if (initialRequest) this.loadPayloadIntoChooser(initialRequest);
+          if (initialRequest && initialRequest.format !== "selecto.root-predicate-state") this.loadPayloadIntoChooser(initialRequest);
         } catch (error) {
           initialRequestError = error;
+          this.blockedInitialRequestText = initialRequestRaw;
         }
         this.render();
-        if (initialRequestError) {
-          if (initialRequest) {
+        if (initialRequest?.format === "selecto.root-predicate-state") {
+          const raw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
+          await this.restoreRootState(raw);
+        } else if (initialRequestError) {
+          if (initialRequest || initialRequestRaw) {
+            const stateEditor = this.root.querySelector("[data-sac-root-state]"); if (stateEditor) stateEditor.value = initialRequestRaw;
             const editor = this.root.querySelector("[data-sac-request]");
-            editor.value = JSON.stringify(initialRequest, null, 2);
+            editor.value = initialRequestRaw || JSON.stringify(initialRequest, null, 2);
             this.state.rawDirty = true;
             this.root.querySelector("[data-sac-edited]").hidden = false;
             this.updateCurl();
@@ -1165,6 +1584,9 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         throw new Error(`${response.status} ${response.statusText}: the server did not return JSON.`);
       }
       if (!response.ok) {
+        if (global.SelectoCanonicalClient && payload?.ok === false && payload.error?.code && payload.error?.details) {
+          throw new global.SelectoCanonicalClient.CanonicalHttpError(response.status,global.SelectoCanonicalClient.assertError(payload));
+        }
         const message = payload && payload.error && payload.error.message;
         throw new Error(message || `${response.status} ${response.statusText}`);
       }
@@ -1336,12 +1758,20 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
                   <div class="sac-compact-actions"><span class="sac-edited" data-sac-edited hidden>Manually edited</span><span data-sac-post-editor-actions><button type="button" class="sac-text-button" data-sac-load-json>Load into chooser</button><button type="button" class="sac-text-button" data-sac-reset-json>Reset JSON</button></span><button type="button" class="sac-text-button" data-sac-copy-request>Copy</button></div>
                 </div>
                 <div class="sac-import-message" data-sac-import-message hidden></div>
+                ${this.remoteMode ? `<div class="sac-root-controls">
+                  <label>Query profile<select aria-label="Query profile" data-sac-root-mode><option value="flat">Flat Detail (v1)</option><option value="root" ${this.rootPredicateContext ? "" : "disabled"}>Recursive root predicates (v2)</option></select></label>
+                  <p data-sac-root-availability>${this.rootPredicateContext ? "Recursive root predicates available; opt in explicitly." : "Recursive root predicates unavailable on this publication."}</p>
+                  <details><summary>Root predicate state</summary><label>Root predicate state<textarea aria-label="Root predicate state" data-sac-root-state spellcheck="false"></textarea></label>
+                    <button type="button" data-sac-root-restore>Restore root state</button><button type="button" data-sac-root-link>Copy root state link</button>
+                    <button type="button" data-sac-root-save>Save private root state</button><button type="button" data-sac-root-private>Restore private root state</button>
+                  </details>
+                </div>` : ""}
                 <textarea class="sac-request-editor" spellcheck="false" aria-label="Query request" data-sac-request></textarea>
                 <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button" data-sac-cancel-query hidden>Cancel query</button><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
               </section>
               <section class="sac-response-card">
                 <div class="sac-response-heading">
-                  <div><h2>Response</h2><span class="sac-response-status" data-sac-response-status>Ready</span></div>
+                  <div><h2>Response</h2><span class="sac-response-status" data-sac-response-status>Ready</span><p data-sac-page-info hidden></p></div>
                   <div class="sac-result-tabs" role="tablist">
                     <button type="button" class="is-active" data-sac-result-tab="table">Table</button>
                     <button type="button" data-sac-result-tab="json">JSON</button>
@@ -2430,6 +2860,11 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     }
 
     buildPayload() {
+      if (this.rootMode && !this.rootState) throw new Error("Root state remains blocked; restore valid bound state or explicitly select Flat Detail.");
+      if (this.rootState && this.rootMode) {
+        const query = global.SelectoExplorerClient.toRootPredicateQuery(this.rootState.intent,this.rootPredicateContext);
+        return global.SelectoCanonicalClient.buildRootPredicateRequest(this.rootState.intent.binding.fingerprint,query,{features:this.rootPredicateContext.features});
+      }
       const payload = {};
       if (this.state.mode === "select") {
         const selectedFields = this.state.selectedFields.map((selection) => {
@@ -2513,6 +2948,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
 
     chooserStateFromPayload(payload) {
       if (!isPlainObject(payload)) throw new Error("The request must be a JSON object.");
+      if (payload.version === 2 && payload.domainId) payload = global.SelectoExplorerClient.flatSnapshotToRequest(payload);
       if (payload.schema === "selecto.spa.query-request/v1") {
         if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
         payload = global.SelectoExplorerClient.toCanonicalQuery(payload, this.explorerMetadata);
@@ -2684,11 +3120,99 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       target.hidden = !message;
     }
 
+    async freshRootContext(signal) {
+      if (!this.explorerClient || !this.explorerMetadata) throw new Error("Recursive root predicates unavailable on this publication.");
+      const context = await this.explorerClient.getRootPredicateContext(this.explorerMetadata.domain.id,{signal});
+      this.rootPredicateContext = context;
+      return context;
+    }
+
+    async restoreRootState(raw) {
+      const sequence = this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+      const stateEditor = this.root.querySelector("[data-sac-root-state]");
+      if (stateEditor) stateEditor.value = raw;
+      const editor = this.root.querySelector("[data-sac-request]");
+      // Retain the input before asynchronous discovery or refusal.
+      editor.value = raw;
+      this.state.rawDirty = true;
+      this.rootState = null;
+      this.rootMode = true;
+      this.rootStateRequestText = null;
+      try {
+        const state = global.SelectoExplorerClient.parseRootPredicateState(raw);
+        const context = await this.freshRootContext();
+        if (sequence !== this.rootRestoreSequence) return false;
+        global.SelectoExplorerClient.assertRootPredicateIntent(state.intent,context);
+        this.blockedInitialRequestText = null;
+        this.rootState = state; this.rootMode = true;
+        const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = true;
+        const selector = this.root.querySelector("[data-sac-root-mode]"); if (selector) selector.value = "root";
+        editor.value = JSON.stringify(this.buildPayload(),null,2);
+        this.rootStateRequestText = editor.value;
+        this.root.querySelector("[data-sac-edited]").hidden = false;
+        this.setImportMessage("Bound root state restored. Tree and presentation retained.","success");
+        this.updateCurl(); return true;
+      } catch (error) {
+        if (sequence !== this.rootRestoreSequence) return false;
+        this.setImportMessage(`Root state blocked: ${error.message}`,"error");
+        this.setStatus(error.message,"error"); return false;
+      }
+    }
+
+    async selectRootMode(value) {
+      if (value === "flat") {
+        this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+        this.blockedInitialRequestText = null;
+        const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = false;
+        this.rootMode = false; this.rootState = null; this.rootStateRequestText = null;
+        this.state.rawDirty = false; this.syncRequest(true); return;
+      }
+      const sequence = this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+      try {
+        const context = await this.freshRootContext();
+        if (sequence !== this.rootRestoreSequence) return;
+        const intent = {format:"selecto.root-predicate-ui-intent",format_version:1,mode:"recursive",binding:{...context.binding},select:context.features.default_select.slice(),predicate:{kind:"absent"},order_by:[],limit:100,offset:0,presentation:{timezone:this.state.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,locale:navigator.language || "en-US"}};
+        await this.restoreRootState(JSON.stringify({format:"selecto.root-predicate-state",format_version:1,intent}));
+      } catch (error) {this.setImportMessage(error.message,"error");}
+    }
+
+    rootStateStorageKey() {return `selecto.console.root-state:${this.base}`;}
+    async rootStateAction(action) {
+      const stateEditor = this.root.querySelector("[data-sac-root-state]");
+      try {
+        if (action === "restore") return this.restoreRootState(stateEditor.value);
+        if (action === "private") {
+          const saved = global.localStorage.getItem(this.rootStateStorageKey());
+          if (!saved) throw new Error("No private root state saved.");
+          return this.restoreRootState(saved);
+        }
+        // Save only a complete bound state. Never infer a binding from raw text.
+        const state = global.SelectoExplorerClient.parseRootPredicateState(stateEditor.value);
+        const queryEditor = this.root.querySelector("[data-sac-request]");
+        const editorsMatch = () => this.rootState && queryEditor.value === this.rootStateRequestText && JSON.stringify(state) === JSON.stringify(this.rootState);
+        if (!editorsMatch()) throw new Error("State and query editor differ. Restore the complete intended root state before saving or sharing.");
+        const context = await this.freshRootContext();
+        if (!editorsMatch()) throw new Error("State and query editor differ. Restore the complete intended root state before saving or sharing.");
+        global.SelectoExplorerClient.assertRootPredicateIntent(state.intent,context);
+        const encoded = global.SelectoExplorerClient.encodeRootPredicateState(state);
+        if (action === "save") {
+          global.localStorage.setItem(this.rootStateStorageKey(),JSON.stringify(state));
+          this.setImportMessage("Private root state saved in this browser.","success");
+        } else {
+          const url = new URL(global.location.href); url.hash = `request=${encoded}`;
+          await this.copy(url.href,this.root.querySelector("[data-sac-root-link]"));
+          this.setImportMessage("Root state URL copied.","success");
+        }
+      } catch (error) {this.setImportMessage(`Root state blocked: ${error.message}`,"error");}
+    }
+
     loadRequestIntoChooser() {
       const editor = this.root.querySelector("[data-sac-request]");
       let payload;
       try {
-        payload = JSON.parse(editor.value);
+        payload = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);
+        if (payload.format === "selecto.root-predicate-state") return this.restoreRootState(editor.value);
+        if (payload.format === "selecto.remote-query" && payload.format_version === 2) throw new Error("Recursive v2 stays in the raw editor; this chooser is unavailable for the complete tree.");
         this.loadPayloadIntoChooser(payload);
       } catch (error) {
         this.setImportMessage(`The chooser cannot represent this JSON: ${error.message} You can still run it, but the chooser will not track it; you are in manual JSON mode.`, "error");
@@ -3558,6 +4082,10 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         this.changed();
         return;
       }
+      if (event.target.closest("[data-sac-root-restore]")) return this.rootStateAction("restore");
+      if (event.target.closest("[data-sac-root-link]")) return this.rootStateAction("link");
+      if (event.target.closest("[data-sac-root-save]")) return this.rootStateAction("save");
+      if (event.target.closest("[data-sac-root-private]")) return this.rootStateAction("private");
       if (event.target.closest("[data-sac-load-json]")) return this.loadRequestIntoChooser();
       if (event.target.closest("[data-sac-reset-json]")) return this.syncRequest(true);
       if (event.target.closest("[data-sac-run]")) return this.run();
@@ -3792,7 +4320,10 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         this.updateCurl();
         return;
       }
+      if (target.matches("[data-sac-root-mode]")) return this.selectRootMode(target.value);
+      if (target.matches("[data-sac-root-state]")) { this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1; return; }
       if (target.matches("[data-sac-request]")) {
+        this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
         this.state.rawDirty = true;
         this.root.querySelector("[data-sac-edited]").hidden = false;
         this.setImportMessage("", "");
@@ -3870,12 +4401,14 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       const editor = this.root.querySelector("[data-sac-request]");
       let request;
       try {
-        request = JSON.parse(editor.value);
+        if (this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText) throw new Error("URL state remains blocked. Restore valid bound state or explicitly start a new query.");
+        request = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);
       } catch (error) {
         this.setStatus("Invalid request JSON", "error");
         this.showLocalError(error.message);
         return;
       }
+      const rawRequestText = editor.value;
       const format = this.responseFormat(this.state.responseFormat);
       const filenameValidation = validateDownloadFilename(this.state.responseFilename, format);
       if (filenameValidation.error) {
@@ -3900,10 +4433,26 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       let response;
       let payload;
       try {
-        if (this.remoteMode) {
+        if (this.remoteMode && (request.format === "selecto.root-predicate-state" || request.format === "selecto.remote-query" && request.format_version === 2)) {
+          const context = await this.freshRootContext(controller.signal);
+          if (request.format === "selecto.root-predicate-state") {
+            const state = global.SelectoExplorerClient.parseRootPredicateState(rawRequestText,context);
+            const query = global.SelectoExplorerClient.toRootPredicateQuery(state.intent,context);
+            payload = await this.canonicalClient.queryRootPredicate(context.manifest,query,{features:context.features,signal:controller.signal,fingerprint:state.intent.binding.fingerprint});
+          } else {
+            if (this.rootState) global.SelectoExplorerClient.assertRootPredicateIntent(this.rootState.intent,context);
+            payload = await this.canonicalClient.queryText(context.manifest,rawRequestText,{features:context.features,signal:controller.signal});
+          }
+          response = {status:200,statusText:"OK",ok:true};
+        } else if (this.remoteMode) {
+          if (this.explorerClient && this.explorerMetadata) {
+            const descriptor = await this.explorerClient.getDomain(this.explorerMetadata.domain.id);
+            if (descriptor.release.fingerprint !== this.manifest.domain.fingerprint || descriptor.release.id !== this.explorerMetadata.domain.publication) throw new Error("Publication changed; retain the request and reload.");
+          }
           let query;
           let fingerprint = this.manifest.domain.fingerprint;
           let requestId;
+          if (request.version === 2 && request.domainId) request = global.SelectoExplorerClient.flatSnapshotToRequest(request);
           if (request.schema === "selecto.spa.query-request/v1") {
             if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
             query = global.SelectoExplorerClient.toCanonicalQuery(request, this.explorerMetadata);
@@ -4052,6 +4601,11 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       head.replaceChildren();
       body.replaceChildren();
       const data = payload && payload.data;
+      const pageInfo = this.root.querySelector("[data-sac-page-info]");
+      if (pageInfo) {
+        pageInfo.hidden = typeof data?.page?.has_more !== "boolean";
+        pageInfo.textContent = data?.page?.has_more ? "More rows available" : "No more rows";
+      }
       let columns = data && Array.isArray(data.columns) ? data.columns : [];
       let rows = data && Array.isArray(data.rows) ? data.rows : [];
       if (this.state.queryMethod === "get" && payload && payload.ok && isPlainObject(data)) {
@@ -4101,7 +4655,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     renderFatal(error) {
       this.root.replaceChildren();
       const panel = element("section", "sac-fatal");
-      panel.append(element("span", "sac-kicker", "API Console"), element("h1", "", "Could not load the API"), element("p", "", error.message || String(error)));
+      panel.append(element("span", "sac-kicker", "API Console"), element("h1", "", "Could not load the API"), element("p", "", error.status ? `${error.status} ${error.code}: ${error.message}` : error.message || String(error)));
       const retry = element("button", "sac-button sac-primary", "Retry");
       retry.type = "button";
       retry.addEventListener("click", () => global.location.reload());
