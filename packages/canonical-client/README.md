@@ -37,3 +37,23 @@ Transport refuses redirects and recursively escaped traversal. Results bind
 column order, paths, type, encoding, nullability and pagination to the requested
 selection and sidecar; native errors stay native. The existing `query` v1 API
 retains its format and flat request behavior.
+
+The optional selected nested branch uses `remote_query.v1`, the declared safe
+GET `getNestedDetailFeatures`, and sidecar profile `canonical_nested_detail.v1`.
+No extra manifest wire version or generic nested flag selects it. Validate
+`assertNestedDetailFeatures(features, {entry, manifest, canonicalDomain})`, then
+use `nestedDetailContext` and `queryNestedDetail` or `queryNestedDetailText` with
+that exact current context. The raw method preserves submitted bytes and number
+lexemes; unsupported shape, duplicate keys, malformed Unicode, fraction/exponent
+integer tokens, stale binding and unsafe scalars refuse locally.
+
+Selected results bind root descriptors and ordered `subtables.columns` to the
+same palette, including empty parent pages. Every child width/keyset, fixed
+codec/nullability and complete20-child bound validates before return. Decimal
+output has six fractional digits, int64 decimal strings remain strings, DATE
+stays ISO, and JSON integers must be safe lexical integers. No malformed/null
+collection is repaired. Errors retain native codes/status with exact admitted
+context when present. The selected byte caps are1MiB request,256KiB success and
+8KiB error; old headerless v1/root behavior remains separate. These are client
+integrity checks; they do not attest native source/privacy, SQL work/serialization
+barriers, runtime enrollment, or rendered behavior.

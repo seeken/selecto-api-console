@@ -28,3 +28,24 @@ export function decodeRootPredicateState(rawOrEncoded:string,context?:RootPredic
 export function validateRootPredicateFeaturesAndMap(features:RootPredicateFeatures,context:RootFeatureValidationContext,authorSelect:string[],authorTree:RootPredicateNode):{validated_features:RootPredicateFeatures;translated_select:string[];translated_where:RootPredicateQuery["where"]};
 export function toRootPredicateExplorerResult(envelope:RemoteResult,intent:RootPredicateIntent,context:RootPredicateValidationContext):ExplorerQueryResponse;
 export function flatSnapshotToRequest(snapshot:{version:2;domainId:string;view:string;state:ExplorerQueryRequest["state"];filters:ExplorerQueryRequest["filters"];page:ExplorerQueryRequest["page"];publication?:ExplorerQueryRequest["publication"];presentation?:ExplorerQueryRequest["presentation"]}):ExplorerQueryRequest;
+
+import type {NestedDetailFeatures,NestedDetailQuery,NestedDetailResult,NestedFeatureValidationContext,NestedDetailContext,NestedDetailField} from "@selecto/canonical-client";
+export interface NestedDetailBinding {domain_id:string;fingerprint:string;publication:string;wire_profile:"remote_query.v1";feature_profile:"canonical_nested_detail.v1";feature_revision:string;}
+export type NestedDetailIntentFilter = {id:string;field:string;op:"eq"|"ne"|"gt"|"gte"|"lt"|"lte";value:string|boolean} | {id:string;field:string;op:"is_null"|"is_not_null"};
+export interface NestedDetailIntent {format:"selecto.nested-detail-ui-intent";format_version:1;mode:"nested";binding:NestedDetailBinding;collection_id:string;select:Array<string|string[]>;filters:NestedDetailIntentFilter[];order_by:Array<{field:string;direction:"asc"|"desc"}>;limit:number;offset:number;row_format:"arrays"|"objects";presentation:{timezone:"UTC";locale:"en-US"};}
+export interface NestedDetailState {format:"selecto.nested-detail-state";format_version:1;intent:NestedDetailIntent;}
+export interface NestedExplorerContext extends NestedFeatureValidationContext {entry:CatalogEntry;features:NestedDetailFeatures;binding:NestedDetailBinding;}
+export type NestedDetailValidationContext = NestedFeatureValidationContext & {features:NestedDetailFeatures};
+export interface NestedExplorerScalarColumn {id:string;key:string;path:string;label:string;type:"integer"|"decimal"|"text"|"boolean"|"date";encoding:NestedDetailField["encoding"];nullable:boolean;}
+export interface NestedExplorerCollectionColumn {id:string;path:string;label:string;type:"nested";encoding:"json";nullable:false;nestedFields:NestedExplorerScalarColumn[];complete:true;limit:20;}
+export interface NestedExplorerResult {schema:"selecto.spa.query-response/v1";columns:Array<NestedExplorerScalarColumn|NestedExplorerCollectionColumn>;rows:Array<Record<string,unknown>>;page:{number:number;size:number};metadata:{canonical:{profile:"canonical_nested_detail.v1";fingerprint:string;publication:string;hasMore:boolean;nestedContext:NestedDetailContext;completeChildren:true}};}
+export interface ExplorerClient {getNestedDetailContext(id:string,options?:{signal?:AbortSignal}):Promise<NestedExplorerContext>;executeNestedDetailIntent(intent:NestedDetailIntent,options?:{signal?:AbortSignal;requestId?:string}):Promise<NestedExplorerResult>;}
+export function nestedDetailBinding(features:NestedDetailFeatures):NestedDetailBinding;
+export function createNestedDetailIntent(features:NestedDetailFeatures):NestedDetailIntent;
+export function assertNestedDetailIntent(value:unknown,context:NestedDetailValidationContext):NestedDetailIntent;
+export function toNestedDetailQuery(intent:NestedDetailIntent,context:NestedDetailValidationContext):NestedDetailQuery;
+export function parseNestedDetailState(rawJSON:string,context?:NestedDetailValidationContext):NestedDetailState;
+export function encodeNestedDetailState(state:NestedDetailState):string;
+export function decodeNestedDetailState(rawOrEncoded:string,context?:NestedDetailValidationContext):NestedDetailState;
+export function nestedDetailConsoleHref(path:string,state:NestedDetailState):string;
+export function toNestedDetailExplorerResult(envelope:NestedDetailResult,intent:NestedDetailIntent,context:NestedDetailValidationContext):NestedExplorerResult;

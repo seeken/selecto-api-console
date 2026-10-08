@@ -178,7 +178,27 @@ export function createExplorerClient(options = {}) {
     canonical.assertRootPredicateFeatures(features,{...context,domain:context.metadata.domain});
     return {...context,features,binding:rootPredicateBinding(features)};
   }
+  async function nestedPublication(id, signal) {
+    const catalog = await client.catalog(signal);
+    const entry = catalog.domains.find(domain => domain.id === id);
+    if (!entry) refuse("domainId", "domain unavailable in current publication", "operation_forbidden");
+    const manifest = await client.manifest(entry.manifest, signal);
+    const canonicalDomain = await client.domain(manifest, signal);
+    const features = await client.nestedDetailFeatures(manifest, signal);
+    canonical.assertNestedDetailFeatures(features, {entry,manifest,canonicalDomain});
+    return {entry,manifest,canonicalDomain,features,binding:nestedDetailBinding(features)};
+  }
   return {
+    async getNestedDetailContext(id, requestOptions = {}) { return nestedPublication(id, requestOptions.signal); },
+    async executeNestedDetailIntent(intent, requestOptions = {}) {
+      // Execution uses the 1MiB request bound; the 64KiB share cap is separate.
+      const retained = canonical.parseStrictJSON(JSON.stringify(intent));
+      nestedIntentShape(retained);
+      const context = await nestedPublication(retained.binding.domain_id, requestOptions.signal);
+      const query = toNestedDetailQuery(retained, context);
+      const result = await client.queryNestedDetail(context.manifest, query, {...requestOptions,features:context.features,context:canonical.nestedDetailContext(context.features)});
+      return toNestedDetailExplorerResult(result, retained, context);
+    },
     async getRootPredicateContext(id, requestOptions = {}) {return rootPublication(id,requestOptions.signal);},
     async executeRootPredicateIntent(intent, requestOptions = {}) {
       const retained = canonical.parseStrictJSON(JSON.stringify(intent));
@@ -340,4 +360,74 @@ export function flatSnapshotToRequest(snapshot) {
   for (const key of ["domainId","view","state","filters","page"]) if (!Object.hasOwn(snapshot,key)) refuse(`snapshot.${key}`,"missing required member","invalid_query");
   const {version,...request} = snapshot;
   return {schema:"selecto.spa.query-request/v1",...request};
+}
+
+/** Explicit complete nested mode: IDs are authoring keys, paths are wire keys. */
+export function nestedDetailBinding(features) {
+  canonical.assertNestedDetailFeatures(features);
+  return {domain_id:features.domain.id,fingerprint:features.domain.fingerprint,publication:features.domain.publication,wire_profile:"remote_query.v1",feature_profile:"canonical_nested_detail.v1",feature_revision:features.revision};
+}
+function nestedID(value,path,max=256) {
+  canonical.assertUnicode(nonEmptyString(value,path),path,max);
+  if (/[\r\n]/.test(value)) refuse(path,"line breaks unavailable","invalid_query");return value;
+}
+function nestedIntentShape(intent) {
+  requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation"],"nested.intent");
+  if(intent.format!=="selecto.nested-detail-ui-intent"||intent.format_version!==1||intent.mode!=="nested")refuse("nested.intent","unknown nested mode/version","invalid_query");
+  requiredKeys(intent.binding,["domain_id","fingerprint","publication","wire_profile","feature_profile","feature_revision"],"nested.intent.binding");
+  for(const value of Object.values(intent.binding))nestedID(value,"nested.intent.binding",1024);
+  if(intent.binding.wire_profile!=="remote_query.v1"||intent.binding.feature_profile!=="canonical_nested_detail.v1")refuse("nested.intent.binding","unsupported bound profile");
+  nestedID(intent.collection_id,"nested.intent.collection_id");
+  if(!Array.isArray(intent.select)||intent.select.length<2||intent.select.length>21)refuse("nested.intent.select","selection bound","invalid_query");
+  const rootIDs=new Set();let children=0;
+  intent.select.forEach(slot=>{if(Array.isArray(slot)){children++;if(!slot.length||slot.length>20||new Set(slot).size!==slot.length)refuse("nested.intent.select","child selection bound/duplicate","invalid_query");slot.forEach(id=>nestedID(id,"nested.intent.child"));}else{nestedID(slot,"nested.intent.select");if(rootIDs.has(slot))refuse("nested.intent.select","duplicate root ID","invalid_query");rootIDs.add(slot);}});
+  if(children!==1||!rootIDs.size||rootIDs.size>20)refuse("nested.intent.select","one collection and root selection required","invalid_query");
+  if(!Array.isArray(intent.filters)||intent.filters.length>20)refuse("nested.intent.filters","filter bound","invalid_query");const filterIDs=new Set();
+  intent.filters.forEach(f=>{const nullOp=["is_null","is_not_null"].includes(f?.op);requiredKeys(f,nullOp?["id","field","op"]:["id","field","op","value"],"nested.intent.filter");nestedID(f.id,"nested.intent.filter.id",128);if(/[\u0000-\u001f\u007f]/.test(f.id)||filterIDs.has(f.id))refuse("nested.intent.filter.id","control/duplicate filter ID","invalid_query");filterIDs.add(f.id);nestedID(f.field,"nested.intent.filter.field");if(!["eq","ne","gt","gte","lt","lte","is_null","is_not_null"].includes(f.op))refuse("nested.intent.filter.op","unknown operator");if(!nullOp){if(typeof f.value!=="string"&&typeof f.value!=="boolean")refuse("nested.intent.filter.value","typed text/boolean required","invalid_query");if(typeof f.value==="string")canonical.assertUnicode(f.value,"nested.intent.filter.value",16384);}});
+  if(!Array.isArray(intent.order_by)||intent.order_by.length>10)refuse("nested.intent.order_by","order bound","invalid_query");const seen=new Set();intent.order_by.forEach(o=>{requiredKeys(o,["field","direction"],"nested.intent.order");nestedID(o.field,"nested.intent.order.field");if(seen.has(o.field)||!["asc","desc"].includes(o.direction))refuse("nested.intent.order","duplicate/direction","invalid_query");seen.add(o.field);});
+  integer(intent.limit,"nested.intent.limit",1);integer(intent.offset,"nested.intent.offset");if(intent.limit>25||intent.offset>100000)refuse("nested.intent.page","page bound","invalid_query");if(!["arrays","objects"].includes(intent.row_format))refuse("nested.intent.row_format","unknown format","invalid_query");requiredKeys(intent.presentation,["timezone","locale"],"nested.intent.presentation");if(intent.presentation.timezone!=="UTC"||intent.presentation.locale!=="en-US")refuse("nested.intent.presentation","first browser presentation is UTC/en-US");return intent;
+}
+export function createNestedDetailIntent(features) {
+  const binding=nestedDetailBinding(features),collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.path,f.id])),children=new Map(collection.fields.map(f=>[f.path,f.id]));
+  return {format:"selecto.nested-detail-ui-intent",format_version:1,mode:"nested",binding,collection_id:collection.id,select:features.defaults.select.map(s=>Array.isArray(s)?s.map(p=>children.get(p)):roots.get(s)),filters:[],order_by:[],limit:25,offset:0,row_format:"arrays",presentation:{timezone:"UTC",locale:"en-US"}};
+}
+export function assertNestedDetailIntent(intent,context) {
+  nestedIntentShape(intent);const features=context?.features;if(!features)refuse("nested.features","nested detail unavailable");
+  canonical.assertNestedDetailFeatures(features,context);const binding=nestedDetailBinding(features);
+  if(Object.keys(binding).some(k=>intent.binding[k]!==binding[k]))refuse("nested.intent.binding","publication/revision changed; retain state","stale_nested_detail_context");
+  const collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
+  if(intent.collection_id!==collection.id)refuse("nested.intent.collection_id","unpublished collection","invalid_field");
+  const field=(id,map)=>{const f=map.get(id);if(!f)refuse("nested.intent.field","unpublished opaque ID","invalid_field");return f;};
+  intent.select.forEach(s=>Array.isArray(s)?s.forEach(id=>field(id,children)):field(s,roots));
+  intent.order_by.forEach(o=>field(o.field,roots));intent.filters.forEach(f=>{const descriptor=field(f.field,roots);if(!descriptor.operators.includes(f.op))refuse("nested.intent.filter.op","unavailable operator");if(Object.hasOwn(f,"value"))canonical.assertNestedDetailScalar(f.value,descriptor,"nested.intent.filter.value",{author:true});});return intent;
+}
+export function toNestedDetailQuery(intent,context) {
+  assertNestedDetailIntent(intent,context);const collection=context.features.collections[0],roots=new Map(context.features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
+  const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};canonical.assertNestedDetailQuery(query,context.features);return query;
+}
+export function parseNestedDetailState(raw,context) {
+  const {value,numberTokens}=canonical.parseStrictJSON(raw,{tokens:true,maxBytes:65536});requiredKeys(value,["format","format_version","intent"],"nested.state");
+  if(value.format!=="selecto.nested-detail-state"||value.format_version!==1||numberTokens.get("/format_version")!=="1"||numberTokens.get("/intent/format_version")!=="1")refuse("nested.state","unknown/noninteger version","invalid_query");
+  for(const key of ["limit","offset"])if(!/^(?:0|[1-9]\d*)$/.test(numberTokens.get(`/intent/${key}`)??""))refuse("nested.state","noninteger page token","invalid_query");
+  nestedIntentShape(value.intent);if(context)assertNestedDetailIntent(value.intent,context);return value;
+}
+export function encodeNestedDetailState(state) {
+  const raw=JSON.stringify(state);parseNestedDetailState(raw);const encoded=encodeURIComponent(raw);if(encoded.length>65536)refuse("nested.state","encoded state exceeds64KiB","invalid_query");return encoded;
+}
+export function decodeNestedDetailState(rawOrEncoded,context) {
+  if(typeof rawOrEncoded!=="string"||rawOrEncoded.length>65536)refuse("nested.state","state exceeds64KiB","invalid_query");let raw=rawOrEncoded;
+  if(!raw.trimStart().startsWith("{")){try{raw=decodeURIComponent(raw);}catch{refuse("nested.state","invalid URI layer","invalid_query");}}return parseNestedDetailState(raw,context);
+}
+export function nestedDetailConsoleHref(path,state) {
+  nonEmptyString(path,"nested.console.path");if(path.includes("#"))refuse("nested.console.path","fragment reserved for nested handoff");safePath(path.split("?")[0]);
+  const fragment=new URLSearchParams();fragment.set("nested_request",encodeNestedDetailState(state));return `${path}#${fragment}`;
+}
+export function toNestedDetailExplorerResult(envelope,intent,context) {
+  const query=toNestedDetailQuery(intent,context),features=context.features;canonical.assertNestedDetailResult(envelope,{query,features,context:canonical.nestedDetailContext(features)});
+  const collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.path,f])),children=new Map(collection.fields.map(f=>[f.path,f]));
+  const scalar=f=>({id:f.id,key:f.id,path:f.path,label:f.label,type:f.type==="string"?"text":f.type,encoding:f.encoding,nullable:f.nullable});
+  const childPaths=query.select.find(Array.isArray),childFields=childPaths.map(p=>children.get(p));
+  const columns=query.select.map(s=>Array.isArray(s)?{id:collection.id,path:collection.path,label:collection.label,type:"nested",encoding:"json",nullable:false,nestedFields:childFields.map(scalar),complete:true,limit:20}:scalar(roots.get(s)));
+  const rows=envelope.data.rows.map(row=>Object.fromEntries(columns.map((column,i)=>{const wire=envelope.data.columns[i],value=Array.isArray(row)?row[i]:row[wire.id];return[column.id,column.type==="nested"?value.map(child=>Object.fromEntries(childFields.map((f,j)=>[f.id,Array.isArray(child)?child[j]:child[f.path]]))):value];})));
+  return {schema:"selecto.spa.query-response/v1",columns,rows,page:{number:Math.floor(intent.offset/intent.limit)+1,size:intent.limit},metadata:{canonical:{profile:"canonical_nested_detail.v1",fingerprint:intent.binding.fingerprint,publication:intent.binding.publication,hasMore:envelope.data.page.has_more,nestedContext:canonical.nestedDetailContext(features),completeChildren:true}}};
 }
