@@ -50,3 +50,27 @@ snapshots as the same v1 author request. Root results expose native
 actual validated sidecar and translated selection/tree for a supplied context.
 Synthetic caller contexts prove local validation only, not a native publication
 fingerprint or rendered/backend conformance. Applications use discovery context.
+
+`getNestedDetailContext` and `executeNestedDetailIntent` provide a separate
+explicit nested mode. They refresh catalog/manifest/full domain/sidecar before
+each execution, compare every saved binding token and map opaque root/child IDs
+only through that palette. `createNestedDetailIntent`, `toNestedDetailQuery` and
+`assertNestedDetailIntent` expose the ordered mixed selection with exactly one
+collection, flat root filters, exact typed text, root sort, page, arrays/objects
+and the first browser candidate's UTC/en-US presentation. Richer members refuse.
+
+`parseNestedDetailState` / `encodeNestedDetailState` / `decodeNestedDetailState`
+use the isolated `selecto.nested-detail-state` namespace and one declared URI
+layer. Their64KiB save/share cap is independent of the1MiB execution body cap.
+`nestedDetailConsoleHref` preserves a discovered safe Console path/query and
+uses `nested_request`; existing basic/root state remains separate. A UI must
+retain invalid/stale restore input, show refusal and require explicit later Run.
+
+`toNestedDetailExplorerResult` validates the complete wire envelope before
+mapping parent/child records to opaque own-property keys. All child columns
+retain canonical path, encoding and nullable slots even with zero parent rows.
+Only this validated result exposes `metadata.canonical.profile` equal to
+`canonical_nested_detail.v1`, exact `nestedContext` and `completeChildren`.
+These markers permit a dedicated renderer; an arbitrary `type:nested` does not.
+Mappings preserve exact values and native hasMore, without native/API/SPA
+admission or inferred total counts.

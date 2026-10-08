@@ -95,7 +95,7 @@ function assertManifest(value) {
     nonEmptyString(route.operation_id, "manifest.route.operation_id");
     nonEmptyString(route.method, "manifest.route.method");
     // Parameterized write/action routes are outside the read client.
-    if (["queryDomain", "getDomain", "getOpenApi", "getExplorerMetadata", "getDomainCatalog", "getRootPredicateFeatures"].includes(route.operation_id)) safePath(route.path);
+    if (["queryDomain", "getDomain", "getOpenApi", "getExplorerMetadata", "getDomainCatalog", "getRootPredicateFeatures", "getNestedDetailFeatures"].includes(route.operation_id)) safePath(route.path);
     if (operations.has(route.operation_id)) throw new CanonicalWireError("manifest.routes", "duplicate operation id");
     operations.add(route.operation_id);
   });
@@ -234,18 +234,22 @@ function buildRemoteRequest(fingerprint, query, requestId) {
 function createCanonicalClient(options = {}) {
   const baseUrl = safePath((options.baseUrl ?? "/api/v1/selecto").replace(/\/+$/, ""));
   const transport = options.fetch ?? globalThis.fetch;
-  async function request(path, init = {}) {
+  async function request(path, init = {}, selected = undefined) {
     const headers = new Headers(typeof options.headers === "function" ? options.headers() : options.headers);
     headers.set("accept", "application/json");
     if (init.body !== undefined) headers.set("content-type", "application/json");
     new Headers(init.headers).forEach((value, key) => headers.set(key, value));
     const response = await transport(safePath(path), {...init, headers, credentials: "same-origin", redirect: "error"});
-    const payload = await response.arrayBuffer().then((bytes) => parseStrictJSON(new TextDecoder("utf-8", {fatal:true}).decode(bytes), {maxBytes: Number.POSITIVE_INFINITY})).catch((error) => {
+    const payload = await response.arrayBuffer().then((bytes) => parseStrictJSON(new TextDecoder("utf-8", {fatal:true,ignoreBOM:!!selected}).decode(bytes), {maxBytes: selected ? (response.ok ? 262144 : 8192) : Number.POSITIVE_INFINITY, tokens: !!selected})).catch((error) => {
       if (error?.name === "AbortError") throw error;
       throw new CanonicalWireError("response", "server did not return JSON");
     });
-    if (!response.ok) throw new CanonicalHttpError(response.status, assertError(payload));
-    return {payload, status: response.status, statusText: response.statusText, headers: response.headers};
+    const decoded = selected ? payload.value : payload;
+    if (!response.ok) {
+      if (selected?.context) assertNestedDetailError(decoded, selected.context, response.status);
+      throw new CanonicalHttpError(response.status, assertError(decoded));
+    }
+    return {payload:decoded, ...(selected ? {numberTokens:payload.numberTokens} : {}), status: response.status, statusText: response.statusText, headers: response.headers};
   }
   return {
     baseUrl,
@@ -258,6 +262,28 @@ function createCanonicalClient(options = {}) {
       const envelope = buildRemoteRequest(requestOptions.fingerprint ?? manifest.domain.fingerprint, query, requestOptions.requestId);
       const result = await request(routePath(manifest, "queryDomain", "POST"), {method: "POST", body: JSON.stringify(envelope), signal: requestOptions.signal});
       assertQueryResult(result.payload, envelope.domain.fingerprint, query);
+      return result.payload;
+    },
+    async nestedDetailFeatures(manifest, signal) {
+      assertManifest(manifest);
+      if (!manifest.profiles.includes("remote_query.v1")) throw new CanonicalWireError("manifest.profiles", "nested detail unavailable");
+      const result = await request(routePath(manifest, "getNestedDetailFeatures", "GET"), {signal}, {featuresOnly:true});
+      for (const path of ["/format_version","/request_format_version","/result/format_version"]) if (result.numberTokens.get(path) !== "1") throw new CanonicalWireError("nested.features", "lexical version1 required");
+      return assertNestedDetailFeatures(result.payload);
+    },
+    async queryNestedDetail(manifest, query, requestOptions = {}) {
+      const envelope = buildNestedDetailRequest(requestOptions.context?.fingerprint, query, requestOptions);
+      return this.queryNestedDetailText(manifest, JSON.stringify(envelope), requestOptions);
+    },
+    async queryNestedDetailText(manifest, text, requestOptions = {}) {
+      assertManifest(manifest);
+      if (!manifest.profiles.includes("remote_query.v1") || manifest.domain.fingerprint !== requestOptions.context?.fingerprint) throw new CanonicalWireError("manifest", "nested profile/binding unavailable");
+      routePath(manifest, "getNestedDetailFeatures", "GET");
+      const parsed = parseNestedDetailRequestText(text, requestOptions);
+      const context = nestedDetailContext(requestOptions.features);
+      const result = await request(routePath(manifest, "queryDomain", "POST"), {method:"POST",body:parsed.raw,signal:requestOptions.signal,headers:{"Selecto-Nested-Detail-Context":encodeNestedDetailContext(context)}}, {context});
+      assertNestedDetailResult(result.payload, {features:requestOptions.features,context,query:parsed.request.query,numberTokens:result.numberTokens});
+      if (result.payload.meta.request_id !== parsed.request.request_id) throw new CanonicalWireError("nested.meta.request_id", "request ID echo mismatch");
       return result.payload;
     },
     async rootPredicateFeatures(manifest, signal) {
@@ -514,7 +540,167 @@ function assertRootPredicateResult(value, context) {
   return value;
 }
 
-return {CanonicalWireError,CanonicalHttpError,safePath,record,nonEmptyString,integer,keys,assertCatalog,assertManifest,routePath,assertDomain,assertError,assertColumn,assertScalar,assertQueryResult,buildRemoteRequest,createCanonicalClient,assertUnicode,parseStrictJSON,canonicalRootFields,assertRootPredicateFeatures,assertRootScalar,assertRootPredicateQuery,assertTimezone,buildRootPredicateRequest,parseCanonicalRequestText,assertRootPredicateResult};
+// Selected complete typed nested detail is separate from generic v1 and root v2.
+const nestedLimits = {max_request_bytes:1048576,max_header_ascii_bytes:8192,max_context_token_utf8_bytes:1024,max_field_id_path_label_utf8_bytes:256,max_request_id_utf8_bytes:128,default_parent_limit:25,min_parent_limit:1,max_parent_limit:25,max_offset:100000,max_root_fields:20,max_child_fields:20,max_filters:20,max_orders:10,max_collections:1,max_children_per_parent:20,max_returned_children:500,max_scalar_utf8_bytes:16384,max_preaggregate_projected_json_bytes:1048576,max_response_entity_bytes:262144};
+const nestedSupports = {row_formats:["arrays","objects"],complete_children:true,root_filters:"flat-and",child_filtering:false,child_ordering:"fixed-public-pk-asc",root_required_order:false,root_boolean:false,partial_children:false};
+function nestedText(value, path, max = 1024) {
+  assertUnicode(nonEmptyString(value,path),path,max);
+  if (/[\r\n]/.test(value)) throw new CanonicalWireError(path,"line breaks unavailable");
+  return value;
+}
+function nestedField(field,path,child=false) {
+  exactKeys(field,child ? ["id","path","label","type","encoding","nullable"] : ["id","path","label","type","encoding","nullable","operators"],path);
+  for (const key of ["id","path","label"]) nestedText(field[key],`${path}.${key}`,256);
+  if (!(child ? /^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/ : /^[A-Za-z_][A-Za-z0-9_]*$/).test(field.path)) throw new CanonicalWireError(path,"invalid public path");
+  rootPair(field,path);
+  if (!child) {
+    const expected = field.type === "boolean" ? ["eq","ne","is_null","is_not_null"] : rootOps;
+    if (JSON.stringify(field.operators) !== JSON.stringify(expected)) throw new CanonicalWireError(path,"unsupported operator inventory");
+  }
+}
+function assertNestedDetailFeatures(value, discovered) {
+  exactKeys(value,["format","format_version","profile","revision","wire_profile","request_format_version","result","domain","root_primary_key","root_fields","collections","defaults","limits","supports"],"nested.features");
+  format(value,"selecto.nested-detail-features","nested.features");
+  if (value.profile !== "canonical_nested_detail.v1" || value.wire_profile !== "remote_query.v1" || value.request_format_version !== 1) throw new CanonicalWireError("nested.features","unsupported selected profile");
+  nestedText(value.revision,"nested.features.revision");
+  exactKeys(value.domain,["id","fingerprint","publication"],"nested.features.domain");
+  for (const key of Object.keys(value.domain)) nestedText(value.domain[key],`nested.features.domain.${key}`);
+  exactKeys(value.result,["format","format_version"],"nested.features.result");format(value.result,"selecto.remote-query-result","nested.features.result");
+  for (const [key,expected] of [["limits",nestedLimits],["supports",nestedSupports]]) {
+    exactKeys(value[key],Object.keys(expected),`nested.features.${key}`);
+    for (const [name,wanted] of Object.entries(expected)) if (Array.isArray(wanted) ? JSON.stringify(value[key][name])!==JSON.stringify(wanted) : value[key][name]!==wanted) throw new CanonicalWireError(`nested.features.${key}.${name}`,"unsupported bound/capability");
+  }
+  const roots=array(value.root_fields,"nested.root_fields"), collections=array(value.collections,"nested.collections");
+  if (!roots.length || roots.length>20 || collections.length!==1) throw new CanonicalWireError("nested.features","root/collection bounds");
+  const ids=new Set(),paths=new Set();
+  const add=(field,path,child=false)=> {nestedField(field,path,child); if(ids.has(field.id)||paths.has(field.path)) throw new CanonicalWireError(path,"duplicate ID/path");ids.add(field.id);paths.add(field.path);};
+  roots.forEach((f,i)=>add(f,`nested.root_fields.${i}`));
+  const rootPK=roots.find(f=>f.path===value.root_primary_key);
+  if (!rootPK || rootPK.type!=="integer" || rootPK.nullable) throw new CanonicalWireError("nested.root_primary_key","published nonnull integer PK required");
+  const collection=collections[0];exactKeys(collection,["id","path","result_id","label","primary_key","order_by","fields","default_select","limit","complete"],"nested.collection");
+  for (const key of ["id","path","result_id","label","primary_key"]) nestedText(collection[key],`nested.collection.${key}`,256);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(collection.path)||collection.result_id!==collection.path||paths.has(collection.path)||ids.has(collection.id)||collection.limit!==20||collection.complete!==true) throw new CanonicalWireError("nested.collection","invalid complete collection");
+  ids.add(collection.id);paths.add(collection.path);
+  const children=array(collection.fields,"nested.collection.fields");if(!children.length||children.length>20) throw new CanonicalWireError("nested.collection.fields","child field bound");
+  children.forEach((f,i)=>{add(f,`nested.collection.fields.${i}`,true);if(f.path.split(".")[0]!==collection.path) throw new CanonicalWireError("nested.collection.fields","foreign child scope");});
+  const childPK=children.find(f=>f.path===collection.primary_key);
+  if(!childPK||childPK.type!=="integer"||childPK.nullable||JSON.stringify(collection.order_by)!==JSON.stringify([{field:collection.primary_key,direction:"asc"}])) throw new CanonicalWireError("nested.collection.primary_key","published nonnull integer PK/fixed order required");
+  const childPaths=new Set(children.map(f=>f.path));const defaults=array(collection.default_select,"nested.collection.default_select");
+  if(!defaults.length||defaults.length>20||new Set(defaults).size!==defaults.length||defaults.some(p=>!childPaths.has(p))) throw new CanonicalWireError("nested.collection.default_select","unpublished/duplicate default");
+  exactKeys(value.defaults,["select","limit","offset","row_format"],"nested.defaults");
+  if(value.defaults.limit!==25||value.defaults.offset!==0||value.defaults.row_format!=="arrays") throw new CanonicalWireError("nested.defaults","unsupported default page/format");
+  nestedSelection(value.defaults.select,value);
+  // A valid sidecar must be selectable within the whole context-header bound.
+  encodeNestedDetailContext({profile:value.profile,fingerprint:value.domain.fingerprint,publication:value.domain.publication,revision:value.revision});
+  if (discovered) {
+    const domain=discovered.domain ?? (discovered.entry && {id:discovered.entry.id,publication:discovered.entry.publication,fingerprint:discovered.manifest?.domain.fingerprint});
+    if (!domain || ["id","publication","fingerprint"].some(k=>domain[k]!==value.domain[k])) throw new CanonicalWireError("nested.features.domain","current publication mismatch");
+    const manifest=discovered.manifest;
+    if (!manifest || !manifest.profiles.includes("remote_query.v1") || manifest.domain.fingerprint!==value.domain.fingerprint) throw new CanonicalWireError("nested.features","manifest binding required");
+    assertManifest(manifest);routePath(manifest,"getNestedDetailFeatures","GET");
+    const canonicalDomain=discovered.canonicalDomain;assertDomain(canonicalDomain,value.domain.fingerprint);
+    const published=canonicalRootFields(canonicalDomain);const map=new Map(published.map(f=>[f.path,f]));
+    for(const field of roots){const actual=map.get(field.path);if(!actual||["type","encoding","nullable"].some(k=>actual[k]!==field[k])) throw new CanonicalWireError("nested.root_fields","canonical path/type/codec mismatch");}
+  }
+  return value;
+}
+function nestedSelection(selected,features) {
+  array(selected,"nested.select");const rootPaths=new Set(features.root_fields.map(f=>f.path));const childPaths=new Set(features.collections[0].fields.map(f=>f.path));const roots=new Set();let child=null;
+  for(const slot of selected){
+    if(Array.isArray(slot)) {if(child!==null||!slot.length||slot.length>20||new Set(slot).size!==slot.length||slot.some(p=>!childPaths.has(p))) throw new CanonicalWireError("nested.select","invalid child selection");child=slot;}
+    else {if(!rootPaths.has(slot)||roots.has(slot)) throw new CanonicalWireError("nested.select","unpublished/duplicate root selection");roots.add(slot);}
+  }
+  if(!roots.size||roots.size>20||child===null) throw new CanonicalWireError("nested.select","root and exactly one collection required");
+  return child;
+}
+function nestedDetailContext(features) {
+  assertNestedDetailFeatures(features);
+  return {profile:features.profile,fingerprint:features.domain.fingerprint,publication:features.domain.publication,revision:features.revision};
+}
+function assertNestedContext(context,features) {
+  exactKeys(context,["profile","fingerprint","publication","revision"],"nested.context");for(const key of Object.keys(context))nestedText(context[key],`nested.context.${key}`);
+  const expected=nestedDetailContext(features);if(Object.keys(expected).some(k=>context[k]!==expected[k])) throw new CanonicalWireError("nested.context","stale nested detail context");
+}
+function encodeNestedDetailContext(context) {
+  exactKeys(context,["profile","fingerprint","publication","revision"],"nested.context");
+  if(context.profile!=="canonical_nested_detail.v1") throw new CanonicalWireError("nested.context","unknown profile");
+  for(const key of Object.keys(context))nestedText(context[key],`nested.context.${key}`);
+  const bytes=new TextEncoder().encode(JSON.stringify(context));let binary="";for(const byte of bytes)binary+=String.fromCharCode(byte);
+  const encoded=btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");if(encoded.length>8192)throw new CanonicalWireError("nested.context","header limit");return encoded;
+}
+function nestedIntegerText(value) {return typeof value==="string"&&/^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(value)&&value.length<=20&&BigInt(value)>=-9223372036854775808n&&BigInt(value)<=9223372036854775807n;}
+function assertNestedDetailScalar(value,field,path="nested.scalar",options={}) {
+  rootPair(field,path);
+  if(value===null){if(options.author||!field.nullable)throw new CanonicalWireError(path,"unexpected null");return value;}
+  if(typeof value==="string")assertUnicode(value,path,16384);
+  let valid=false;
+  if(field.type==="integer") {
+    valid=options.author ? nestedIntegerText(value) : field.encoding==="json" ? Number.isSafeInteger(value) : nestedIntegerText(value);
+    if(typeof value==="number"&&options.numberToken!==undefined&&!/^-?(?:0|[1-9]\d*)$/.test(options.numberToken))valid=false;
+  } else if(field.type==="decimal") {
+    const pattern=options.author ? /^-?(?:0|[1-9]\d{0,31})(?:\.\d{1,6})?$/ : /^-?(?:0|[1-9]\d{0,31})\.\d{6}$/;
+    valid=typeof value==="string"&&pattern.test(value);
+  } else if(field.type==="boolean")valid=typeof value==="boolean";
+  else if(field.type==="date")valid=typeof value==="string"&&!value.startsWith("0000-")&&validDate(value);
+  else if(field.type==="string")valid=typeof value==="string";
+  if(!valid)throw new CanonicalWireError(path,`invalid nested ${field.type}/${field.encoding}`);return value;
+}
+function assertNestedDetailQuery(query,features,options={}) {
+  assertNestedDetailFeatures(features);keys(query,["select","filters","order_by","limit","offset","row_format","timezone"],"nested.query");nestedSelection(query.select,features);
+  const byPath=new Map(features.root_fields.map(f=>[f.path,f]));
+  if(Object.hasOwn(query,"filters")) {
+    const filters=array(query.filters,"nested.filters");if(filters.length>20)throw new CanonicalWireError("nested.filters","filter bound");
+    filters.forEach((f,i)=>{const nullOp=["is_null","is_not_null"].includes(f?.op);exactKeys(f,nullOp?["field","op"]:["field","op","value"],`nested.filters.${i}`);const field=byPath.get(f.field);if(!field||!field.operators.includes(f.op))throw new CanonicalWireError("nested.filters","unpublished field/operator");
+      if(!nullOp){if(typeof f.value==="number"){if(!["integer","decimal"].includes(field.type)||!Number.isSafeInteger(f.value))throw new CanonicalWireError("nested.filters","unsafe/nonnumeric integer");const token=options.numberTokens?.get(`/query/filters/${i}/value`);if(token!==undefined&&!/^-?(?:0|[1-9]\d*)$/.test(token))throw new CanonicalWireError("nested.filters","noninteger numeric token");}else assertNestedDetailScalar(f.value,field,`nested.filters.${i}.value`,{author:true});}});
+  }
+  if(Object.hasOwn(query,"order_by")) {const orders=array(query.order_by,"nested.order_by"),seen=new Set();if(orders.length>10)throw new CanonicalWireError("nested.order_by","order bound");orders.forEach(o=>{exactKeys(o,["field","direction"],"nested.order");if(!byPath.has(o.field)||seen.has(o.field)||!["asc","desc"].includes(o.direction))throw new CanonicalWireError("nested.order","invalid/duplicate root order");seen.add(o.field);});}
+  for(const [key,min,max] of [["limit",1,25],["offset",0,100000]])if(Object.hasOwn(query,key)){integer(query[key],`nested.query.${key}`,min);if(query[key]>max)throw new CanonicalWireError(key,"page bound");const token=options.numberTokens?.get(`/query/${key}`);if(token!==undefined&&!/^(?:0|[1-9]\d*)$/.test(token))throw new CanonicalWireError(key,"noninteger page token");}
+  if(Object.hasOwn(query,"row_format"))oneOf(query.row_format,["arrays","objects"],"nested.row_format");if(Object.hasOwn(query,"timezone"))assertTimezone(query.timezone);return query;
+}
+function nestedRequestId(value){nestedText(value,"nested.request_id",128);if(/[\u0000-\u001f\u007f]/.test(value))throw new CanonicalWireError("nested.request_id","control unavailable");}
+function buildNestedDetailRequest(fingerprint,query,options={}) {
+  assertNestedContext(options.context,options.features);if(fingerprint!==options.context.fingerprint)throw new CanonicalWireError("nested.fingerprint","context/body mismatch");assertNestedDetailQuery(query,options.features);
+  const request={format:"selecto.remote-query",format_version:1,domain:{fingerprint},query};if(options.requestId!==undefined){nestedRequestId(options.requestId);request.request_id=options.requestId;}parseStrictJSON(JSON.stringify(request));return request;
+}
+function parseNestedDetailRequestText(text,options) {
+  const {value,numberTokens}=parseStrictJSON(text,{tokens:true,maxBytes:1048576});
+  exactKeys(value,Object.hasOwn(value,"request_id")?["format","format_version","domain","query","request_id"]:["format","format_version","domain","query"],"nested.request");
+  if(value.format!=="selecto.remote-query"||value.format_version!==1||numberTokens.get("/format_version")!=="1")throw new CanonicalWireError("nested.request","lexical version1 required");
+  exactKeys(value.domain,["fingerprint"],"nested.request.domain");assertNestedContext(options.context,options.features);
+  if(value.domain.fingerprint!==options.context.fingerprint)throw new CanonicalWireError("nested.request.domain","stale context/body binding");if(Object.hasOwn(value,"request_id"))nestedRequestId(value.request_id);
+  assertNestedDetailQuery(value.query,options.features,{numberTokens});return {request:value,raw:text,numberTokens};
+}
+function nestedEcho(meta,context,required) {
+  if(meta===undefined){if(required)throw new CanonicalWireError("nested.meta","context required");return;}
+  keys(meta,["selecto_nested_detail","request_id"],"nested.meta");if(Object.hasOwn(meta,"request_id"))nestedRequestId(meta.request_id);
+  if(Object.hasOwn(meta,"selecto_nested_detail")){exactKeys(meta.selecto_nested_detail,["profile","fingerprint","publication","revision"],"nested.meta.context");if(Object.keys(context).some(k=>meta.selecto_nested_detail[k]!==context[k]))throw new CanonicalWireError("nested.meta.context","context drift");}
+  else if(required)throw new CanonicalWireError("nested.meta.context","missing admitted context");
+}
+function assertNestedDetailError(value,context,status) {
+  exactKeys(value,Object.hasOwn(value,"meta")?["ok","error","meta"]:["ok","error"],"nested.error");assertError(value);exactKeys(value.error,["code","message","details"],"nested.error.error");exactKeys(value.error.details,[],"nested.error.details");oneOf(value.error.code,["malformed_request","operation_unsupported","stale_domain_fingerprint","stale_nested_detail_context","invalid_query","internal_failure","authentication_required","hidden_field"],"nested.error.code");assertUnicode(value.error.message,"nested.error.message",512);
+  const codeStatus={malformed_request:400,operation_unsupported:501,stale_domain_fingerprint:409,stale_nested_detail_context:409,invalid_query:422,internal_failure:500,authentication_required:401,hidden_field:403};if(status!==codeStatus[value.error.code])throw new CanonicalWireError("nested.error.status","code/status mismatch");nestedEcho(value.meta,context,false);
+}
+function assertNestedDetailResult(value,{query,features,context,numberTokens}={}) {
+  assertNestedDetailQuery(query,features);assertNestedContext(context,features);exactKeys(value,["ok","data","meta"],"nested.response");if(value.ok!==true)throw new CanonicalWireError("nested.response","success required");nestedEcho(value.meta,context,true);
+  const d=value.data;exactKeys(d,["format","format_version","domain","columns","rows","row_count","page","row_format","subtables"],"nested.data");format(d,"selecto.remote-query-result","nested.data");exactKeys(d.domain,["fingerprint"],"nested.data.domain");if(d.domain.fingerprint!==context.fingerprint)throw new CanonicalWireError("nested.data.domain","fingerprint drift");
+  const lexical=(path)=>{const t=numberTokens?.get(path);if(t!==undefined&&!/^(?:0|[1-9]\d*)$/.test(t))throw new CanonicalWireError(path,"lexical integer required");};
+  for(const path of ["/data/format_version","/data/row_count","/data/page/limit","/data/page/offset","/data/subtables/"+features.collections[0].result_id+"/limit"])lexical(path);
+  const collection=features.collections[0],children=nestedSelection(query.select,features);const roots=new Map(features.root_fields.map(f=>[f.path,f]));
+  const cols=array(d.columns,"nested.columns");if(cols.length!==query.select.length)throw new CanonicalWireError("nested.columns","selection width");
+  const childFields=children.map(p=>collection.fields.find(f=>f.path===p));
+  cols.forEach((c,i)=>{exactKeys(c,["id","field","label","type","encoding","nullable"],`nested.columns.${i}`);const f=Array.isArray(query.select[i])?{path:collection.result_id,label:collection.label,type:"json",encoding:"json",nullable:false}:roots.get(query.select[i]);if(c.id!==f.path||c.field!==f.path||["label","type","encoding","nullable"].some(k=>c[k]!==f[k]))throw new CanonicalWireError("nested.columns","descriptor binding drift");});
+  exactKeys(d.subtables,[collection.result_id],"nested.subtables");const sub=d.subtables[collection.result_id];exactKeys(sub,["columns","limit","complete"],"nested.subtable");if(JSON.stringify(sub.columns)!==JSON.stringify(children)||sub.limit!==20||sub.complete!==true)throw new CanonicalWireError("nested.subtable","selection/completeness drift");
+  if(d.row_format!==(query.row_format??"arrays"))throw new CanonicalWireError("nested.row_format","request mismatch");
+  const rows=array(d.rows,"nested.rows");integer(d.row_count,"nested.row_count");if(d.row_count!==rows.length)throw new CanonicalWireError("nested.row_count","row count mismatch");exactKeys(d.page,["limit","offset","has_more"],"nested.page");integer(d.page.limit,"nested.page.limit",1);integer(d.page.offset,"nested.page.offset");bool(d.page.has_more,"nested.page.has_more");if(d.page.limit!==(query.limit??25)||d.page.offset!==(query.offset??0)||rows.length>d.page.limit||rows.length>25)throw new CanonicalWireError("nested.page","request/page mismatch");
+  const rowShape=(r,descs,path)=>{if(d.row_format==="arrays"){if(!Array.isArray(r)||r.length!==descs.length)throw new CanonicalWireError(path,"row width");}else exactKeys(r,descs.map(f=>f.path),path);};
+  let total=0;
+  rows.forEach((r,i)=>{rowShape(r,cols.map(c=>({path:c.id})),`nested.rows.${i}`);cols.forEach((c,j)=>{const v=d.row_format==="arrays"?r[j]:r[c.id],pointer=`/data/rows/${i}/${d.row_format==="arrays"?j:c.id}`;
+    if(Array.isArray(query.select[j])){const childRows=array(v,"nested.children");if(childRows.length>20||(total+=childRows.length)>500)throw new CanonicalWireError("nested.children","complete child bound");childRows.forEach((cr,k)=>{rowShape(cr,childFields,`nested.children.${k}`);childFields.forEach((f,l)=>assertNestedDetailScalar(d.row_format==="arrays"?cr[l]:cr[f.path],f,`nested.children.${k}.${f.path}`,{numberToken:numberTokens?.get(`${pointer}/${k}/${d.row_format==="arrays"?l:f.path}`)}));});}
+    else assertNestedDetailScalar(v,roots.get(c.field),`nested.rows.${i}.${c.id}`,{numberToken:numberTokens?.get(pointer)});
+  });});return value;
+}
+
+return {CanonicalWireError,CanonicalHttpError,safePath,record,nonEmptyString,integer,keys,assertCatalog,assertManifest,routePath,assertDomain,assertError,assertColumn,assertScalar,assertQueryResult,buildRemoteRequest,createCanonicalClient,assertUnicode,parseStrictJSON,canonicalRootFields,assertRootPredicateFeatures,assertRootScalar,assertRootPredicateQuery,assertTimezone,buildRootPredicateRequest,parseCanonicalRequestText,assertRootPredicateResult,assertNestedDetailFeatures,nestedDetailContext,encodeNestedDetailContext,assertNestedDetailScalar,assertNestedDetailQuery,buildNestedDetailRequest,parseNestedDetailRequestText,assertNestedDetailResult};
 })();
 global.SelectoExplorerClient = (function() {
 const canonical = global.SelectoCanonicalClient;
@@ -697,7 +883,27 @@ function createExplorerClient(options = {}) {
     canonical.assertRootPredicateFeatures(features,{...context,domain:context.metadata.domain});
     return {...context,features,binding:rootPredicateBinding(features)};
   }
+  async function nestedPublication(id, signal) {
+    const catalog = await client.catalog(signal);
+    const entry = catalog.domains.find(domain => domain.id === id);
+    if (!entry) refuse("domainId", "domain unavailable in current publication", "operation_forbidden");
+    const manifest = await client.manifest(entry.manifest, signal);
+    const canonicalDomain = await client.domain(manifest, signal);
+    const features = await client.nestedDetailFeatures(manifest, signal);
+    canonical.assertNestedDetailFeatures(features, {entry,manifest,canonicalDomain});
+    return {entry,manifest,canonicalDomain,features,binding:nestedDetailBinding(features)};
+  }
   return {
+    async getNestedDetailContext(id, requestOptions = {}) { return nestedPublication(id, requestOptions.signal); },
+    async executeNestedDetailIntent(intent, requestOptions = {}) {
+      // Execution uses the 1MiB request bound; the 64KiB share cap is separate.
+      const retained = canonical.parseStrictJSON(JSON.stringify(intent));
+      nestedIntentShape(retained);
+      const context = await nestedPublication(retained.binding.domain_id, requestOptions.signal);
+      const query = toNestedDetailQuery(retained, context);
+      const result = await client.queryNestedDetail(context.manifest, query, {...requestOptions,features:context.features,context:canonical.nestedDetailContext(context.features)});
+      return toNestedDetailExplorerResult(result, retained, context);
+    },
     async getRootPredicateContext(id, requestOptions = {}) {return rootPublication(id,requestOptions.signal);},
     async executeRootPredicateIntent(intent, requestOptions = {}) {
       const retained = canonical.parseStrictJSON(JSON.stringify(intent));
@@ -861,7 +1067,77 @@ function flatSnapshotToRequest(snapshot) {
   return {schema:"selecto.spa.query-request/v1",...request};
 }
 
-return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanonicalQuery,toExplorerResult,createExplorerClient,rootPredicateBinding,assertRootPredicateIntent,toRootPredicateQuery,parseRootPredicateState,encodeRootPredicateState,decodeRootPredicateState,validateRootPredicateFeaturesAndMap,toRootPredicateExplorerResult,flatSnapshotToRequest};
+/** Explicit complete nested mode: IDs are authoring keys, paths are wire keys. */
+function nestedDetailBinding(features) {
+  canonical.assertNestedDetailFeatures(features);
+  return {domain_id:features.domain.id,fingerprint:features.domain.fingerprint,publication:features.domain.publication,wire_profile:"remote_query.v1",feature_profile:"canonical_nested_detail.v1",feature_revision:features.revision};
+}
+function nestedID(value,path,max=256) {
+  canonical.assertUnicode(nonEmptyString(value,path),path,max);
+  if (/[\r\n]/.test(value)) refuse(path,"line breaks unavailable","invalid_query");return value;
+}
+function nestedIntentShape(intent) {
+  requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation"],"nested.intent");
+  if(intent.format!=="selecto.nested-detail-ui-intent"||intent.format_version!==1||intent.mode!=="nested")refuse("nested.intent","unknown nested mode/version","invalid_query");
+  requiredKeys(intent.binding,["domain_id","fingerprint","publication","wire_profile","feature_profile","feature_revision"],"nested.intent.binding");
+  for(const value of Object.values(intent.binding))nestedID(value,"nested.intent.binding",1024);
+  if(intent.binding.wire_profile!=="remote_query.v1"||intent.binding.feature_profile!=="canonical_nested_detail.v1")refuse("nested.intent.binding","unsupported bound profile");
+  nestedID(intent.collection_id,"nested.intent.collection_id");
+  if(!Array.isArray(intent.select)||intent.select.length<2||intent.select.length>21)refuse("nested.intent.select","selection bound","invalid_query");
+  const rootIDs=new Set();let children=0;
+  intent.select.forEach(slot=>{if(Array.isArray(slot)){children++;if(!slot.length||slot.length>20||new Set(slot).size!==slot.length)refuse("nested.intent.select","child selection bound/duplicate","invalid_query");slot.forEach(id=>nestedID(id,"nested.intent.child"));}else{nestedID(slot,"nested.intent.select");if(rootIDs.has(slot))refuse("nested.intent.select","duplicate root ID","invalid_query");rootIDs.add(slot);}});
+  if(children!==1||!rootIDs.size||rootIDs.size>20)refuse("nested.intent.select","one collection and root selection required","invalid_query");
+  if(!Array.isArray(intent.filters)||intent.filters.length>20)refuse("nested.intent.filters","filter bound","invalid_query");const filterIDs=new Set();
+  intent.filters.forEach(f=>{const nullOp=["is_null","is_not_null"].includes(f?.op);requiredKeys(f,nullOp?["id","field","op"]:["id","field","op","value"],"nested.intent.filter");nestedID(f.id,"nested.intent.filter.id",128);if(/[\u0000-\u001f\u007f]/.test(f.id)||filterIDs.has(f.id))refuse("nested.intent.filter.id","control/duplicate filter ID","invalid_query");filterIDs.add(f.id);nestedID(f.field,"nested.intent.filter.field");if(!["eq","ne","gt","gte","lt","lte","is_null","is_not_null"].includes(f.op))refuse("nested.intent.filter.op","unknown operator");if(!nullOp){if(typeof f.value!=="string"&&typeof f.value!=="boolean")refuse("nested.intent.filter.value","typed text/boolean required","invalid_query");if(typeof f.value==="string")canonical.assertUnicode(f.value,"nested.intent.filter.value",16384);}});
+  if(!Array.isArray(intent.order_by)||intent.order_by.length>10)refuse("nested.intent.order_by","order bound","invalid_query");const seen=new Set();intent.order_by.forEach(o=>{requiredKeys(o,["field","direction"],"nested.intent.order");nestedID(o.field,"nested.intent.order.field");if(seen.has(o.field)||!["asc","desc"].includes(o.direction))refuse("nested.intent.order","duplicate/direction","invalid_query");seen.add(o.field);});
+  integer(intent.limit,"nested.intent.limit",1);integer(intent.offset,"nested.intent.offset");if(intent.limit>25||intent.offset>100000)refuse("nested.intent.page","page bound","invalid_query");if(!["arrays","objects"].includes(intent.row_format))refuse("nested.intent.row_format","unknown format","invalid_query");requiredKeys(intent.presentation,["timezone","locale"],"nested.intent.presentation");if(intent.presentation.timezone!=="UTC"||intent.presentation.locale!=="en-US")refuse("nested.intent.presentation","first browser presentation is UTC/en-US");return intent;
+}
+function createNestedDetailIntent(features) {
+  const binding=nestedDetailBinding(features),collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.path,f.id])),children=new Map(collection.fields.map(f=>[f.path,f.id]));
+  return {format:"selecto.nested-detail-ui-intent",format_version:1,mode:"nested",binding,collection_id:collection.id,select:features.defaults.select.map(s=>Array.isArray(s)?s.map(p=>children.get(p)):roots.get(s)),filters:[],order_by:[],limit:25,offset:0,row_format:"arrays",presentation:{timezone:"UTC",locale:"en-US"}};
+}
+function assertNestedDetailIntent(intent,context) {
+  nestedIntentShape(intent);const features=context?.features;if(!features)refuse("nested.features","nested detail unavailable");
+  canonical.assertNestedDetailFeatures(features,context);const binding=nestedDetailBinding(features);
+  if(Object.keys(binding).some(k=>intent.binding[k]!==binding[k]))refuse("nested.intent.binding","publication/revision changed; retain state","stale_nested_detail_context");
+  const collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
+  if(intent.collection_id!==collection.id)refuse("nested.intent.collection_id","unpublished collection","invalid_field");
+  const field=(id,map)=>{const f=map.get(id);if(!f)refuse("nested.intent.field","unpublished opaque ID","invalid_field");return f;};
+  intent.select.forEach(s=>Array.isArray(s)?s.forEach(id=>field(id,children)):field(s,roots));
+  intent.order_by.forEach(o=>field(o.field,roots));intent.filters.forEach(f=>{const descriptor=field(f.field,roots);if(!descriptor.operators.includes(f.op))refuse("nested.intent.filter.op","unavailable operator");if(Object.hasOwn(f,"value"))canonical.assertNestedDetailScalar(f.value,descriptor,"nested.intent.filter.value",{author:true});});return intent;
+}
+function toNestedDetailQuery(intent,context) {
+  assertNestedDetailIntent(intent,context);const collection=context.features.collections[0],roots=new Map(context.features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
+  const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};canonical.assertNestedDetailQuery(query,context.features);return query;
+}
+function parseNestedDetailState(raw,context) {
+  const {value,numberTokens}=canonical.parseStrictJSON(raw,{tokens:true,maxBytes:65536});requiredKeys(value,["format","format_version","intent"],"nested.state");
+  if(value.format!=="selecto.nested-detail-state"||value.format_version!==1||numberTokens.get("/format_version")!=="1"||numberTokens.get("/intent/format_version")!=="1")refuse("nested.state","unknown/noninteger version","invalid_query");
+  for(const key of ["limit","offset"])if(!/^(?:0|[1-9]\d*)$/.test(numberTokens.get(`/intent/${key}`)??""))refuse("nested.state","noninteger page token","invalid_query");
+  nestedIntentShape(value.intent);if(context)assertNestedDetailIntent(value.intent,context);return value;
+}
+function encodeNestedDetailState(state) {
+  const raw=JSON.stringify(state);parseNestedDetailState(raw);const encoded=encodeURIComponent(raw);if(encoded.length>65536)refuse("nested.state","encoded state exceeds64KiB","invalid_query");return encoded;
+}
+function decodeNestedDetailState(rawOrEncoded,context) {
+  if(typeof rawOrEncoded!=="string"||rawOrEncoded.length>65536)refuse("nested.state","state exceeds64KiB","invalid_query");let raw=rawOrEncoded;
+  if(!raw.trimStart().startsWith("{")){try{raw=decodeURIComponent(raw);}catch{refuse("nested.state","invalid URI layer","invalid_query");}}return parseNestedDetailState(raw,context);
+}
+function nestedDetailConsoleHref(path,state) {
+  nonEmptyString(path,"nested.console.path");if(path.includes("#"))refuse("nested.console.path","fragment reserved for nested handoff");safePath(path.split("?")[0]);
+  const fragment=new URLSearchParams();fragment.set("nested_request",encodeNestedDetailState(state));return `${path}#${fragment}`;
+}
+function toNestedDetailExplorerResult(envelope,intent,context) {
+  const query=toNestedDetailQuery(intent,context),features=context.features;canonical.assertNestedDetailResult(envelope,{query,features,context:canonical.nestedDetailContext(features)});
+  const collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.path,f])),children=new Map(collection.fields.map(f=>[f.path,f]));
+  const scalar=f=>({id:f.id,key:f.id,path:f.path,label:f.label,type:f.type==="string"?"text":f.type,encoding:f.encoding,nullable:f.nullable});
+  const childPaths=query.select.find(Array.isArray),childFields=childPaths.map(p=>children.get(p));
+  const columns=query.select.map(s=>Array.isArray(s)?{id:collection.id,path:collection.path,label:collection.label,type:"nested",encoding:"json",nullable:false,nestedFields:childFields.map(scalar),complete:true,limit:20}:scalar(roots.get(s)));
+  const rows=envelope.data.rows.map(row=>Object.fromEntries(columns.map((column,i)=>{const wire=envelope.data.columns[i],value=Array.isArray(row)?row[i]:row[wire.id];return[column.id,column.type==="nested"?value.map(child=>Object.fromEntries(childFields.map((f,j)=>[f.id,Array.isArray(child)?child[j]:child[f.path]]))):value];})));
+  return {schema:"selecto.spa.query-response/v1",columns,rows,page:{number:Math.floor(intent.offset/intent.limit)+1,size:intent.limit},metadata:{canonical:{profile:"canonical_nested_detail.v1",fingerprint:intent.binding.fingerprint,publication:intent.binding.publication,hasMore:envelope.data.page.has_more,nestedContext:canonical.nestedDetailContext(features),completeChildren:true}}};
+}
+
+return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanonicalQuery,toExplorerResult,createExplorerClient,rootPredicateBinding,assertRootPredicateIntent,toRootPredicateQuery,parseRootPredicateState,encodeRootPredicateState,decodeRootPredicateState,validateRootPredicateFeaturesAndMap,toRootPredicateExplorerResult,flatSnapshotToRequest,nestedDetailBinding,createNestedDetailIntent,assertNestedDetailIntent,toNestedDetailQuery,parseNestedDetailState,encodeNestedDetailState,decodeNestedDetailState,nestedDetailConsoleHref,toNestedDetailExplorerResult};
 })();
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 (function (global) {

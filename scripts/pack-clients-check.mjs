@@ -17,6 +17,19 @@ try {
   });
   await writeFile(join(temporary, "package.json"), JSON.stringify({private: true, type: "module"}));
   run("npm", ["install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", ...files], temporary);
-  run(process.execPath, ["--input-type=module", "-e", "import * as canonical from '@selecto/canonical-client'; import * as explorer from '@selecto/explorer-client'; for (const name of ['createCanonicalClient','assertRootPredicateFeatures','parseCanonicalRequestText','buildRootPredicateRequest','assertRootPredicateResult']) if (typeof canonical[name] !== 'function') process.exit(1); for (const name of ['createExplorerClient','assertRootPredicateIntent','toRootPredicateQuery','parseRootPredicateState','encodeRootPredicateState','decodeRootPredicateState','validateRootPredicateFeaturesAndMap','flatSnapshotToRequest']) if (typeof explorer[name] !== 'function') process.exit(1);"], temporary);
+  const installedSmoke = `
+    import * as canonical from '@selecto/canonical-client';
+    import * as explorer from '@selecto/explorer-client';
+    function requireFunctions(surface, names) {
+      for (const name of names) {
+        if (typeof surface[name] !== 'function') throw new Error('Missing installed export: ' + name);
+      }
+    }
+    requireFunctions(canonical, ['createCanonicalClient','assertRootPredicateFeatures','parseCanonicalRequestText','buildRootPredicateRequest','assertRootPredicateResult','assertNestedDetailFeatures','nestedDetailContext','encodeNestedDetailContext','assertNestedDetailScalar','assertNestedDetailQuery','buildNestedDetailRequest','parseNestedDetailRequestText','assertNestedDetailResult']);
+    requireFunctions(explorer, ['createExplorerClient','assertRootPredicateIntent','toRootPredicateQuery','parseRootPredicateState','encodeRootPredicateState','decodeRootPredicateState','validateRootPredicateFeaturesAndMap','flatSnapshotToRequest','nestedDetailBinding','createNestedDetailIntent','assertNestedDetailIntent','toNestedDetailQuery','parseNestedDetailState','encodeNestedDetailState','decodeNestedDetailState','nestedDetailConsoleHref','toNestedDetailExplorerResult']);
+    requireFunctions(canonical.createCanonicalClient(), ['nestedDetailFeatures','queryNestedDetail','queryNestedDetailText']);
+    requireFunctions(explorer.createExplorerClient(), ['getNestedDetailContext','executeNestedDetailIntent']);
+  `;
+  run(process.execPath, ["--input-type=module", "-e", installedSmoke], temporary);
   process.stdout.write("Installed tarball ESM client imports passed.\n");
 } finally { await rm(temporary, {recursive: true, force: true}); }
