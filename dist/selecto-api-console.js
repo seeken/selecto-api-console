@@ -584,7 +584,10 @@ function assertNestedDetailFeatures(value, discovered) {
   const children=array(collection.fields,"nested.collection.fields");if(!children.length||children.length>20) throw new CanonicalWireError("nested.collection.fields","child field bound");
   children.forEach((f,i)=>{add(f,`nested.collection.fields.${i}`,true);if(f.path.split(".")[0]!==collection.path) throw new CanonicalWireError("nested.collection.fields","foreign child scope");});
   const childPK=children.find(f=>f.path===collection.primary_key);
-  if(!childPK||childPK.type!=="integer"||childPK.nullable||JSON.stringify(collection.order_by)!==JSON.stringify([{field:collection.primary_key,direction:"asc"}])) throw new CanonicalWireError("nested.collection.primary_key","published nonnull integer PK/fixed order required");
+  const fixedOrder=array(collection.order_by,"nested.collection.order_by");
+  if(fixedOrder.length!==1) throw new CanonicalWireError("nested.collection.order_by","one fixed child order required");
+  exactKeys(fixedOrder[0],["field","direction"],"nested.collection.order_by.0");
+  if(!childPK||childPK.type!=="integer"||childPK.nullable||fixedOrder[0].field!==collection.primary_key||fixedOrder[0].direction!=="asc") throw new CanonicalWireError("nested.collection.primary_key","published nonnull integer PK/fixed order required");
   const childPaths=new Set(children.map(f=>f.path));const defaults=array(collection.default_select,"nested.collection.default_select");
   if(!defaults.length||defaults.length>20||new Set(defaults).size!==defaults.length||defaults.some(p=>!childPaths.has(p))) throw new CanonicalWireError("nested.collection.default_select","unpublished/duplicate default");
   exactKeys(value.defaults,["select","limit","offset","row_format"],"nested.defaults");
