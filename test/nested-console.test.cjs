@@ -145,6 +145,37 @@ test('visible nested builder uses only opaque descriptor IDs and retains selecte
   }finally{Object.assign(global,before);}
 });
 
+test('nested text and number input commits immediately without replacing focused controls or the next click target',async()=>{
+  const x=await instance();let renders=0,cancels=0;
+  x.console.renderNestedBuilder=()=>renders++;
+  x.console.cancelQuery=()=>cancels++;
+  const field=x.features.root_fields.find(f=>f.type==='integer');
+  x.state.intent.filters=[{id:'draft-filter',field:field.id,op:'eq',value:''}];
+  const input=(name,value)=>({tagName:'INPUT',dataset:{sacNestedControl:name,index:'0'},value,matches:selector=>selector==='[data-sac-nested-control]'});
+  const text=input('filter-value','4');x.console.onInput({target:text});
+  assert.equal(x.state.intent.filters[0].value,'4');assert.equal(renders,0);assert.equal(cancels,1);
+  assert.equal(JSON.parse(x.nodes['[data-sac-nested-state]'].value).intent.filters[0].value,'4');
+  x.console.onChange({target:text});assert.equal(renders,0);
+  x.console.onInput({target:input('limit','2')});x.console.onInput({target:input('offset','3')});
+  assert.equal(x.state.intent.limit,2);assert.equal(x.state.intent.offset,3);assert.equal(renders,0);
+  const query=JSON.parse(x.nodes['[data-sac-request]'].value).query;
+  assert.equal(query.limit,2);assert.equal(query.offset,3);
+  x.console.onInput({target:input('limit','2e0')});assert.equal(x.nodes['[data-sac-run]'].disabled,true);assert.equal(renders,0);
+  x.console.onInput({target:input('limit','2')});assert.equal(x.nodes['[data-sac-run]'].disabled,false);
+  x.console.onChange({target:{tagName:'SELECT',dataset:{sacNestedControl:'filter-op',index:'0'},value:'is_null',matches:selector=>selector==='[data-sac-nested-control]'}});
+  assert.equal(renders,1);assert.equal(Object.hasOwn(x.state.intent.filters[0],'value'),false);
+});
+
+test('nested input immediately cancels and invalidates an older pending response',async()=>{
+  const x=await instance();let release,posts=0;
+  x.console.canonicalClient={queryNestedDetailText(){posts++;return new Promise(resolve=>release=resolve);}};
+  const pending=x.console.run();await Promise.resolve();await Promise.resolve();
+  assert.equal(posts,1);
+  x.console.onInput({target:{tagName:'INPUT',dataset:{sacNestedControl:'limit'},value:'2',matches:selector=>selector==='[data-sac-nested-control]'}});
+  release(x.result);await pending;
+  assert.equal(x.state.intent.limit,2);assert.equal(x.rendered.length,0);assert.equal(x.console.nestedResult,null);
+});
+
 test('retained stale draft exposes explicit New draft and refreshes only after its actual click',async()=>{
   const x=await instance(),before={document:global.document,Option:global.Option};
   global.document={createElement:tag=>new FakeNode(tag)};global.Option=function(text,value,_default,selected){const option=new FakeNode('option');option.textContent=text;option.value=value;option.selected=selected;return option;};

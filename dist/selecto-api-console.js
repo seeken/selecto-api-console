@@ -3572,7 +3572,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       this.updateCurl();
     }
 
-    nestedChanged(mutator) {
+    nestedChanged(mutator, renderBuilder = true) {
       if (!this.nestedState || this.nestedBlocked) return;
       // Invalid partial builder edits stay visible. Only Run/Save requires a complete intent.
       mutator(this.nestedState.intent);
@@ -3586,7 +3586,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         this.root.querySelector("[data-sac-run]").disabled = true;
         this.setImportMessage(`Nested draft incomplete: ${error.message}`, "error");
       }
-      this.renderNestedBuilder();
+      if (renderBuilder) this.renderNestedBuilder();
     }
 
     nestedStateStorageKey() { return `selecto.console.nested-state:${this.base}`; }
@@ -3692,7 +3692,9 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         if (name === "order-direction") intent.order_by[index].direction=target.value;
         if (["limit","offset"].includes(name)) intent[name]=/^(?:0|[1-9]\d*)$/.test(target.value) ? Number(target.value) : NaN;
         if (name === "row-format") intent.row_format=target.value;
-      });
+      // Committing a text/number input on blur must not replace the button
+      // receiving the same pointer gesture before its click can be dispatched.
+      }, target.tagName !== "INPUT");
     }
 
     nestedAction(target) {
@@ -4876,6 +4878,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
 
     onInput(event) {
       const target = event.target;
+      if (target.matches("[data-sac-nested-control]") && target.tagName === "INPUT") return this.nestedControl(target);
       if (target.matches("[data-sac-resource-id]")) {
         this.state.resourceId = target.value;
         return this.syncRequest(true);
