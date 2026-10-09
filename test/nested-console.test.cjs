@@ -145,6 +145,42 @@ test('visible nested builder uses only opaque descriptor IDs and retains selecte
   }finally{Object.assign(global,before);}
 });
 
+test('retained stale draft exposes explicit New draft and refreshes only after its actual click',async()=>{
+  const x=await instance(),before={document:global.document,Option:global.Option};
+  global.document={createElement:tag=>new FakeNode(tag)};global.Option=function(text,value,_default,selected){const option=new FakeNode('option');option.textContent=text;option.value=value;option.selected=selected;return option;};
+  const panel=new FakeNode('section'),select=x.console.root.querySelector;
+  x.console.root.querySelector=selector=>selector==='[data-sac-nested-builder]'?panel:select(selector);
+  x.console.renderNestedBuilder=APIConsole.prototype.renderNestedBuilder;
+  const calls=[],fetch=async(path,init={})=>{calls.push({path,method:init.method||'GET'});if(path==='/api/v1/selecto/catalog')return Response.json({format:'selecto.domain-catalog',format_version:1,domains:[x.entry]});if(path===x.entry.manifest)return Response.json(x.manifest);if(path==='/api/pilot/domain')return Response.json(x.canonicalDomain);if(path==='/api/pilot/nested')return Response.json(x.features);throw new Error(path);};
+  x.console.explorerClient=e.createExplorerClient({fetch});x.console.freshNestedContext=APIConsole.prototype.freshNestedContext;
+  try{
+    // The draft stays as authored; only the independently served current
+    // publication changes, as on a principal/publication transition.
+    x.entry.publication='pub/new';x.manifest.domain.publication='pub/new';x.features.domain.publication='pub/new';
+    const retained=x.nodes['[data-sac-nested-state]'].value;
+    x.console.renderNestedBuilder();const all=[];function walk(n){all.push(n);n.children.forEach(walk);}walk(panel);
+    const button=all.find(n=>Object.hasOwn(n.dataset,'sacNestedNew'));
+    assert.ok(button,'existing retained draft must expose a real New draft control');
+    assert.equal(calls.length,0);assert.equal(x.nodes['[data-sac-nested-state]'].value,retained);
+    await x.console.onClick({target:{closest:selector=>selector==='[data-sac-nested-new]'?button:null}});
+    assert.deepEqual(calls.map(v=>v.path),['/api/v1/selecto/catalog',x.entry.manifest,'/api/pilot/domain','/api/pilot/nested']);
+    assert.ok(calls.every(v=>v.method==='GET'));assert.equal(x.console.nestedBlocked,false);
+    assert.equal(x.console.nestedState.intent.binding.publication,x.features.domain.publication);
+    assert.notEqual(x.nodes['[data-sac-nested-state]'].value,retained);
+    assert.equal(x.console.profileDrafts.nested,undefined);
+  }finally{Object.assign(global,before);}
+});
+
+test('explicit New draft retains a blocked state when fresh discovery is refused and never posts',async()=>{
+  const x=await instance();let discoveries=0,posts=0;
+  x.console.freshNestedContext=async()=>{discoveries++;throw new Error('Current publication unavailable');};
+  x.console.canonicalClient={queryNestedDetailText(){posts++;}};
+  x.console.nestedBlocked=true;
+  await x.console.onClick({target:{closest:selector=>selector==='[data-sac-nested-new]'?{}:null}});
+  assert.equal(discoveries,1);assert.equal(posts,0);assert.equal(x.console.nestedState,null);assert.equal(x.console.nestedBlocked,true);
+  assert.match(x.messages.at(-1).message,/Current publication unavailable/);
+});
+
 test('selected transport refreshes all discovery and sends original raw body with exact context header',async()=>{
   const x=await instance(),calls=[];const fetch=async(path,init={})=>{
     calls.push({path,init});if(path==='/api/v1/selecto/catalog')return Response.json({format:'selecto.domain-catalog',format_version:1,domains:[x.entry]});
