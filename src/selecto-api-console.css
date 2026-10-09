@@ -540,6 +540,8 @@ code, pre, textarea.sac-request-editor {
 @keyframes sac-spin { to { transform: rotate(360deg); } }
 
 .sac-response-card { min-height: 25rem; overflow: hidden; }
+.sac-page-info { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; padding: .5rem 1rem; border-bottom: 1px solid var(--sac-border); color: var(--sac-muted); font-size: .85rem; }
+.sac-page-info[hidden] { display: none; }
 .sac-response-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 3.6rem; padding: .7rem 1rem; border-bottom: 1px solid var(--sac-border); }
 .sac-response-heading > div { gap: .7rem; }
 .sac-response-heading h2 { margin: 0; font-size: 1rem; }
