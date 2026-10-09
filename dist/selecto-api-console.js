@@ -3693,8 +3693,10 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
 
     nestedAction(target) {
       const action=target.dataset.sacNestedAction,index=Number(target.dataset.index),group=target.dataset.group;
+      if (group === "page" && (this.queryProfile !== "nested" || this.nestedBlocked || !this.nestedState)) {this.setImportMessage("Restore a complete nested draft before using builder paging.","error");return;}
       if (group === "page" && this.state.rawDirty) {this.setImportMessage("Reset the manual JSON to the complete nested draft before using builder paging.","error");return;}
       if (group === "page" && action === "next" && (this.nestedResult?.metadata.canonical.hasMore !== true || this.nestedState.intent.offset + this.nestedState.intent.limit > 100000)) {this.setImportMessage("Run the current page before advancing to available rows within the page bound.","error");return;}
+      if (group === "page" && action === "previous" && this.nestedState.intent.offset === 0) return;
       this.nestedChanged(intent=>{
         const items=group === "children" ? intent.select.find(Array.isArray) : group === "select" ? intent.select : group === "filters" ? intent.filters : intent.order_by;
         if (action === "remove") items.splice(index,1);
@@ -3704,6 +3706,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         if (action === "add-order" && intent.order_by.length<10) {const f=this.nestedDetailContext.features.root_fields.find(f=>!intent.order_by.some(o=>o.field===f.id));if(f)intent.order_by.push({field:f.id,direction:"asc"});}
         if (group === "page") intent.offset=action === "previous" ? Math.max(0,intent.offset-intent.limit) : intent.offset+intent.limit;
       });
+      if (group === "page") return this.run();
     }
 
     async freshRootContext(signal) {

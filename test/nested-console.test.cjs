@@ -210,3 +210,61 @@ test('state edits cancel pending discovery and prevent a late response from repl
     await x.console.run();assert.equal(posts,phase==='discovery'?0:1);
   }
 });
+
+for(const [action,initialOffset,expectedOffset] of [['next',0,2],['previous',2,0]]){
+  test(`rendered nested paging click ${action} performs one fresh validated dispatch at the changed offset`,async()=>{
+    const x=await instance(),calls=[];x.state.intent.limit=2;x.state.intent.offset=initialOffset;x.console.syncNestedRequest();
+    x.console.nestedResult={metadata:{canonical:{hasMore:true}}};
+    const fetch=async(path,init={})=>{
+      calls.push({path,method:init.method||'GET',body:init.body});
+      if(path==='/api/v1/selecto/catalog')return Response.json({format:'selecto.domain-catalog',format_version:1,domains:[x.entry]});
+      if(path===x.entry.manifest)return Response.json(x.manifest);
+      if(path==='/api/pilot/domain')return Response.json(x.canonicalDomain);
+      if(path==='/api/pilot/nested')return Response.json(x.features);
+      if(path==='/api/pilot/query'){
+        const query=JSON.parse(init.body).query,result=structuredClone(x.result);
+        result.data.page={limit:query.limit,offset:query.offset,has_more:query.offset===0};return Response.json(result);
+      }
+      throw new Error(path);
+    };
+    x.console.explorerClient=e.createExplorerClient({fetch});x.console.canonicalClient=c.createCanonicalClient({fetch});x.console.freshNestedContext=APIConsole.prototype.freshNestedContext;
+    await x.console.onClick({target:{closest:selector=>selector==='[data-sac-nested-action]'?{dataset:{sacNestedAction:action,index:'0',group:'page'}}:null}});
+    const posts=calls.filter(call=>call.method==='POST');
+    if(process.env.NESTED_PAGING_CONTROL_OUTPUT){const fs=require('node:fs');fs.mkdirSync(process.env.NESTED_PAGING_CONTROL_OUTPUT,{recursive:true});fs.writeFileSync(`${process.env.NESTED_PAGING_CONTROL_OUTPUT}/${action}.json`,JSON.stringify({scope:'source-only controlled fetch dispatch; no native/browser admission',action,initialOffset,actualOffset:x.state.intent.offset,calls,posts:posts.length,resultPresent:Boolean(x.console.nestedResult)},null,2)+'\n');}
+    assert.equal(x.state.intent.offset,expectedOffset);assert.equal(posts.length,1);
+    assert.deepEqual(calls.slice(0,4).map(v=>v.path),['/api/v1/selecto/catalog',x.entry.manifest,'/api/pilot/domain','/api/pilot/nested']);
+    assert.equal(JSON.parse(posts[0].body).query.offset,expectedOffset);assert.equal(JSON.parse(posts[0].body).query.limit,2);
+    assert.equal(x.console.nestedResult.page.number,expectedOffset/2+1);
+  });
+}
+
+test('paging refuses unresolved/manual/boundary drafts and refreshes drift/auth before any POST',async()=>{
+  for(const scenario of ['blocked','missing','manual','no-more','over-offset','first-page','drift','auth']){
+    const x=await instance();let posts=0;const before=x.nodes['[data-sac-request]'].value;
+    x.console.canonicalClient={async queryNestedDetailText(){posts++;return x.result;}};
+    x.console.nestedResult={metadata:{canonical:{hasMore:true}}};
+    if(scenario==='blocked')x.console.nestedBlocked=true;
+    if(scenario==='missing')x.console.nestedState=null;
+    if(scenario==='manual'){x.nodes['[data-sac-request]'].value=before+' ';x.console.state.rawDirty=true;}
+    if(scenario==='no-more')x.console.nestedResult.metadata.canonical.hasMore=false;
+    if(scenario==='over-offset')x.state.intent.offset=100000;
+    if(scenario==='drift')x.console.freshNestedContext=async()=>{const changed=structuredClone(x.context);changed.features.domain.publication='different';return changed;};
+    if(scenario==='auth')x.console.freshNestedContext=async()=>{throw new Error('401 unauthenticated');};
+    const offset=x.state.intent.offset;
+    await x.console.nestedAction({dataset:{sacNestedAction:scenario==='first-page'?'previous':'next',index:'0',group:'page'}});
+    assert.equal(posts,0,scenario);
+    if(!['drift','auth'].includes(scenario))assert.equal(x.state.intent.offset,offset,scenario);
+    if(scenario==='manual')assert.equal(x.nodes['[data-sac-request]'].value,before+' ');
+    if(['drift','auth'].includes(scenario)){assert.equal(x.state.intent.binding.publication,'pub/alpha');assert.equal(x.console.nestedResult,null);assert.match(x.rendered.at(-1).error.message,scenario==='drift'?/publication or revision changed/:/401/);}
+  }
+});
+
+test('paging cancels an older response and retains only the fresh page render',async()=>{
+  const x=await instance();x.state.intent.limit=2;x.console.syncNestedRequest();let releaseA;const sent=[];
+  x.console.canonicalClient={queryNestedDetailText(_manifest,text,options){const query=JSON.parse(text).query;sent.push({query,signal:options.signal});const result=structuredClone(x.result);result.data.page={limit:query.limit,offset:query.offset,has_more:query.offset===0};return sent.length===1?new Promise(resolve=>releaseA=()=>resolve(result)):Promise.resolve(result);}};
+  const a=x.console.run();while(!releaseA)await Promise.resolve();
+  x.console.nestedResult={metadata:{canonical:{hasMore:true}}};
+  await x.console.nestedAction({dataset:{sacNestedAction:'next',index:'0',group:'page'}});
+  assert.equal(sent.length,2);assert.equal(sent[0].signal.aborted,true);assert.equal(sent[1].query.offset,2);assert.equal(x.console.nestedResult.page.number,2);
+  const rendered=x.rendered.length;releaseA();await a;assert.equal(x.rendered.length,rendered);assert.equal(x.console.nestedResult.page.number,2);
+});
