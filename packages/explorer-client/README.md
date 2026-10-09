@@ -74,3 +74,14 @@ Only this validated result exposes `metadata.canonical.profile` equal to
 These markers permit a dedicated renderer; an arbitrary `type:nested` does not.
 Mappings preserve exact values and native hasMore, without native/API/SPA
 admission or inferred total counts.
+
+Nested validation preserves typed local-refusal metadata from the canonical
+client. Saved-state restoration should call
+`assertNestedDetailIntent(intent, context, {origin: "state"})`; direct builder
+validation uses the default intent origin. This distinguishes invalid state
+from invalid authored intent while preserving specific stale-context,
+unpublished-field and recognized unsupported-facility reasons. State syntax,
+Unicode and actual byte-cap failures remain distinct. Discovery classifies an
+actual authentication HTTP401 or an invalid published capability; arbitrary
+transport exceptions are not classified by their wording. Original exception
+classes, codes and messages remain available.

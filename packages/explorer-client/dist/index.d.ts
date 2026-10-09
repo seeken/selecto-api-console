@@ -42,7 +42,7 @@ export interface NestedExplorerResult {schema:"selecto.spa.query-response/v1";co
 export interface ExplorerClient {getNestedDetailContext(id:string,options?:{signal?:AbortSignal}):Promise<NestedExplorerContext>;executeNestedDetailIntent(intent:NestedDetailIntent,options?:{signal?:AbortSignal;requestId?:string}):Promise<NestedExplorerResult>;}
 export function nestedDetailBinding(features:NestedDetailFeatures):NestedDetailBinding;
 export function createNestedDetailIntent(features:NestedDetailFeatures):NestedDetailIntent;
-export function assertNestedDetailIntent(value:unknown,context:NestedDetailValidationContext):NestedDetailIntent;
+export function assertNestedDetailIntent(value:unknown,context:NestedDetailValidationContext,options?:{origin?:"intent"|"state"}):NestedDetailIntent;
 export function toNestedDetailQuery(intent:NestedDetailIntent,context:NestedDetailValidationContext):NestedDetailQuery;
 export function parseNestedDetailState(rawJSON:string,context?:NestedDetailValidationContext):NestedDetailState;
 export function encodeNestedDetailState(state:NestedDetailState):string;

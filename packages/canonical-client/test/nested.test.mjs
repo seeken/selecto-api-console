@@ -4,6 +4,24 @@ import {fixture,objects} from "./nested-fixture.mjs";
 import * as c from "../dist/index.js";
 import {readFile} from "node:fs/promises";
 
+test("local refusal metadata preserves errors and has one closed family relationship",()=>{
+  const reasons=["nested-unavailable","authentication-required","stale-nested-context","invalid-nested-intent","unpublished-field-id","closed-intent-violation","duplicate-state-slot","invalid-nested-state","state-limit","invalid-selected-raw"];
+  for(const reason of reasons){
+    const error=new c.CanonicalWireError("original.path","original message"),before={code:error.code,message:error.message,path:error.path};
+    assert.equal(c.markNestedDetailRefusal(error,reason),error);
+    assert.deepEqual(c.nestedDetailRefusal(error),{reason,family:reason==="duplicate-state-slot"?"invalid-nested-state":reason});
+    assert.deepEqual({code:error.code,message:error.message,path:error.path},before);
+    assert.equal(JSON.stringify(error).includes("nestedDetailRefusal"),false);
+    c.markNestedDetailRefusal(error,"invalid-nested-state");assert.equal(c.nestedDetailRefusal(error).reason,reason);
+  }
+  assert.equal(c.nestedDetailRefusal(Object.assign(new Error("authentication required"),{code:"authentication_required",status:401})),null);
+  assert.equal(c.nestedDetailRefusal({nestedDetailRefusalReason:"duplicate-state-slot",nestedDetailRefusalFamily:"state-limit"}),null);
+  assert.equal(c.nestedDetailRefusal({nestedDetailRefusalReason:"__proto__",nestedDetailRefusalFamily:"__proto__"}),null);
+  assert.equal(c.nestedDetailRefusal({get nestedDetailRefusalReason(){throw new Error("opaque");}}),null);
+  const frozen=Object.freeze(new Error("frozen"));assert.equal(c.markNestedDetailRefusal(frozen,"invalid-nested-state"),frozen);
+  assert.throws(()=>c.markNestedDetailRefusal(new Error("unknown"),"caller-policy"),TypeError);
+});
+
 test("native sorted-key nested fixed order is semantic and stays a closed PK ascending item",async()=>{
   const native=JSON.parse(await readFile(new URL("./fixtures/native-go-sorted-nested-features.json",import.meta.url),"utf8"));
   assert.deepEqual(Object.keys(native.collections[0].order_by[0]),["direction","field"]);

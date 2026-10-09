@@ -5,6 +5,55 @@ import * as e from "../dist/index.js";
 import * as c from "@selecto/canonical-client";
 function context() {const f=fixture();return {...f,...f.trusted,binding:e.nestedDetailBinding(f.features)};}
 function fullIntent(x) {const i=e.createNestedDetailIntent(x.features);i.select=x.query.select.map(s=>Array.isArray(s)?s.map(p=>x.features.collections[0].fields.find(f=>f.path===p).id):x.features.root_fields.find(f=>f.path===s).id);return i;}
+function thrown(call) {try{call();}catch(error){return error;}assert.fail("expected a refusal");}
+
+test("nested refusal reasons follow actual validation origin and preserve precise field/context branches",()=>{
+  const x=context(),i=fullIntent(x),state=intent=>JSON.stringify({format:"selecto.nested-detail-state",format_version:1,intent});
+  for(const key of ["where","child_order_by","formatter"]){
+    const bad={...i,[key]:{}};
+    assert.equal(c.nestedDetailRefusal(thrown(()=>e.assertNestedDetailIntent(bad,x))).reason,"closed-intent-violation");
+    assert.equal(c.nestedDetailRefusal(thrown(()=>e.decodeNestedDetailState(state(bad),x))).reason,"closed-intent-violation");
+  }
+  const extra={...i,extra:true};
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.assertNestedDetailIntent(extra,x))).reason,"invalid-nested-intent");
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.decodeNestedDetailState(state(extra),x))).reason,"invalid-nested-state");
+  const invalid=structuredClone(i);invalid.filters=[{id:"typed",field:"opaque/amount",op:"eq",value:"not decimal"}];
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.assertNestedDetailIntent(invalid,x))).reason,"invalid-nested-intent");
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.assertNestedDetailIntent(invalid,x,{origin:"state"}))).reason,"invalid-nested-state");
+  for(const [change,reason,code] of [[z=>z.binding.publication="old","stale-nested-context","stale_nested_detail_context"],[z=>z.collection_id="unknown","unpublished-field-id","invalid_field"],[z=>z.select[0]="unknown","unpublished-field-id","invalid_field"]]){
+    const bad=structuredClone(i);change(bad);const error=thrown(()=>e.decodeNestedDetailState(state(bad),x));
+    assert.equal(c.nestedDetailRefusal(error).reason,reason);assert.equal(error.code,code);assert.ok(error instanceof e.ExplorerIntentError);
+  }
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.assertNestedDetailIntent(i,{}))).reason,"nested-unavailable");
+});
+
+test("state byte caps are typed at the actual size branch without replacing syntax/Unicode errors",()=>{
+  for(const raw of ["{",'\ufeff{}','{"x":"\\ud800"}',"x".repeat(65537),"é".repeat(32769)]){
+    const original=thrown(()=>c.parseStrictJSON(raw,{tokens:true,maxBytes:65536})),error=thrown(()=>e.parseNestedDetailState(raw));
+    assert.equal(error.constructor,original.constructor);assert.equal(error.code,original.code);assert.equal(error.message,original.message);
+    assert.equal(c.nestedDetailRefusal(error).reason,original.validationReason==="utf8-byte-limit"?"state-limit":"invalid-nested-state");
+  }
+  const unicodeBeforeSize="\ud800"+"x".repeat(65537);
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.parseNestedDetailState(unicodeBeforeSize))).reason,"invalid-nested-state");
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.decodeNestedDetailState("%"))).reason,"invalid-nested-state");
+  assert.equal(c.nestedDetailRefusal(thrown(()=>e.decodeNestedDetailState("x".repeat(65537)))).reason,"state-limit");
+});
+
+test("nested discovery tags actual authentication and invalid capability failures without classifying transport failures",async()=>{
+  const x=context();let mode="auth";
+  const fetch=async(path)=>{
+    if(mode==="network")throw new TypeError("authentication required in arbitrary transport text");
+    if(mode==="auth")return Response.json({ok:false,error:{code:"authentication_required",message:"Authentication required.",details:{}}},{status:401});
+    if(path==="/api/v1/selecto/catalog")return Response.json({format:"selecto.domain-catalog",format_version:1,domains:[x.entry]});
+    if(path==="/api/pilot/manifest")return Response.json(x.manifest);
+    if(path==="/api/pilot/domain")return Response.json(x.canonicalDomain);
+    const bad=structuredClone(x.features);bad.supports.child_filtering=true;return Response.json(bad);
+  };
+  const client=e.createExplorerClient({fetch});
+  await assert.rejects(client.getNestedDetailContext("pilot"),error=>error instanceof c.CanonicalHttpError&&error.status===401&&c.nestedDetailRefusal(error).reason==="authentication-required");
+  mode="network";await assert.rejects(client.getNestedDetailContext("pilot"),error=>error instanceof TypeError&&c.nestedDetailRefusal(error)===null);
+  mode="sidecar";await assert.rejects(client.getNestedDetailContext("pilot"),error=>error instanceof c.CanonicalWireError&&c.nestedDetailRefusal(error).reason==="nested-unavailable");
+});
 
 test("nested opaque selection and root text filters translate completely with no prefix assumptions",()=>{
   const x=context(),i=fullIntent(x);i.filters=[{id:"stable/1",field:"opaque/serial",op:"eq",value:"9007199254740993"},{id:"stable/2",field:"opaque/note",op:"is_null"}];i.order_by=[{field:"opaque/id",direction:"desc"}];const q=e.toNestedDetailQuery(i,x);assert.deepEqual(q.select,x.query.select);assert.equal(q.filters[0].value,"9007199254740993");assert.equal(q.filters[0].field,"serial");assert.deepEqual(q.filters[1],{field:"note",op:"is_null"});

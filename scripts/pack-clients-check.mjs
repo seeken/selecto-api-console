@@ -25,7 +25,7 @@ try {
         if (typeof surface[name] !== 'function') throw new Error('Missing installed export: ' + name);
       }
     }
-    requireFunctions(canonical, ['createCanonicalClient','assertRootPredicateFeatures','parseCanonicalRequestText','buildRootPredicateRequest','assertRootPredicateResult','assertNestedDetailFeatures','nestedDetailContext','encodeNestedDetailContext','assertNestedDetailScalar','assertNestedDetailQuery','buildNestedDetailRequest','parseNestedDetailRequestText','assertNestedDetailResult']);
+    requireFunctions(canonical, ['createCanonicalClient','assertRootPredicateFeatures','parseCanonicalRequestText','buildRootPredicateRequest','assertRootPredicateResult','assertNestedDetailFeatures','nestedDetailContext','encodeNestedDetailContext','assertNestedDetailScalar','assertNestedDetailQuery','buildNestedDetailRequest','parseNestedDetailRequestText','assertNestedDetailResult','markNestedDetailRefusal','nestedDetailRefusal']);
     requireFunctions(explorer, ['createExplorerClient','assertRootPredicateIntent','toRootPredicateQuery','parseRootPredicateState','encodeRootPredicateState','decodeRootPredicateState','validateRootPredicateFeaturesAndMap','flatSnapshotToRequest','nestedDetailBinding','createNestedDetailIntent','assertNestedDetailIntent','toNestedDetailQuery','parseNestedDetailState','encodeNestedDetailState','decodeNestedDetailState','nestedDetailConsoleHref','toNestedDetailExplorerResult']);
     requireFunctions(canonical.createCanonicalClient(), ['nestedDetailFeatures','queryNestedDetail','queryNestedDetailText']);
     requireFunctions(explorer.createExplorerClient(), ['getNestedDetailContext','executeNestedDetailIntent']);

@@ -1,10 +1,11 @@
 /** Strict transport validation; host authorization and query policy stay on the host. */
 export class CanonicalWireError extends Error {
-  constructor(path, message) {
+  constructor(path, message, validationReason) {
     super(`${path}: ${message}`);
     this.name = "CanonicalWireError";
     this.code = "invalid_response";
     this.path = path;
+    if (validationReason !== undefined) this.validationReason = validationReason;
   }
 }
 
@@ -18,6 +19,39 @@ export class CanonicalHttpError extends Error {
     this.requestId = envelope.meta?.request_id;
     this.envelope = envelope;
   }
+}
+
+// Public local-refusal metadata is independent of wire error codes/messages.
+// Only duplicate slots have a broader family; the remaining pairs are exact.
+const nestedRefusalFamilies = Object.freeze(Object.assign(Object.create(null), {
+  "nested-unavailable": "nested-unavailable",
+  "authentication-required": "authentication-required",
+  "stale-nested-context": "stale-nested-context",
+  "invalid-nested-intent": "invalid-nested-intent",
+  "unpublished-field-id": "unpublished-field-id",
+  "closed-intent-violation": "closed-intent-violation",
+  "duplicate-state-slot": "invalid-nested-state",
+  "invalid-nested-state": "invalid-nested-state",
+  "state-limit": "state-limit",
+  "invalid-selected-raw": "invalid-selected-raw"
+}));
+
+export function nestedDetailRefusal(error) {
+  try {
+    const reason = error?.nestedDetailRefusalReason, family = error?.nestedDetailRefusalFamily;
+    return typeof reason === "string" && Object.hasOwn(nestedRefusalFamilies, reason) && family === nestedRefusalFamilies[reason] ? {reason, family} : null;
+  } catch { return null; }
+}
+
+/** Trusted validation branches attach scalar metadata without replacing errors. */
+export function markNestedDetailRefusal(error, reason) {
+  if (!Object.hasOwn(nestedRefusalFamilies, reason)) throw new TypeError("Unknown nested refusal reason");
+  if (!(error instanceof Error) || nestedDetailRefusal(error) || !Object.isExtensible(error) || Object.hasOwn(error, "nestedDetailRefusalReason") || Object.hasOwn(error, "nestedDetailRefusalFamily")) return error;
+  Object.defineProperties(error, {
+    nestedDetailRefusalReason: {value: reason},
+    nestedDetailRefusalFamily: {value: nestedRefusalFamilies[reason]}
+  });
+  return error;
 }
 
 export function safePath(value) {
@@ -314,7 +348,7 @@ export function assertUnicode(value, path = "string", maximum = Infinity, allowN
     } else if (code >= 0xdc00 && code <= 0xdfff) throw new CanonicalWireError(path, "unpaired UTF-16 surrogate");
   }
   if (!allowNul && value.includes("\0")) throw new CanonicalWireError(path, "NUL is unavailable");
-  if (new TextEncoder().encode(value).length > maximum) throw new CanonicalWireError(path, "UTF-8 byte limit exceeded");
+  if (new TextEncoder().encode(value).length > maximum) throw new CanonicalWireError(path, "UTF-8 byte limit exceeded", "utf8-byte-limit");
   return value;
 }
 

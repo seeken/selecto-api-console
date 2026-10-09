@@ -77,12 +77,28 @@
     return payload;
   }
 
+  function nestedError(message, reason) {
+    return global.SelectoCanonicalClient.markNestedDetailRefusal(new Error(message), reason);
+  }
+
+  function setNestedRefusal(target, error) {
+    if (!target) return;
+    const refusal = global.SelectoCanonicalClient?.nestedDetailRefusal(error);
+    if (refusal) {
+      target.dataset.selectoRefusalReason = refusal.reason;
+      target.dataset.selectoRefusalFamily = refusal.family;
+    } else {
+      delete target.dataset.selectoRefusalReason;
+      delete target.dataset.selectoRefusalFamily;
+    }
+  }
+
   function nestedStateFromLocation(locationLike) {
     const slots = new URLSearchParams(String(locationLike && locationLike.hash || "").replace(/^#/, ""));
     const values = slots.getAll("nested_request");
     if (!values.length) return null;
     if (values.length !== 1 || slots.has("request") || [...slots.keys()].some(key => key !== "nested_request")) {
-      throw new Error("Nested URL state requires exactly one isolated nested_request slot.");
+      throw nestedError("Nested URL state requires exactly one isolated nested_request slot.", values.length !== 1 ? "duplicate-state-slot" : "invalid-nested-state");
     }
     return {raw: values[0], state: global.SelectoExplorerClient.decodeNestedDetailState(values[0])};
   }
@@ -674,7 +690,7 @@
               const features = await this.canonicalClient.nestedDetailFeatures(this.manifest);
               this.nestedDomainId = features.domain.id;
               this.nestedDetailContext = await this.explorerClient.getNestedDetailContext(this.nestedDomainId);
-            } catch (error) { this.nestedAvailabilityError = error.message; }
+            } catch (error) { this.nestedAvailabilityError = error.message; this.nestedAvailabilityRefusal = this.nestedDiscoveryFailure(error); }
           }
         }
         this.state.responseFormat = this.queryResponseFormats[0].id;
@@ -712,7 +728,7 @@
           const stateEditor = this.root.querySelector("[data-sac-nested-state]");
           if (stateEditor) stateEditor.value = this.blockedInitialRequestText || "";
           this.applyQueryProfile();
-          this.setImportMessage(`Nested state blocked: ${this.nestedInitialError.message}`, "error");
+          this.setImportMessage(`Nested state blocked: ${this.nestedInitialError.message}`, "error", this.nestedInitialError);
         } else if (initialRequest?.format === "selecto.root-predicate-state") {
           const raw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
           await this.restoreRootState(raw);
@@ -1041,6 +1057,7 @@
       if (nestedAvailability) nestedAvailability.textContent = this.nestedDetailContext
         ? "Complete nested Detail available; opt in explicitly."
         : `Complete nested Detail unavailable on this publication.${this.nestedAvailabilityError ? ` ${this.nestedAvailabilityError}` : ""}`;
+      setNestedRefusal(nestedAvailability, this.nestedDetailContext ? null : this.nestedAvailabilityRefusal || nestedError("Complete nested Detail unavailable on this publication.", "nested-unavailable"));
       this.populateLibraryControls();
       this.seedMutationState();
       this.renderAll();
@@ -2300,17 +2317,25 @@
       return this.state;
     }
 
-    setImportMessage(message, kind) {
+    setImportMessage(message, kind, error) {
       const target = this.root.querySelector("[data-sac-import-message]");
       if (!target) return;
       target.textContent = message || "";
       target.dataset.kind = kind || "";
       target.hidden = !message;
+      setNestedRefusal(target, message && kind === "error" ? error : null);
+    }
+
+    nestedDiscoveryFailure(error) {
+      const client = global.SelectoCanonicalClient;
+      if (error instanceof client.CanonicalHttpError && error.status === 401 && error.code === "authentication_required") return client.markNestedDetailRefusal(error, "authentication-required");
+      if (error instanceof client.CanonicalWireError) return client.markNestedDetailRefusal(error, "nested-unavailable");
+      return error;
     }
 
     async freshNestedContext(signal, domainId = this.nestedState?.intent.binding.domain_id || this.nestedDomainId) {
-      if (!this.explorerClient || !domainId) throw new Error("Complete nested Detail unavailable on this publication.");
-      if (this.nestedDomainId && domainId !== this.nestedDomainId) throw new Error("Nested state belongs to a different Console domain.");
+      if (!this.explorerClient || !domainId) throw nestedError("Complete nested Detail unavailable on this publication.", "nested-unavailable");
+      if (this.nestedDomainId && domainId !== this.nestedDomainId) throw nestedError("Nested state belongs to a different Console domain.", "stale-nested-context");
       return this.explorerClient.getNestedDetailContext(domainId, {signal});
     }
 
@@ -2375,13 +2400,13 @@
         this.nestedDetailContext = context;
         this.nestedState = {format: "selecto.nested-detail-state", format_version: 1,
           intent: global.SelectoExplorerClient.createNestedDetailIntent(context.features)};
-        this.nestedBlocked = false;
+        this.nestedBlocked = false; this.nestedInitialError = null;
         this.syncNestedRequest(); this.renderNestedBuilder();
         this.setImportMessage("New nested draft uses the current authenticated publication.", "success");
       } catch (error) {
         if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return;
         this.nestedBlocked = true;
-        this.setImportMessage(`Nested mode blocked: ${error.message}`, "error");
+        this.setImportMessage(`Nested mode blocked: ${error.message}`, "error", error);
       }
     }
 
@@ -2400,17 +2425,17 @@
         const state = global.SelectoExplorerClient.decodeNestedDetailState(raw);
         const context = await this.freshNestedContext(undefined, state.intent.binding.domain_id);
         if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return false;
-        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context);
+        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context, {origin:"state"});
         this.nestedDetailContext = context; this.nestedDomainId = state.intent.binding.domain_id;
-        this.nestedState = state; this.nestedBlocked = false; this.blockedInitialRequestText = null;
+        this.nestedState = state; this.nestedBlocked = false; this.blockedInitialRequestText = null; this.nestedInitialError = null;
         while (state.intent.filters.some(filter=>filter.id === `nested-filter-${this.nextNestedFilterId}`)) this.nextNestedFilterId++;
         this.syncNestedRequest(); this.renderNestedBuilder();
         this.setImportMessage("Nested state restored. Selection, filters, page and exact presentation retained; Run is explicit.", "success");
         return true;
       } catch (error) {
         if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return false;
-        this.setImportMessage(`Nested state blocked: ${error.message}`, "error");
-        this.setStatus(error.message, "error"); return false;
+        this.setImportMessage(`Nested state blocked: ${error.message}`, "error", error);
+        this.setStatus(error.message, "error", error); return false;
       }
     }
 
@@ -2439,7 +2464,7 @@
       try { this.syncNestedRequest(); this.setImportMessage("", ""); }
       catch (error) {
         this.root.querySelector("[data-sac-run]").disabled = true;
-        this.setImportMessage(`Nested draft incomplete: ${error.message}`, "error");
+        this.setImportMessage(`Nested draft incomplete: ${error.message}`, "error", error);
       }
       if (renderBuilder) this.renderNestedBuilder();
     }
@@ -2451,18 +2476,18 @@
         if (action === "restore") return this.restoreNestedState(stateEditor.value);
         if (action === "private") {
           const saved = global.localStorage.getItem(this.nestedStateStorageKey());
-          if (!saved) throw new Error("No private nested state saved.");
+          if (!saved) throw nestedError("No private nested state saved.", "invalid-nested-state");
           return this.restoreNestedState(saved);
         }
-        if (this.queryProfile !== "nested" || this.nestedBlocked || !this.nestedState) throw new Error("Restore a complete nested draft first.");
+        if (this.queryProfile !== "nested" || this.nestedBlocked || !this.nestedState) throw nestedError("Restore a complete nested draft first.", "invalid-nested-state");
         const state = global.SelectoExplorerClient.decodeNestedDetailState(stateEditor.value);
         const editor = this.root.querySelector("[data-sac-request]");
         const stateText = stateEditor.value;
         const matches = () => this.queryProfile === "nested" && stateEditor.value === stateText && editor.value === this.nestedStateRequestText && JSON.stringify(state) === JSON.stringify(this.nestedState);
-        if (!matches()) throw new Error("State and query editor differ. Restore the complete intended nested state before saving or sharing.");
+        if (!matches()) throw nestedError("State and query editor differ. Restore the complete intended nested state before saving or sharing.", "invalid-nested-state");
         const context = await this.freshNestedContext();
         if (!matches()) throw new Error("Nested draft changed during discovery.");
-        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context);
+        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context, {origin:"state"});
         const encoded = global.SelectoExplorerClient.encodeNestedDetailState(state);
         if (action === "save") {
           global.localStorage.setItem(this.nestedStateStorageKey(), JSON.stringify(state));
@@ -2476,7 +2501,7 @@
           await this.copy(url.href, this.root.querySelector("[data-sac-nested-link]"));
           this.setImportMessage("Nested state URL copied.", "success");
         }
-      } catch (error) { this.setImportMessage(`Nested state blocked: ${error.message}`, "error"); }
+      } catch (error) { this.setImportMessage(`Nested state blocked: ${error.message}`, "error", error); }
     }
 
     renderNestedBuilder() {
@@ -3890,11 +3915,12 @@
       const editor = this.root.querySelector("[data-sac-request]");
       let request;
       try {
-        if (this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText) throw new Error("URL state remains blocked. Restore valid bound state or explicitly start a new query.");
+        if (this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText) throw this.queryProfile === "nested" ? nestedError("URL state remains blocked. Restore valid bound state or explicitly start a new query.", global.SelectoCanonicalClient.nestedDetailRefusal(this.nestedInitialError)?.reason || "invalid-nested-state") : new Error("URL state remains blocked. Restore valid bound state or explicitly start a new query.");
         request = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);
       } catch (error) {
-        this.setStatus("Invalid request JSON", "error");
-        this.showLocalError(error.message);
+        if (this.queryProfile === "nested") global.SelectoCanonicalClient.markNestedDetailRefusal(error, "invalid-selected-raw");
+        this.setStatus("Invalid request JSON", "error", error);
+        this.showLocalError(error.message, error);
         return;
       }
       const rawRequestText = editor.value;
@@ -3924,16 +3950,19 @@
       let nestedResult = null;
       try {
         if (this.queryProfile === "nested") {
-          if (this.nestedBlocked || !this.nestedState) throw new Error("Nested state remains blocked. Restore valid state or start a new draft.");
+          if (this.nestedBlocked || !this.nestedState) throw nestedError("Nested state remains blocked. Restore valid state or start a new draft.", global.SelectoCanonicalClient.nestedDetailRefusal(this.nestedInitialError)?.reason || "invalid-nested-state");
           const retained = structuredClone(this.nestedState);
           const context = await this.freshNestedContext(controller.signal);
           if (sequence !== this.querySequence || this.queryProfile !== "nested") return;
           const binding = global.SelectoExplorerClient.nestedDetailBinding(context.features);
-          if (Object.keys(binding).some(key => retained.intent.binding[key] !== binding[key])) throw new Error("Nested publication or revision changed; retain the draft and explicitly start a new one.");
+          if (Object.keys(binding).some(key => retained.intent.binding[key] !== binding[key])) throw nestedError("Nested publication or revision changed; retain the draft and explicitly start a new one.", "stale-nested-context");
           if (!this.state.rawDirty) global.SelectoExplorerClient.assertNestedDetailIntent(retained.intent, context);
           const selectedContext = global.SelectoCanonicalClient.nestedDetailContext(context.features);
-          const parsed = global.SelectoCanonicalClient.parseNestedDetailRequestText(rawRequestText, {features:context.features,context:selectedContext});
-          if (parsed.request.query.timezone !== "UTC") throw new Error("This nested browser mode requires explicit timezone UTC; retain the raw query or reset to the complete draft.");
+          let parsed;
+          try {
+            parsed = global.SelectoCanonicalClient.parseNestedDetailRequestText(rawRequestText, {features:context.features,context:selectedContext});
+            if (parsed.request.query.timezone !== "UTC") throw new Error("This nested browser mode requires explicit timezone UTC; retain the raw query or reset to the complete draft.");
+          } catch (error) { throw global.SelectoCanonicalClient.markNestedDetailRefusal(error, "invalid-selected-raw"); }
           payload = await this.canonicalClient.queryNestedDetailText(context.manifest, rawRequestText,
             {features:context.features,context:selectedContext,signal:controller.signal});
           // The strict selected transport has validated raw numeric tokens first.
@@ -4020,7 +4049,7 @@
         this.nestedResult = null;
         this.state.response = error.envelope || {ok: false, error: {code: error.name === "AbortError" ? "cancelled" : error.code || "network_error", message: error.message, details: error.details || {}}};
         this.renderResponse(this.state.response);
-        this.setStatus(error.status ? `${error.status} · ${error.code}` : error.message, "error");
+        this.setStatus(error.status ? `${error.status} · ${error.code}` : error.message, "error", error);
       } finally {
         if (sequence !== this.querySequence) return;
         button.disabled = this.queryProfile === "nested" && this.nestedBlocked;
@@ -4096,18 +4125,21 @@
       global.setTimeout(() => global.URL.revokeObjectURL(url), 0);
     }
 
-    setStatus(text, kind) {
+    setStatus(text, kind, error) {
       const status = this.root.querySelector("[data-sac-response-status]");
       status.textContent = text;
       status.dataset.kind = kind || "";
+      setNestedRefusal(status, kind === "error" ? error : null);
     }
 
-    showLocalError(message) {
+    showLocalError(message, error) {
+      setNestedRefusal(this.root.querySelector("[data-sac-response-status]"), error);
       this.state.response = {ok: false, error: {code: "invalid_request_json", message, details: {}}};
       this.renderResponse(this.state.response);
     }
 
     clearQueryResult() {
+      setNestedRefusal(this.root.querySelector("[data-sac-response-status]"), null);
       for (const selector of ["[data-sac-result-head]", "[data-sac-result-body]"]) this.root.querySelector(selector)?.replaceChildren();
       const json = this.root.querySelector("[data-sac-response-json]"); if (json) json.textContent = "";
       const empty = this.root.querySelector("[data-sac-empty-response]"); if (empty) empty.hidden = false;
@@ -4215,6 +4247,7 @@
     renderFatal(error) {
       this.root.replaceChildren();
       const panel = element("section", "sac-fatal");
+      setNestedRefusal(panel, error);
       panel.append(element("span", "sac-kicker", "API Console"), element("h1", "", "Could not load the API"), element("p", "", error.status ? `${error.status} ${error.code}: ${error.message}` : error.message || String(error)));
       const retry = element("button", "sac-button sac-primary", "Retry");
       retry.type = "button";

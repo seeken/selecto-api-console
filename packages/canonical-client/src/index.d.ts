@@ -10,8 +10,12 @@ export interface RemoteResult {ok: true; data: {format: "selecto.remote-query-re
 export interface ErrorEnvelope {ok: false; error: {code: string; message: string; details: Record<string, unknown>}; meta?: {request_id?: string};}
 export interface QueryOptions {signal?: AbortSignal; requestId?: string; fingerprint?: string;}
 export interface CanonicalClient {rootPredicateFeatures(manifest:Manifest,signal?:AbortSignal):Promise<RootPredicateFeatures>;queryRootPredicate(manifest:Manifest,query:RootPredicateQuery,options:QueryOptions & {features:RootPredicateFeatures}):Promise<RemoteResult>;queryText(manifest:Manifest,text:string,options?:QueryOptions & {features?:RootPredicateFeatures}):Promise<RemoteResult>;baseUrl: string; catalog(signal?: AbortSignal): Promise<DomainCatalog>; manifest(path?: string, signal?: AbortSignal): Promise<Manifest>; domain(manifest: Manifest, signal?: AbortSignal): Promise<Record<string, unknown>>; metadata(path: string, signal?: AbortSignal): Promise<unknown>; query(manifest: Manifest, query: RemoteQuery, options?: QueryOptions): Promise<RemoteResult>; request(path: string, init?: RequestInit): Promise<{payload: unknown; status: number; statusText: string; headers: Headers}>;}
-export class CanonicalWireError extends Error {code: string; path: string; constructor(path: string, message: string);}
+export class CanonicalWireError extends Error {code: string; path: string; validationReason?: "utf8-byte-limit"; constructor(path: string, message: string, validationReason?: "utf8-byte-limit");}
 export class CanonicalHttpError extends Error {status: number; code: string; details: Record<string, unknown>; requestId?: string; envelope: ErrorEnvelope; constructor(status: number, envelope: ErrorEnvelope);}
+export type NestedDetailRefusalReason = "nested-unavailable" | "authentication-required" | "stale-nested-context" | "invalid-nested-intent" | "unpublished-field-id" | "closed-intent-violation" | "duplicate-state-slot" | "invalid-nested-state" | "state-limit" | "invalid-selected-raw";
+export interface NestedDetailRefusal {reason: NestedDetailRefusalReason; family: NestedDetailRefusalReason;}
+export function nestedDetailRefusal(error: unknown): NestedDetailRefusal | null;
+export function markNestedDetailRefusal<T>(error: T, reason: NestedDetailRefusalReason): T;
 export function createCanonicalClient(options?: ClientOptions): CanonicalClient;
 export function safePath(value: string): string;
 export function record(value: unknown, path: string): Record<string, unknown>;
