@@ -3564,6 +3564,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       if (!["flat", "root", "nested"].includes(value)) throw new Error("Unknown query profile.");
       this.retainProfileDraft();
       if (fresh) delete this.profileDrafts[value];
+      if (fresh && value === "nested") this.nestedInitialError = null;
       this.cancelQuery();
       this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
       const sequence = this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
@@ -3620,6 +3621,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
       const sequence = this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
       this.queryProfile = "nested"; this.nestedState = null; this.nestedBlocked = true;
+      this.nestedInitialError = null;
       const editor = this.root.querySelector("[data-sac-request]"); editor.value = raw;
       const stateEditor = this.root.querySelector("[data-sac-nested-state]"); if (stateEditor) stateEditor.value = raw;
       this.state.rawDirty = true;
@@ -3638,6 +3640,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         return true;
       } catch (error) {
         if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return false;
+        this.nestedInitialError = error;
         this.setImportMessage(`Nested state blocked: ${error.message}`, "error", error);
         this.setStatus(error.message, "error", error); return false;
       }
@@ -5030,6 +5033,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       if (target.matches("[data-sac-nested-state]")) {
         this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
         this.nestedBlocked = true;
+        this.nestedInitialError = null;
         if (this.queryProfile === "nested") {
           this.cancelQuery(); this.nestedResult = null; this.state.response = null;
           this.clearQueryResult(); this.renderNestedBuilder();
@@ -5041,6 +5045,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       if (target.matches("[data-sac-request]")) {
         this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
         this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
+        this.nestedInitialError = null;
         this.state.rawDirty = true;
         if (this.queryProfile === "nested" && !this.nestedBlocked) this.root.querySelector("[data-sac-run]").disabled = false;
         this.root.querySelector("[data-sac-edited]").hidden = false;
@@ -5118,6 +5123,13 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       }
       const editor = this.root.querySelector("[data-sac-request]");
       let request;
+      if (this.queryProfile === "nested" && this.nestedBlocked && this.nestedInitialError && !(this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText)) {
+        const refusal = global.SelectoCanonicalClient.nestedDetailRefusal(this.nestedInitialError);
+        const error = refusal ? nestedError("Nested state remains blocked. Restore valid state or start a new draft.", refusal.reason) : this.nestedInitialError;
+        this.setStatus(error.message, "error", error);
+        this.showLocalError(error.message, error);
+        return;
+      }
       try {
         if (this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText) throw this.queryProfile === "nested" ? nestedError("URL state remains blocked. Restore valid bound state or explicitly start a new query.", global.SelectoCanonicalClient.nestedDetailRefusal(this.nestedInitialError)?.reason || "invalid-nested-state") : new Error("URL state remains blocked. Restore valid bound state or explicitly start a new query.");
         request = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);

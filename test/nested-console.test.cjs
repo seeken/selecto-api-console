@@ -403,6 +403,59 @@ test('private invalid state and state-limit render typed import errors without a
   assert.equal(posts,0);
 });
 
+test('blocked restored-state Run preserves the actual typed import category before raw parsing',async()=>{
+  const mutations=[
+    ['stale-nested-context',s=>s.intent.binding.fingerprint='old'],
+    ['stale-nested-context',s=>s.intent.binding.publication='old'],
+    ['stale-nested-context',s=>s.intent.binding.feature_revision='old'],
+    ['unpublished-field-id',s=>s.intent.select[0]='unknown-root'],
+    ['unpublished-field-id',s=>s.intent.select.find(Array.isArray)[0]='unknown-child'],
+    ...['where','child_order_by','formatter'].map(key=>['closed-intent-violation',s=>s.intent[key]={}])
+  ];
+  for(const [reason,mutate] of mutations){
+    const x=await instance(),display=refusalDisplays(x),state=structuredClone(x.state);mutate(state);
+    const raw=JSON.stringify(state);let posts=0;x.console.canonicalClient={queryNestedDetailText(){posts++;}};
+    assert.equal(await x.console.restoreNestedState(raw),false);
+    const original=c.nestedDetailRefusal(x.console.nestedInitialError);assert.equal(original.reason,reason);
+    await x.console.run();assert.equal(posts,0);assert.equal(x.nodes['[data-sac-request]'].value,raw);
+    assert.equal(display.message.dataset.selectoRefusalReason,reason);assert.equal(display.status.dataset.selectoRefusalReason,reason);
+    assert.equal(display.status.dataset.selectoRefusalFamily,original.family);
+  }
+  for(const raw of ['{','{"format":1,"format":1}','\ufeff{}','{} trailing','{"x":"\\ud800"}']){
+    const x=await instance(),display=refusalDisplays(x);let posts=0;x.console.canonicalClient={queryNestedDetailText(){posts++;}};
+    assert.equal(await x.console.restoreNestedState(raw),false);await x.console.run();
+    assert.equal(posts,0);assert.equal(x.nodes['[data-sac-request]'].value,raw);
+    assert.equal(display.status.dataset.selectoRefusalReason,'invalid-nested-state');
+  }
+});
+
+test('real edits, new draft and successful restore release the previous import refusal',async()=>{
+  for(const action of ['state-edit','request-edit','new-draft','restore']){
+    const x=await instance(),display=refusalDisplays(x),bad=structuredClone(x.state);bad.intent.binding.fingerprint='old';
+    assert.equal(await x.console.restoreNestedState(JSON.stringify(bad)),false);assert.equal(c.nestedDetailRefusal(x.console.nestedInitialError).reason,'stale-nested-context');
+    if(action.endsWith('edit')){
+      const selector=action==='state-edit'?'[data-sac-nested-state]':'[data-sac-request]';
+      x.console.onInput({target:{matches:s=>s===selector}});
+      assert.equal(x.console.nestedInitialError,null);
+      await x.console.restoreNestedState(JSON.stringify(x.state));
+    }else if(action==='new-draft')await x.console.selectQueryProfile('nested',true);
+    else assert.equal(await x.console.restoreNestedState(JSON.stringify(x.state)),true);
+    assert.equal(x.console.nestedInitialError,null);assert.equal(x.console.nestedBlocked,false);
+    let posts=0;x.console.canonicalClient={async queryNestedDetailText(){posts++;return x.result;}};
+    await x.console.run();await x.console.run();assert.equal(posts,2);
+    assert.equal(display.status.dataset.selectoRefusalReason,undefined);
+  }
+});
+
+test('an unclassified restore transport error remains unclassified on blocked Run',async()=>{
+  const x=await instance(),display=refusalDisplays(x),error=new Error('Opaque transport failure');let posts=0;
+  x.console.freshNestedContext=async()=>{throw error;};x.console.canonicalClient={queryNestedDetailText(){posts++;}};
+  assert.equal(await x.console.restoreNestedState(JSON.stringify(x.state)),false);
+  assert.equal(x.console.nestedInitialError,error);await x.console.run();assert.equal(posts,0);
+  assert.equal(display.status.textContent,error.message);assert.equal(display.status.dataset.selectoRefusalReason,undefined);
+  assert.equal(c.nestedDetailRefusal(error),null);
+});
+
 
 test('removing the only child retains empty selection, typed incomplete message and disabled Run',async()=>{
   const x=await instance(),display=refusalDisplays(x);
@@ -423,7 +476,7 @@ test('blocked Run guards keep their original exception messages while forwarding
   assert.equal(x.rendered.at(-1).error.code,'invalid_request_json');assert.equal(display.status.dataset.selectoRefusalReason,'duplicate-state-slot');
   x.console.blockedInitialRequestText=null;x.console.nestedBlocked=true;await x.console.run();
   assert.equal(x.rendered.at(-1).error.message,'Nested state remains blocked. Restore valid state or start a new draft.');
-  assert.equal(x.rendered.at(-1).error.code,'network_error');assert.equal(display.status.dataset.selectoRefusalFamily,'invalid-nested-state');
+  assert.equal(x.rendered.at(-1).error.code,'invalid_request_json');assert.equal(display.status.dataset.selectoRefusalFamily,'invalid-nested-state');
 });
 
 
