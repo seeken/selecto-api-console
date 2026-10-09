@@ -2,6 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {fixture,objects} from "./nested-fixture.mjs";
 import * as c from "../dist/index.js";
+import {readFile} from "node:fs/promises";
+
+test("native sorted-key nested fixed order is semantic and stays a closed PK ascending item",async()=>{
+  const native=JSON.parse(await readFile(new URL("./fixtures/native-go-sorted-nested-features.json",import.meta.url),"utf8"));
+  assert.deepEqual(Object.keys(native.collections[0].order_by[0]),["direction","field"]);
+  assert.equal(c.assertNestedDetailFeatures(native),native);
+  const {features,trusted}=fixture();
+  for(const item of [{field:"lines.id",direction:"asc"},{direction:"asc",field:"lines.id"}]) {
+    const f=structuredClone(features);f.collections[0].order_by=[item];assert.equal(c.assertNestedDetailFeatures(f,trusted),f);
+  }
+  const badOrders=[null,{},"lines.id",[],[{field:"lines.id",direction:"asc"},{field:"lines.id",direction:"asc"}],[null],[true],[[]],["lines.id"],[{field:"lines.id"}],[{direction:"asc"}],[{field:"lines.id",direction:"asc",extra:true}],[{direction:"asc",field:"lines.id",extra:true}],[{field:"lines.price",direction:"asc"}],[{field:"lines.id",direction:"desc"}],[{field:null,direction:"asc"}],[{field:"lines.id",direction:null}],[{field:1,direction:"asc"}],[{field:"lines.id",direction:true}]];
+  for(const order of badOrders){const f=structuredClone(features);f.collections[0].order_by=order;assert.throws(()=>c.assertNestedDetailFeatures(f,trusted),c.CanonicalWireError);}
+});
 
 test("nested sidecar is a closed explicit v1 palette, bound to current authenticated discovery",()=>{
   const {features,trusted}=fixture();assert.equal(c.assertNestedDetailFeatures(features,trusted),features);
