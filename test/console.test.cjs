@@ -1204,3 +1204,123 @@ test("build emits a standalone same-origin console", () => {
   assert.equal(compatibility.targets.length, 14);
   assert.equal(new Set(compatibility.targets.map((target) => target.lineage)).size, 11);
 });
+
+test("offers choice filters only the operators their field type accepts", () => {
+  const yesNo = {path: "can_dispatch", type: "boolean", filterChoices: [{value: "true", label: "Yes"}, {value: "false", label: "No"}]};
+  assert.deepEqual(api.operatorsForField(yesNo), ["eq", "ne", "is_null", "not_null"]);
+  assert.equal(api.initialFilterOperator(yesNo), "eq");
+  const status = {path: "status", type: "integer", filterChoices: [{value: "1", label: "Open"}]};
+  assert.deepEqual(api.operatorsForField(status), ["eq", "ne", "in", "not_in", "is_null", "not_null"]);
+  assert.equal(api.initialFilterOperator(status), "in");
+  assert.equal(api.initialFilterOperator({path: "name", type: "string"}), "eq");
+
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {query_library: {}};
+  consoleInstance.fields = [{path: "can_dispatch", type: "boolean", label: "Can Dispatch"}];
+  consoleInstance.fieldMap = new Map(consoleInstance.fields.map((field) => [field.path, field]));
+  consoleInstance.filterFieldMap = new Map([["can_dispatch", yesNo]]);
+  assert.throws(() => consoleInstance.chooserStateFromPayload({select: ["can_dispatch"], filters: [
+    {field: "can_dispatch", op: "in", value: ["true"]},
+  ]}), /in filter is not available for can_dispatch/);
+  assert.equal(consoleInstance.chooserStateFromPayload({select: ["can_dispatch"], filters: [
+    {field: "can_dispatch", op: "eq", value: "true"},
+  ]}).draft.filters[0].op, "eq");
+});
+
+test("honors published filterable and sortable field roles", () => {
+  assert.equal(api.fieldRoleAllowed({}, "filter"), true);
+  assert.equal(api.fieldRoleAllowed({filterable: false}, "filter"), false);
+  assert.equal(api.fieldRoleAllowed({query_filterable: false}, "filter"), false);
+  assert.equal(api.fieldRoleAllowed({"filterable?": true, query_filterable: false}, "filter"), true, "the first flag present decides");
+  assert.equal(api.fieldRoleAllowed({sortable: false}, "sort"), false);
+  assert.equal(api.fieldRoleAllowed({sortable: false}, "filter"), true);
+
+  const domain = {
+    source: {primary_key: "id", fields: ["id", "notes", "aggregate_version"], associations: {},
+      columns: {id: {type: "integer"}, notes: {type: "text", sortable: false},
+        aggregate_version: {type: "string", filterable: false, sortable: false}}},
+    schemas: {},
+  };
+  const fields = api.collectFields(domain);
+  const byPath = new Map(fields.map((field) => [field.path, field]));
+  assert.deepEqual([byPath.get("notes").filterable, byPath.get("notes").sortable], [true, false]);
+  assert.deepEqual(api.collectFilterFields(domain, fields).map((field) => field.path), ["id", "notes"]);
+
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {...domain, query_library: {}};
+  consoleInstance.fields = fields;
+  consoleInstance.fieldMap = byPath;
+  consoleInstance.filterFields = api.collectFilterFields(domain, fields);
+  consoleInstance.filterFieldMap = new Map(consoleInstance.filterFields.map((field) => [field.path, field]));
+  assert.deepEqual(consoleInstance.sortFields().map((field) => field.path), ["id"]);
+  assert.throws(() => consoleInstance.chooserStateFromPayload({select: ["id"], order_by: [{field: "notes", direction: "asc"}]}),
+    /notes cannot be used for sorting/);
+  assert.throws(() => consoleInstance.chooserStateFromPayload({select: ["id"], filters: [{field: "aggregate_version", op: "eq", value: "x"}]}),
+    /aggregate_version cannot be used in filters/);
+});
+
+test("offers the resource GET date formats the API advertises", () => {
+  const openapi = {paths: {"/api2/load/v1/resources/{id}": {get: {operationId: "getResource", parameters: [
+    {in: "path", name: "id"},
+    {in: "query", name: "date_format", schema: {type: "string",
+      enum: ["iso8601", "rfc3339_millis", "epoch_seconds", "epoch_milliseconds"], default: "iso8601"}},
+  ]}}}};
+  assert.deepEqual(api.discoverResourceDateFormats(openapi, "/api2/load/v1/resources/{id}"), {
+    values: ["iso8601", "rfc3339_millis", "epoch_seconds", "epoch_milliseconds"], defaultValue: "iso8601",
+  });
+  assert.deepEqual(api.discoverResourceDateFormats({paths: {}}, "/api2/load/v1/resources/{id}"), {values: [], defaultValue: ""});
+  assert.equal(
+    api.resourceRequestPath("/api2/load/v1/resources/{id}", "7", ["status"], "epoch_seconds"),
+    "/api2/load/v1/resources/7?fields=status&date_format=epoch_seconds",
+  );
+  assert.equal(api.resourceRequestPath("/api2/load/v1/resources/{id}", "7", [], "iso8601"),
+    "/api2/load/v1/resources/7?date_format=iso8601");
+
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.domain = {source: {primary_key: "id", columns: {id: {type: "integer"}}}};
+  consoleInstance.resourcePath = "/api2/load/v1/resources/{id}";
+  consoleInstance.resourceDateFormats = api.discoverResourceDateFormats(openapi, consoleInstance.resourcePath);
+  consoleInstance.state.queryMethod = "get";
+  consoleInstance.state.resourceId = "7";
+  consoleInstance.state.selectedFields = [{field: "status"}];
+  consoleInstance.state.dateFormat = "epoch_milliseconds";
+  assert.equal(consoleInstance.buildResourceRequest().path, "/api2/load/v1/resources/7?fields=status&date_format=epoch_milliseconds");
+  consoleInstance.state.dateFormat = "unix";
+  assert.match(consoleInstance.buildResourceRequest().errors.join(" "), /does not offer the date format unix/);
+});
+
+test("pages through query results with the API's has_more", () => {
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.state.limit = 50;
+  const page = (data) => consoleInstance.pageInfo({ok: true, data: {columns: [], rows: [], ...data}});
+  assert.deepEqual(page({returned: 50, limit: 50, offset: 100, has_more: true}),
+    {offset: 100, limit: 50, returned: 50, hasMore: true, text: "Rows 101–150; more rows follow"});
+  assert.equal(page({returned: 3, limit: 50, offset: 0, has_more: false}).text, "Rows 1–3; no more rows");
+  assert.equal(page({returned: 0, limit: 50, offset: 200, has_more: false}).text, "No rows after row 200");
+  assert.equal(page({returned: 1}), null, "no has_more, no paging");
+  consoleInstance.state.queryMethod = "get";
+  assert.equal(page({has_more: false}), null, "a resource GET is not a page");
+  consoleInstance.state.queryMethod = "post";
+
+  const node = () => ({hidden: false, textContent: ""});
+  const parts = {"[data-sac-page-text]": node(), "[data-sac-next-page]": node(), "[data-sac-previous-page]": node()};
+  const container = {hidden: true, querySelector: (selector) => parts[selector]};
+  consoleInstance.root = {querySelector: (selector) => (selector === "[data-sac-page-info]" ? container : null)};
+  consoleInstance.renderPageInfo({ok: true, data: {rows: [], returned: 50, limit: 50, offset: 0, has_more: true}});
+  assert.equal(container.hidden, false);
+  assert.deepEqual([parts["[data-sac-next-page]"].hidden, parts["[data-sac-previous-page]"].hidden], [false, true]);
+
+  let ran = 0;
+  consoleInstance.changed = () => {};
+  consoleInstance.run = () => { ran++; };
+  consoleInstance.goToPage("next");
+  assert.deepEqual([consoleInstance.state.offset, consoleInstance.state.limit, ran], [50, 50, 1]);
+  consoleInstance.page = {offset: 50, limit: 50};
+  consoleInstance.goToPage("previous");
+  assert.equal(consoleInstance.state.offset, 0);
+
+  consoleInstance.state.rawDirty = true;
+  consoleInstance.renderPageInfo({ok: true, data: {rows: [], returned: 50, limit: 50, offset: 50, has_more: true}});
+  assert.deepEqual([parts["[data-sac-next-page]"].hidden, parts["[data-sac-previous-page]"].hidden], [true, true],
+    "manually edited JSON is not paged");
+});
