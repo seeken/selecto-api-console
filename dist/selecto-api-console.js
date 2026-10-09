@@ -3625,10 +3625,11 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       const target = this.root.querySelector("[data-sac-nested-builder]");
       if (!target) return;
       target.replaceChildren();
+      const restart = element("button", "sac-text-button", "Start new nested draft"); restart.type = "button";
+      restart.dataset.sacNestedNew = ""; target.append(restart);
       if (!this.nestedState || this.nestedBlocked) {
         target.append(element("p", "sac-help", "Nested draft is blocked. Restore valid state or start a new current-publication draft."));
-        const restart = element("button", "sac-text-button", "Start new nested draft"); restart.type = "button";
-        restart.dataset.sacNestedNew = ""; target.append(restart); return;
+        return;
       }
       const intent = this.nestedState.intent, features = this.nestedDetailContext.features, collection = features.collections[0];
       const roots = new Map(features.root_fields.map(f => [f.id, f])), children = new Map(collection.fields.map(f => [f.id, f]));
