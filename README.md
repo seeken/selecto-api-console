@@ -32,7 +32,23 @@ Temporal fields also offer operational quick periods such as Today, This Week,
 Month to Date, Month/Quarter/Year to Date across all years, and Last 30 Days.
 The console sends the selected semantic value,
 for example `{ "op": "date_shortcut", "value": "this_week" }`; the API host
-resolves its server-local half-open date boundaries when it executes the query.
+resolves its half-open date boundaries when it executes the query (Selecto Perl
+measures them from the database's current date, so the session time zone
+decides when a day begins).
+
+Fields follow their published roles: a field with `filterable: false` (or
+`query_filterable: false`) is not offered as a filter, and one with
+`sortable: false` is not offered for sorting, since the API refuses both.
+Pasted JSON that uses such a field is reported instead of loaded. Choice
+filters offer only the operators their field type accepts, so a boolean
+Yes/No choice uses equals rather than one of.
+
+When a query response reports `has_more`, the response shows which rows the
+page holds and offers Next and Previous page, which change the offset by the
+limit and run the query again.
+
+The GET resource mode offers the resource route's `date_format` values, read
+from its OpenAPI parameter, and adds the chosen one to the request path.
 When selected fields belong to a to-many relationship and the API advertises
 subtable selections, the console offers an explicit subtable control. Enabling
 it groups those fields into a nested selection array, preserving one root row;
