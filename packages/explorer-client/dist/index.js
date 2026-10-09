@@ -14,6 +14,12 @@ export class ExplorerIntentError extends Error {
   }
 }
 function refuse(path, message, code) { throw new ExplorerIntentError(path, message, code); }
+function nestedValidationFailure(error, reason) {
+  return error instanceof ExplorerIntentError || error instanceof CanonicalWireError ? canonical.markNestedDetailRefusal(error, reason) : error;
+}
+function nestedRefuse(path, message, code, reason) {
+  throw canonical.markNestedDetailRefusal(new ExplorerIntentError(path, message, code), reason);
+}
 function isEmpty(value) { return value === undefined || value === null || value === false || (Array.isArray(value) && !value.length) || (typeof value === "object" && !Object.keys(value).length); }
 
 export function assertExplorerMetadata(value, manifest, entry, domain) {
@@ -179,6 +185,7 @@ export function createExplorerClient(options = {}) {
     return {...context,features,binding:rootPredicateBinding(features)};
   }
   async function nestedPublication(id, signal) {
+    try {
     const catalog = await client.catalog(signal);
     const entry = catalog.domains.find(domain => domain.id === id);
     if (!entry) refuse("domainId", "domain unavailable in current publication", "operation_forbidden");
@@ -187,6 +194,10 @@ export function createExplorerClient(options = {}) {
     const features = await client.nestedDetailFeatures(manifest, signal);
     canonical.assertNestedDetailFeatures(features, {entry,manifest,canonicalDomain});
     return {entry,manifest,canonicalDomain,features,binding:nestedDetailBinding(features)};
+    } catch (error) {
+      if (error instanceof canonical.CanonicalHttpError && error.status === 401 && error.code === "authentication_required") throw canonical.markNestedDetailRefusal(error, "authentication-required");
+      throw nestedValidationFailure(error, "nested-unavailable");
+    }
   }
   return {
     async getNestedDetailContext(id, requestOptions = {}) { return nestedPublication(id, requestOptions.signal); },
@@ -372,7 +383,12 @@ function nestedID(value,path,max=256) {
   if (/[\r\n]/.test(value)) refuse(path,"line breaks unavailable","invalid_query");return value;
 }
 function nestedIntentShape(intent) {
-  requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation"],"nested.intent");
+  try {
+    requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation"],"nested.intent");
+  } catch (error) {
+    if (intent && typeof intent === "object" && !Array.isArray(intent) && ["where", "child_order_by", "formatter"].some(key => Object.hasOwn(intent, key))) throw nestedValidationFailure(error, "closed-intent-violation");
+    throw error;
+  }
   if(intent.format!=="selecto.nested-detail-ui-intent"||intent.format_version!==1||intent.mode!=="nested")refuse("nested.intent","unknown nested mode/version","invalid_query");
   requiredKeys(intent.binding,["domain_id","fingerprint","publication","wire_profile","feature_profile","feature_revision"],"nested.intent.binding");
   for(const value of Object.values(intent.binding))nestedID(value,"nested.intent.binding",1024);
@@ -391,13 +407,19 @@ export function createNestedDetailIntent(features) {
   const binding=nestedDetailBinding(features),collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.path,f.id])),children=new Map(collection.fields.map(f=>[f.path,f.id]));
   return {format:"selecto.nested-detail-ui-intent",format_version:1,mode:"nested",binding,collection_id:collection.id,select:features.defaults.select.map(s=>Array.isArray(s)?s.map(p=>children.get(p)):roots.get(s)),filters:[],order_by:[],limit:25,offset:0,row_format:"arrays",presentation:{timezone:"UTC",locale:"en-US"}};
 }
-export function assertNestedDetailIntent(intent,context) {
-  nestedIntentShape(intent);const features=context?.features;if(!features)refuse("nested.features","nested detail unavailable");
-  canonical.assertNestedDetailFeatures(features,context);const binding=nestedDetailBinding(features);
-  if(Object.keys(binding).some(k=>intent.binding[k]!==binding[k]))refuse("nested.intent.binding","publication/revision changed; retain state","stale_nested_detail_context");
+export function assertNestedDetailIntent(intent,context,options={}) {
+  try { return validateNestedDetailIntent(intent, context); }
+  catch (error) { throw nestedValidationFailure(error, options.origin === "state" ? "invalid-nested-state" : "invalid-nested-intent"); }
+}
+function validateNestedDetailIntent(intent,context) {
+  nestedIntentShape(intent);const features=context?.features;if(!features)nestedRefuse("nested.features","nested detail unavailable","operation_unsupported","nested-unavailable");
+  try { canonical.assertNestedDetailFeatures(features,context); }
+  catch (error) { throw nestedValidationFailure(error, "nested-unavailable"); }
+  const binding=nestedDetailBinding(features);
+  if(Object.keys(binding).some(k=>intent.binding[k]!==binding[k]))nestedRefuse("nested.intent.binding","publication/revision changed; retain state","stale_nested_detail_context","stale-nested-context");
   const collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
-  if(intent.collection_id!==collection.id)refuse("nested.intent.collection_id","unpublished collection","invalid_field");
-  const field=(id,map)=>{const f=map.get(id);if(!f)refuse("nested.intent.field","unpublished opaque ID","invalid_field");return f;};
+  if(intent.collection_id!==collection.id)nestedRefuse("nested.intent.collection_id","unpublished collection","invalid_field","unpublished-field-id");
+  const field=(id,map)=>{const f=map.get(id);if(!f)nestedRefuse("nested.intent.field","unpublished opaque ID","invalid_field","unpublished-field-id");return f;};
   intent.select.forEach(s=>Array.isArray(s)?s.forEach(id=>field(id,children)):field(s,roots));
   intent.order_by.forEach(o=>field(o.field,roots));intent.filters.forEach(f=>{const descriptor=field(f.field,roots);if(!descriptor.operators.includes(f.op))refuse("nested.intent.filter.op","unavailable operator");if(Object.hasOwn(f,"value"))canonical.assertNestedDetailScalar(f.value,descriptor,"nested.intent.filter.value",{author:true});});return intent;
 }
@@ -406,17 +428,20 @@ export function toNestedDetailQuery(intent,context) {
   const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};canonical.assertNestedDetailQuery(query,context.features);return query;
 }
 export function parseNestedDetailState(raw,context) {
+  try {
   const {value,numberTokens}=canonical.parseStrictJSON(raw,{tokens:true,maxBytes:65536});requiredKeys(value,["format","format_version","intent"],"nested.state");
   if(value.format!=="selecto.nested-detail-state"||value.format_version!==1||numberTokens.get("/format_version")!=="1"||numberTokens.get("/intent/format_version")!=="1")refuse("nested.state","unknown/noninteger version","invalid_query");
   for(const key of ["limit","offset"])if(!/^(?:0|[1-9]\d*)$/.test(numberTokens.get(`/intent/${key}`)??""))refuse("nested.state","noninteger page token","invalid_query");
-  nestedIntentShape(value.intent);if(context)assertNestedDetailIntent(value.intent,context);return value;
+  nestedIntentShape(value.intent);if(context)assertNestedDetailIntent(value.intent,context,{origin:"state"});return value;
+  } catch (error) { throw nestedValidationFailure(error, error instanceof CanonicalWireError && error.path === "JSON" && error.validationReason === "utf8-byte-limit" ? "state-limit" : "invalid-nested-state"); }
 }
 export function encodeNestedDetailState(state) {
-  const raw=JSON.stringify(state);parseNestedDetailState(raw);const encoded=encodeURIComponent(raw);if(encoded.length>65536)refuse("nested.state","encoded state exceeds64KiB","invalid_query");return encoded;
+  const raw=JSON.stringify(state);parseNestedDetailState(raw);const encoded=encodeURIComponent(raw);if(encoded.length>65536)nestedRefuse("nested.state","encoded state exceeds64KiB","invalid_query","state-limit");return encoded;
 }
 export function decodeNestedDetailState(rawOrEncoded,context) {
-  if(typeof rawOrEncoded!=="string"||rawOrEncoded.length>65536)refuse("nested.state","state exceeds64KiB","invalid_query");let raw=rawOrEncoded;
-  if(!raw.trimStart().startsWith("{")){try{raw=decodeURIComponent(raw);}catch{refuse("nested.state","invalid URI layer","invalid_query");}}return parseNestedDetailState(raw,context);
+  if(typeof rawOrEncoded!=="string")nestedRefuse("nested.state","state exceeds64KiB","invalid_query","invalid-nested-state");
+  if(rawOrEncoded.length>65536)nestedRefuse("nested.state","state exceeds64KiB","invalid_query","state-limit");let raw=rawOrEncoded;
+  if(!raw.trimStart().startsWith("{")){try{raw=decodeURIComponent(raw);}catch{nestedRefuse("nested.state","invalid URI layer","invalid_query","invalid-nested-state");}}return parseNestedDetailState(raw,context);
 }
 export function nestedDetailConsoleHref(path,state) {
   nonEmptyString(path,"nested.console.path");if(path.includes("#"))refuse("nested.console.path","fragment reserved for nested handoff");safePath(path.split("?")[0]);

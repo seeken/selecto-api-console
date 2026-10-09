@@ -2,11 +2,12 @@
 global.SelectoCanonicalClient = (function() {
 /** Strict transport validation; host authorization and query policy stay on the host. */
 class CanonicalWireError extends Error {
-  constructor(path, message) {
+  constructor(path, message, validationReason) {
     super(`${path}: ${message}`);
     this.name = "CanonicalWireError";
     this.code = "invalid_response";
     this.path = path;
+    if (validationReason !== undefined) this.validationReason = validationReason;
   }
 }
 
@@ -20,6 +21,39 @@ class CanonicalHttpError extends Error {
     this.requestId = envelope.meta?.request_id;
     this.envelope = envelope;
   }
+}
+
+// Public local-refusal metadata is independent of wire error codes/messages.
+// Only duplicate slots have a broader family; the remaining pairs are exact.
+const nestedRefusalFamilies = Object.freeze(Object.assign(Object.create(null), {
+  "nested-unavailable": "nested-unavailable",
+  "authentication-required": "authentication-required",
+  "stale-nested-context": "stale-nested-context",
+  "invalid-nested-intent": "invalid-nested-intent",
+  "unpublished-field-id": "unpublished-field-id",
+  "closed-intent-violation": "closed-intent-violation",
+  "duplicate-state-slot": "invalid-nested-state",
+  "invalid-nested-state": "invalid-nested-state",
+  "state-limit": "state-limit",
+  "invalid-selected-raw": "invalid-selected-raw"
+}));
+
+function nestedDetailRefusal(error) {
+  try {
+    const reason = error?.nestedDetailRefusalReason, family = error?.nestedDetailRefusalFamily;
+    return typeof reason === "string" && Object.hasOwn(nestedRefusalFamilies, reason) && family === nestedRefusalFamilies[reason] ? {reason, family} : null;
+  } catch { return null; }
+}
+
+/** Trusted validation branches attach scalar metadata without replacing errors. */
+function markNestedDetailRefusal(error, reason) {
+  if (!Object.hasOwn(nestedRefusalFamilies, reason)) throw new TypeError("Unknown nested refusal reason");
+  if (!(error instanceof Error) || nestedDetailRefusal(error) || !Object.isExtensible(error) || Object.hasOwn(error, "nestedDetailRefusalReason") || Object.hasOwn(error, "nestedDetailRefusalFamily")) return error;
+  Object.defineProperties(error, {
+    nestedDetailRefusalReason: {value: reason},
+    nestedDetailRefusalFamily: {value: nestedRefusalFamilies[reason]}
+  });
+  return error;
 }
 
 function safePath(value) {
@@ -316,7 +350,7 @@ function assertUnicode(value, path = "string", maximum = Infinity, allowNul = fa
     } else if (code >= 0xdc00 && code <= 0xdfff) throw new CanonicalWireError(path, "unpaired UTF-16 surrogate");
   }
   if (!allowNul && value.includes("\0")) throw new CanonicalWireError(path, "NUL is unavailable");
-  if (new TextEncoder().encode(value).length > maximum) throw new CanonicalWireError(path, "UTF-8 byte limit exceeded");
+  if (new TextEncoder().encode(value).length > maximum) throw new CanonicalWireError(path, "UTF-8 byte limit exceeded", "utf8-byte-limit");
   return value;
 }
 
@@ -703,7 +737,7 @@ function assertNestedDetailResult(value,{query,features,context,numberTokens}={}
   });});return value;
 }
 
-return {CanonicalWireError,CanonicalHttpError,safePath,record,nonEmptyString,integer,keys,assertCatalog,assertManifest,routePath,assertDomain,assertError,assertColumn,assertScalar,assertQueryResult,buildRemoteRequest,createCanonicalClient,assertUnicode,parseStrictJSON,canonicalRootFields,assertRootPredicateFeatures,assertRootScalar,assertRootPredicateQuery,assertTimezone,buildRootPredicateRequest,parseCanonicalRequestText,assertRootPredicateResult,assertNestedDetailFeatures,nestedDetailContext,encodeNestedDetailContext,assertNestedDetailScalar,assertNestedDetailQuery,buildNestedDetailRequest,parseNestedDetailRequestText,assertNestedDetailResult};
+return {CanonicalWireError,CanonicalHttpError,nestedDetailRefusal,markNestedDetailRefusal,safePath,record,nonEmptyString,integer,keys,assertCatalog,assertManifest,routePath,assertDomain,assertError,assertColumn,assertScalar,assertQueryResult,buildRemoteRequest,createCanonicalClient,assertUnicode,parseStrictJSON,canonicalRootFields,assertRootPredicateFeatures,assertRootScalar,assertRootPredicateQuery,assertTimezone,buildRootPredicateRequest,parseCanonicalRequestText,assertRootPredicateResult,assertNestedDetailFeatures,nestedDetailContext,encodeNestedDetailContext,assertNestedDetailScalar,assertNestedDetailQuery,buildNestedDetailRequest,parseNestedDetailRequestText,assertNestedDetailResult};
 })();
 global.SelectoExplorerClient = (function() {
 const canonical = global.SelectoCanonicalClient;
@@ -722,6 +756,12 @@ class ExplorerIntentError extends Error {
   }
 }
 function refuse(path, message, code) { throw new ExplorerIntentError(path, message, code); }
+function nestedValidationFailure(error, reason) {
+  return error instanceof ExplorerIntentError || error instanceof CanonicalWireError ? canonical.markNestedDetailRefusal(error, reason) : error;
+}
+function nestedRefuse(path, message, code, reason) {
+  throw canonical.markNestedDetailRefusal(new ExplorerIntentError(path, message, code), reason);
+}
 function isEmpty(value) { return value === undefined || value === null || value === false || (Array.isArray(value) && !value.length) || (typeof value === "object" && !Object.keys(value).length); }
 
 function assertExplorerMetadata(value, manifest, entry, domain) {
@@ -887,6 +927,7 @@ function createExplorerClient(options = {}) {
     return {...context,features,binding:rootPredicateBinding(features)};
   }
   async function nestedPublication(id, signal) {
+    try {
     const catalog = await client.catalog(signal);
     const entry = catalog.domains.find(domain => domain.id === id);
     if (!entry) refuse("domainId", "domain unavailable in current publication", "operation_forbidden");
@@ -895,6 +936,10 @@ function createExplorerClient(options = {}) {
     const features = await client.nestedDetailFeatures(manifest, signal);
     canonical.assertNestedDetailFeatures(features, {entry,manifest,canonicalDomain});
     return {entry,manifest,canonicalDomain,features,binding:nestedDetailBinding(features)};
+    } catch (error) {
+      if (error instanceof canonical.CanonicalHttpError && error.status === 401 && error.code === "authentication_required") throw canonical.markNestedDetailRefusal(error, "authentication-required");
+      throw nestedValidationFailure(error, "nested-unavailable");
+    }
   }
   return {
     async getNestedDetailContext(id, requestOptions = {}) { return nestedPublication(id, requestOptions.signal); },
@@ -1080,7 +1125,12 @@ function nestedID(value,path,max=256) {
   if (/[\r\n]/.test(value)) refuse(path,"line breaks unavailable","invalid_query");return value;
 }
 function nestedIntentShape(intent) {
-  requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation"],"nested.intent");
+  try {
+    requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation"],"nested.intent");
+  } catch (error) {
+    if (intent && typeof intent === "object" && !Array.isArray(intent) && ["where", "child_order_by", "formatter"].some(key => Object.hasOwn(intent, key))) throw nestedValidationFailure(error, "closed-intent-violation");
+    throw error;
+  }
   if(intent.format!=="selecto.nested-detail-ui-intent"||intent.format_version!==1||intent.mode!=="nested")refuse("nested.intent","unknown nested mode/version","invalid_query");
   requiredKeys(intent.binding,["domain_id","fingerprint","publication","wire_profile","feature_profile","feature_revision"],"nested.intent.binding");
   for(const value of Object.values(intent.binding))nestedID(value,"nested.intent.binding",1024);
@@ -1099,13 +1149,19 @@ function createNestedDetailIntent(features) {
   const binding=nestedDetailBinding(features),collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.path,f.id])),children=new Map(collection.fields.map(f=>[f.path,f.id]));
   return {format:"selecto.nested-detail-ui-intent",format_version:1,mode:"nested",binding,collection_id:collection.id,select:features.defaults.select.map(s=>Array.isArray(s)?s.map(p=>children.get(p)):roots.get(s)),filters:[],order_by:[],limit:25,offset:0,row_format:"arrays",presentation:{timezone:"UTC",locale:"en-US"}};
 }
-function assertNestedDetailIntent(intent,context) {
-  nestedIntentShape(intent);const features=context?.features;if(!features)refuse("nested.features","nested detail unavailable");
-  canonical.assertNestedDetailFeatures(features,context);const binding=nestedDetailBinding(features);
-  if(Object.keys(binding).some(k=>intent.binding[k]!==binding[k]))refuse("nested.intent.binding","publication/revision changed; retain state","stale_nested_detail_context");
+function assertNestedDetailIntent(intent,context,options={}) {
+  try { return validateNestedDetailIntent(intent, context); }
+  catch (error) { throw nestedValidationFailure(error, options.origin === "state" ? "invalid-nested-state" : "invalid-nested-intent"); }
+}
+function validateNestedDetailIntent(intent,context) {
+  nestedIntentShape(intent);const features=context?.features;if(!features)nestedRefuse("nested.features","nested detail unavailable","operation_unsupported","nested-unavailable");
+  try { canonical.assertNestedDetailFeatures(features,context); }
+  catch (error) { throw nestedValidationFailure(error, "nested-unavailable"); }
+  const binding=nestedDetailBinding(features);
+  if(Object.keys(binding).some(k=>intent.binding[k]!==binding[k]))nestedRefuse("nested.intent.binding","publication/revision changed; retain state","stale_nested_detail_context","stale-nested-context");
   const collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
-  if(intent.collection_id!==collection.id)refuse("nested.intent.collection_id","unpublished collection","invalid_field");
-  const field=(id,map)=>{const f=map.get(id);if(!f)refuse("nested.intent.field","unpublished opaque ID","invalid_field");return f;};
+  if(intent.collection_id!==collection.id)nestedRefuse("nested.intent.collection_id","unpublished collection","invalid_field","unpublished-field-id");
+  const field=(id,map)=>{const f=map.get(id);if(!f)nestedRefuse("nested.intent.field","unpublished opaque ID","invalid_field","unpublished-field-id");return f;};
   intent.select.forEach(s=>Array.isArray(s)?s.forEach(id=>field(id,children)):field(s,roots));
   intent.order_by.forEach(o=>field(o.field,roots));intent.filters.forEach(f=>{const descriptor=field(f.field,roots);if(!descriptor.operators.includes(f.op))refuse("nested.intent.filter.op","unavailable operator");if(Object.hasOwn(f,"value"))canonical.assertNestedDetailScalar(f.value,descriptor,"nested.intent.filter.value",{author:true});});return intent;
 }
@@ -1114,17 +1170,20 @@ function toNestedDetailQuery(intent,context) {
   const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};canonical.assertNestedDetailQuery(query,context.features);return query;
 }
 function parseNestedDetailState(raw,context) {
+  try {
   const {value,numberTokens}=canonical.parseStrictJSON(raw,{tokens:true,maxBytes:65536});requiredKeys(value,["format","format_version","intent"],"nested.state");
   if(value.format!=="selecto.nested-detail-state"||value.format_version!==1||numberTokens.get("/format_version")!=="1"||numberTokens.get("/intent/format_version")!=="1")refuse("nested.state","unknown/noninteger version","invalid_query");
   for(const key of ["limit","offset"])if(!/^(?:0|[1-9]\d*)$/.test(numberTokens.get(`/intent/${key}`)??""))refuse("nested.state","noninteger page token","invalid_query");
-  nestedIntentShape(value.intent);if(context)assertNestedDetailIntent(value.intent,context);return value;
+  nestedIntentShape(value.intent);if(context)assertNestedDetailIntent(value.intent,context,{origin:"state"});return value;
+  } catch (error) { throw nestedValidationFailure(error, error instanceof CanonicalWireError && error.path === "JSON" && error.validationReason === "utf8-byte-limit" ? "state-limit" : "invalid-nested-state"); }
 }
 function encodeNestedDetailState(state) {
-  const raw=JSON.stringify(state);parseNestedDetailState(raw);const encoded=encodeURIComponent(raw);if(encoded.length>65536)refuse("nested.state","encoded state exceeds64KiB","invalid_query");return encoded;
+  const raw=JSON.stringify(state);parseNestedDetailState(raw);const encoded=encodeURIComponent(raw);if(encoded.length>65536)nestedRefuse("nested.state","encoded state exceeds64KiB","invalid_query","state-limit");return encoded;
 }
 function decodeNestedDetailState(rawOrEncoded,context) {
-  if(typeof rawOrEncoded!=="string"||rawOrEncoded.length>65536)refuse("nested.state","state exceeds64KiB","invalid_query");let raw=rawOrEncoded;
-  if(!raw.trimStart().startsWith("{")){try{raw=decodeURIComponent(raw);}catch{refuse("nested.state","invalid URI layer","invalid_query");}}return parseNestedDetailState(raw,context);
+  if(typeof rawOrEncoded!=="string")nestedRefuse("nested.state","state exceeds64KiB","invalid_query","invalid-nested-state");
+  if(rawOrEncoded.length>65536)nestedRefuse("nested.state","state exceeds64KiB","invalid_query","state-limit");let raw=rawOrEncoded;
+  if(!raw.trimStart().startsWith("{")){try{raw=decodeURIComponent(raw);}catch{nestedRefuse("nested.state","invalid URI layer","invalid_query","invalid-nested-state");}}return parseNestedDetailState(raw,context);
 }
 function nestedDetailConsoleHref(path,state) {
   nonEmptyString(path,"nested.console.path");if(path.includes("#"))refuse("nested.console.path","fragment reserved for nested handoff");safePath(path.split("?")[0]);
@@ -1222,12 +1281,28 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     return payload;
   }
 
+  function nestedError(message, reason) {
+    return global.SelectoCanonicalClient.markNestedDetailRefusal(new Error(message), reason);
+  }
+
+  function setNestedRefusal(target, error) {
+    if (!target) return;
+    const refusal = global.SelectoCanonicalClient?.nestedDetailRefusal(error);
+    if (refusal) {
+      target.dataset.selectoRefusalReason = refusal.reason;
+      target.dataset.selectoRefusalFamily = refusal.family;
+    } else {
+      delete target.dataset.selectoRefusalReason;
+      delete target.dataset.selectoRefusalFamily;
+    }
+  }
+
   function nestedStateFromLocation(locationLike) {
     const slots = new URLSearchParams(String(locationLike && locationLike.hash || "").replace(/^#/, ""));
     const values = slots.getAll("nested_request");
     if (!values.length) return null;
     if (values.length !== 1 || slots.has("request") || [...slots.keys()].some(key => key !== "nested_request")) {
-      throw new Error("Nested URL state requires exactly one isolated nested_request slot.");
+      throw nestedError("Nested URL state requires exactly one isolated nested_request slot.", values.length !== 1 ? "duplicate-state-slot" : "invalid-nested-state");
     }
     return {raw: values[0], state: global.SelectoExplorerClient.decodeNestedDetailState(values[0])};
   }
@@ -1819,7 +1894,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
               const features = await this.canonicalClient.nestedDetailFeatures(this.manifest);
               this.nestedDomainId = features.domain.id;
               this.nestedDetailContext = await this.explorerClient.getNestedDetailContext(this.nestedDomainId);
-            } catch (error) { this.nestedAvailabilityError = error.message; }
+            } catch (error) { this.nestedAvailabilityError = error.message; this.nestedAvailabilityRefusal = this.nestedDiscoveryFailure(error); }
           }
         }
         this.state.responseFormat = this.queryResponseFormats[0].id;
@@ -1857,7 +1932,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
           const stateEditor = this.root.querySelector("[data-sac-nested-state]");
           if (stateEditor) stateEditor.value = this.blockedInitialRequestText || "";
           this.applyQueryProfile();
-          this.setImportMessage(`Nested state blocked: ${this.nestedInitialError.message}`, "error");
+          this.setImportMessage(`Nested state blocked: ${this.nestedInitialError.message}`, "error", this.nestedInitialError);
         } else if (initialRequest?.format === "selecto.root-predicate-state") {
           const raw = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("request");
           await this.restoreRootState(raw);
@@ -2186,6 +2261,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       if (nestedAvailability) nestedAvailability.textContent = this.nestedDetailContext
         ? "Complete nested Detail available; opt in explicitly."
         : `Complete nested Detail unavailable on this publication.${this.nestedAvailabilityError ? ` ${this.nestedAvailabilityError}` : ""}`;
+      setNestedRefusal(nestedAvailability, this.nestedDetailContext ? null : this.nestedAvailabilityRefusal || nestedError("Complete nested Detail unavailable on this publication.", "nested-unavailable"));
       this.populateLibraryControls();
       this.seedMutationState();
       this.renderAll();
@@ -3445,17 +3521,25 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       return this.state;
     }
 
-    setImportMessage(message, kind) {
+    setImportMessage(message, kind, error) {
       const target = this.root.querySelector("[data-sac-import-message]");
       if (!target) return;
       target.textContent = message || "";
       target.dataset.kind = kind || "";
       target.hidden = !message;
+      setNestedRefusal(target, message && kind === "error" ? error : null);
+    }
+
+    nestedDiscoveryFailure(error) {
+      const client = global.SelectoCanonicalClient;
+      if (error instanceof client.CanonicalHttpError && error.status === 401 && error.code === "authentication_required") return client.markNestedDetailRefusal(error, "authentication-required");
+      if (error instanceof client.CanonicalWireError) return client.markNestedDetailRefusal(error, "nested-unavailable");
+      return error;
     }
 
     async freshNestedContext(signal, domainId = this.nestedState?.intent.binding.domain_id || this.nestedDomainId) {
-      if (!this.explorerClient || !domainId) throw new Error("Complete nested Detail unavailable on this publication.");
-      if (this.nestedDomainId && domainId !== this.nestedDomainId) throw new Error("Nested state belongs to a different Console domain.");
+      if (!this.explorerClient || !domainId) throw nestedError("Complete nested Detail unavailable on this publication.", "nested-unavailable");
+      if (this.nestedDomainId && domainId !== this.nestedDomainId) throw nestedError("Nested state belongs to a different Console domain.", "stale-nested-context");
       return this.explorerClient.getNestedDetailContext(domainId, {signal});
     }
 
@@ -3520,13 +3604,13 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         this.nestedDetailContext = context;
         this.nestedState = {format: "selecto.nested-detail-state", format_version: 1,
           intent: global.SelectoExplorerClient.createNestedDetailIntent(context.features)};
-        this.nestedBlocked = false;
+        this.nestedBlocked = false; this.nestedInitialError = null;
         this.syncNestedRequest(); this.renderNestedBuilder();
         this.setImportMessage("New nested draft uses the current authenticated publication.", "success");
       } catch (error) {
         if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return;
         this.nestedBlocked = true;
-        this.setImportMessage(`Nested mode blocked: ${error.message}`, "error");
+        this.setImportMessage(`Nested mode blocked: ${error.message}`, "error", error);
       }
     }
 
@@ -3545,17 +3629,17 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         const state = global.SelectoExplorerClient.decodeNestedDetailState(raw);
         const context = await this.freshNestedContext(undefined, state.intent.binding.domain_id);
         if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return false;
-        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context);
+        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context, {origin:"state"});
         this.nestedDetailContext = context; this.nestedDomainId = state.intent.binding.domain_id;
-        this.nestedState = state; this.nestedBlocked = false; this.blockedInitialRequestText = null;
+        this.nestedState = state; this.nestedBlocked = false; this.blockedInitialRequestText = null; this.nestedInitialError = null;
         while (state.intent.filters.some(filter=>filter.id === `nested-filter-${this.nextNestedFilterId}`)) this.nextNestedFilterId++;
         this.syncNestedRequest(); this.renderNestedBuilder();
         this.setImportMessage("Nested state restored. Selection, filters, page and exact presentation retained; Run is explicit.", "success");
         return true;
       } catch (error) {
         if (sequence !== this.nestedRestoreSequence || this.queryProfile !== "nested") return false;
-        this.setImportMessage(`Nested state blocked: ${error.message}`, "error");
-        this.setStatus(error.message, "error"); return false;
+        this.setImportMessage(`Nested state blocked: ${error.message}`, "error", error);
+        this.setStatus(error.message, "error", error); return false;
       }
     }
 
@@ -3584,7 +3668,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       try { this.syncNestedRequest(); this.setImportMessage("", ""); }
       catch (error) {
         this.root.querySelector("[data-sac-run]").disabled = true;
-        this.setImportMessage(`Nested draft incomplete: ${error.message}`, "error");
+        this.setImportMessage(`Nested draft incomplete: ${error.message}`, "error", error);
       }
       if (renderBuilder) this.renderNestedBuilder();
     }
@@ -3596,18 +3680,18 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         if (action === "restore") return this.restoreNestedState(stateEditor.value);
         if (action === "private") {
           const saved = global.localStorage.getItem(this.nestedStateStorageKey());
-          if (!saved) throw new Error("No private nested state saved.");
+          if (!saved) throw nestedError("No private nested state saved.", "invalid-nested-state");
           return this.restoreNestedState(saved);
         }
-        if (this.queryProfile !== "nested" || this.nestedBlocked || !this.nestedState) throw new Error("Restore a complete nested draft first.");
+        if (this.queryProfile !== "nested" || this.nestedBlocked || !this.nestedState) throw nestedError("Restore a complete nested draft first.", "invalid-nested-state");
         const state = global.SelectoExplorerClient.decodeNestedDetailState(stateEditor.value);
         const editor = this.root.querySelector("[data-sac-request]");
         const stateText = stateEditor.value;
         const matches = () => this.queryProfile === "nested" && stateEditor.value === stateText && editor.value === this.nestedStateRequestText && JSON.stringify(state) === JSON.stringify(this.nestedState);
-        if (!matches()) throw new Error("State and query editor differ. Restore the complete intended nested state before saving or sharing.");
+        if (!matches()) throw nestedError("State and query editor differ. Restore the complete intended nested state before saving or sharing.", "invalid-nested-state");
         const context = await this.freshNestedContext();
         if (!matches()) throw new Error("Nested draft changed during discovery.");
-        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context);
+        global.SelectoExplorerClient.assertNestedDetailIntent(state.intent, context, {origin:"state"});
         const encoded = global.SelectoExplorerClient.encodeNestedDetailState(state);
         if (action === "save") {
           global.localStorage.setItem(this.nestedStateStorageKey(), JSON.stringify(state));
@@ -3621,7 +3705,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
           await this.copy(url.href, this.root.querySelector("[data-sac-nested-link]"));
           this.setImportMessage("Nested state URL copied.", "success");
         }
-      } catch (error) { this.setImportMessage(`Nested state blocked: ${error.message}`, "error"); }
+      } catch (error) { this.setImportMessage(`Nested state blocked: ${error.message}`, "error", error); }
     }
 
     renderNestedBuilder() {
@@ -5035,11 +5119,12 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       const editor = this.root.querySelector("[data-sac-request]");
       let request;
       try {
-        if (this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText) throw new Error("URL state remains blocked. Restore valid bound state or explicitly start a new query.");
+        if (this.blockedInitialRequestText && editor.value === this.blockedInitialRequestText) throw this.queryProfile === "nested" ? nestedError("URL state remains blocked. Restore valid bound state or explicitly start a new query.", global.SelectoCanonicalClient.nestedDetailRefusal(this.nestedInitialError)?.reason || "invalid-nested-state") : new Error("URL state remains blocked. Restore valid bound state or explicitly start a new query.");
         request = this.remoteMode ? global.SelectoCanonicalClient.parseStrictJSON(editor.value) : JSON.parse(editor.value);
       } catch (error) {
-        this.setStatus("Invalid request JSON", "error");
-        this.showLocalError(error.message);
+        if (this.queryProfile === "nested") global.SelectoCanonicalClient.markNestedDetailRefusal(error, "invalid-selected-raw");
+        this.setStatus("Invalid request JSON", "error", error);
+        this.showLocalError(error.message, error);
         return;
       }
       const rawRequestText = editor.value;
@@ -5069,16 +5154,19 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       let nestedResult = null;
       try {
         if (this.queryProfile === "nested") {
-          if (this.nestedBlocked || !this.nestedState) throw new Error("Nested state remains blocked. Restore valid state or start a new draft.");
+          if (this.nestedBlocked || !this.nestedState) throw nestedError("Nested state remains blocked. Restore valid state or start a new draft.", global.SelectoCanonicalClient.nestedDetailRefusal(this.nestedInitialError)?.reason || "invalid-nested-state");
           const retained = structuredClone(this.nestedState);
           const context = await this.freshNestedContext(controller.signal);
           if (sequence !== this.querySequence || this.queryProfile !== "nested") return;
           const binding = global.SelectoExplorerClient.nestedDetailBinding(context.features);
-          if (Object.keys(binding).some(key => retained.intent.binding[key] !== binding[key])) throw new Error("Nested publication or revision changed; retain the draft and explicitly start a new one.");
+          if (Object.keys(binding).some(key => retained.intent.binding[key] !== binding[key])) throw nestedError("Nested publication or revision changed; retain the draft and explicitly start a new one.", "stale-nested-context");
           if (!this.state.rawDirty) global.SelectoExplorerClient.assertNestedDetailIntent(retained.intent, context);
           const selectedContext = global.SelectoCanonicalClient.nestedDetailContext(context.features);
-          const parsed = global.SelectoCanonicalClient.parseNestedDetailRequestText(rawRequestText, {features:context.features,context:selectedContext});
-          if (parsed.request.query.timezone !== "UTC") throw new Error("This nested browser mode requires explicit timezone UTC; retain the raw query or reset to the complete draft.");
+          let parsed;
+          try {
+            parsed = global.SelectoCanonicalClient.parseNestedDetailRequestText(rawRequestText, {features:context.features,context:selectedContext});
+            if (parsed.request.query.timezone !== "UTC") throw new Error("This nested browser mode requires explicit timezone UTC; retain the raw query or reset to the complete draft.");
+          } catch (error) { throw global.SelectoCanonicalClient.markNestedDetailRefusal(error, "invalid-selected-raw"); }
           payload = await this.canonicalClient.queryNestedDetailText(context.manifest, rawRequestText,
             {features:context.features,context:selectedContext,signal:controller.signal});
           // The strict selected transport has validated raw numeric tokens first.
@@ -5165,7 +5253,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         this.nestedResult = null;
         this.state.response = error.envelope || {ok: false, error: {code: error.name === "AbortError" ? "cancelled" : error.code || "network_error", message: error.message, details: error.details || {}}};
         this.renderResponse(this.state.response);
-        this.setStatus(error.status ? `${error.status} · ${error.code}` : error.message, "error");
+        this.setStatus(error.status ? `${error.status} · ${error.code}` : error.message, "error", error);
       } finally {
         if (sequence !== this.querySequence) return;
         button.disabled = this.queryProfile === "nested" && this.nestedBlocked;
@@ -5241,18 +5329,21 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       global.setTimeout(() => global.URL.revokeObjectURL(url), 0);
     }
 
-    setStatus(text, kind) {
+    setStatus(text, kind, error) {
       const status = this.root.querySelector("[data-sac-response-status]");
       status.textContent = text;
       status.dataset.kind = kind || "";
+      setNestedRefusal(status, kind === "error" ? error : null);
     }
 
-    showLocalError(message) {
+    showLocalError(message, error) {
+      setNestedRefusal(this.root.querySelector("[data-sac-response-status]"), error);
       this.state.response = {ok: false, error: {code: "invalid_request_json", message, details: {}}};
       this.renderResponse(this.state.response);
     }
 
     clearQueryResult() {
+      setNestedRefusal(this.root.querySelector("[data-sac-response-status]"), null);
       for (const selector of ["[data-sac-result-head]", "[data-sac-result-body]"]) this.root.querySelector(selector)?.replaceChildren();
       const json = this.root.querySelector("[data-sac-response-json]"); if (json) json.textContent = "";
       const empty = this.root.querySelector("[data-sac-empty-response]"); if (empty) empty.hidden = false;
@@ -5360,6 +5451,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     renderFatal(error) {
       this.root.replaceChildren();
       const panel = element("section", "sac-fatal");
+      setNestedRefusal(panel, error);
       panel.append(element("span", "sac-kicker", "API Console"), element("h1", "", "Could not load the API"), element("p", "", error.status ? `${error.status} ${error.code}: ${error.message}` : error.message || String(error)));
       const retry = element("button", "sac-button sac-primary", "Retry");
       retry.type = "button";

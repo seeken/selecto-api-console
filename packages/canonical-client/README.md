@@ -57,3 +57,14 @@ context when present. The selected byte caps are1MiB request,256KiB success and
 8KiB error; old headerless v1/root behavior remains separate. These are client
 integrity checks; they do not attest native source/privacy, SQL work/serialization
 barriers, runtime enrollment, or rendered behavior.
+
+`nestedDetailRefusal(error)` reads optional local-refusal metadata as
+`{reason, family}`. Trusted validation branches use `markNestedDetailRefusal`
+without replacing the exception or changing its code, message, status or envelope.
+The ten public reasons are unavailable, authentication, stale context, invalid
+intent, unpublished field, closed intent, duplicate state slot, invalid state,
+state limit and invalid selected raw input (see the exported TypeScript union
+for their exact names). Only `duplicate-state-slot` belongs to the broader
+`invalid-nested-state` family; every other family equals its reason. Unknown
+errors stay unclassified. Products can expose these scalar values beside the
+visible message; neither message wording nor an expected test result supplies them.
