@@ -1349,6 +1349,35 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       : [Object.assign({}, QUERY_RESPONSE_FORMATS[0])];
   }
 
+  // The resource GET's date_format values, from its OpenAPI query parameter:
+  // {values, defaultValue}; no values when the API does not offer it.
+  function discoverResourceDateFormats(openapi, resourcePath) {
+    const paths = openapi && isPlainObject(openapi.paths) ? openapi.paths : {};
+    const operations = Object.values(paths).map((pathSpec) => pathSpec && pathSpec.get).filter(isPlainObject);
+    const operation = (paths[resourcePath] && paths[resourcePath].get)
+      || operations.find((item) => ["getResource", "getCustomerResourceVersion"].includes(item.operationId));
+    const parameters = [
+      ...(paths[resourcePath] && Array.isArray(paths[resourcePath].parameters) ? paths[resourcePath].parameters : []),
+      ...(operation && Array.isArray(operation.parameters) ? operation.parameters : []),
+    ];
+    const parameter = parameters.find((item) => isPlainObject(item) && item.in === "query" && item.name === "date_format");
+    const schema = parameter && isPlainObject(parameter.schema) ? parameter.schema : {};
+    const values = Array.isArray(schema.enum)
+      ? schema.enum.filter((value) => typeof value === "string" && /^[a-z0-9_]+$/.test(value)) : [];
+    return {values, defaultValue: values.includes(schema.default) ? schema.default : ""};
+  }
+
+  // Names for the date formats a resource GET may advertise; others show their own name.
+  const DATE_FORMAT_LABELS = {
+    iso8601: "ISO 8601",
+    rfc3339_millis: "RFC 3339 with milliseconds",
+    epoch_seconds: "Seconds since 1970",
+    epoch_milliseconds: "Milliseconds since 1970",
+  };
+  function dateFormatLabel(value) {
+    return DATE_FORMAT_LABELS[value] || value;
+  }
+
   function downloadFilename(contentDisposition, fallback) {
     const match = String(contentDisposition || "").match(/(?:^|;)\s*filename="([^"]+)"/i);
     const candidate = match ? match[1] : String(fallback || "query-download");
@@ -1398,13 +1427,15 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     }
   }
 
-  function resourceRequestPath(template, id, fields) {
+  function resourceRequestPath(template, id, fields, dateFormat) {
     const resourceId = String(id || "").trim();
     if (!template || !resourceId) return "";
     const path = template.replace("{id}", encodeURIComponent(resourceId));
     const selected = Array.from(new Set((fields || []).map((field) => String(field || "").trim()).filter(Boolean)));
-    return selected.length
-      ? `${path}?fields=${selected.map(encodeURIComponent).join(",")}` : path;
+    const query = [];
+    if (selected.length) query.push(`fields=${selected.map(encodeURIComponent).join(",")}`);
+    if (dateFormat) query.push(`date_format=${encodeURIComponent(dateFormat)}`);
+    return query.length ? `${path}?${query.join("&")}` : path;
   }
 
   function fieldTraversesMany(domain, path) {
@@ -1438,9 +1469,13 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     const openapiPath = route("getOpenApi", `${normalizedBase}/openapi.json`);
     const queryPath = route("queryDomain", `${normalizedBase}/query`);
     const writePath = route("writeDomain", `${normalizedBase}/write`);
-    const resourceRoute = routes.find((item) => item
-      && item.operation_id === "getCustomerResourceVersion"
-      && String(item.method || "GET").toUpperCase() === "GET");
+    // getResource is the canonical resource read; getCustomerResourceVersion
+    // is the customer API's earlier name for the same route.
+    const resourceRoute = ["getResource", "getCustomerResourceVersion"]
+      .map((operationId) => routes.find((item) => item
+        && item.operation_id === operationId
+        && String(item.method || "GET").toUpperCase() === "GET"))
+      .find(Boolean);
     const resourcePath = safeResourcePathTemplate(
       resourceRoute && resourceRoute.path, normalizedBase,
     );
@@ -1465,7 +1500,8 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       importer: advertisedAccess.importer === true,
     };
     const queryResponseFormats = discoverQueryResponseFormats(openapi, queryPath);
-    return {base: normalizedBase, manifest, domain, openapi, queryPath, resourcePath, writePath, actionPath, access, queryResponseFormats};
+    const resourceDateFormats = discoverResourceDateFormats(openapi, resourcePath);
+    return {base: normalizedBase, manifest, domain, openapi, queryPath, resourcePath, writePath, actionPath, access, queryResponseFormats, resourceDateFormats};
   }
 
   function humanize(value) {
@@ -1526,6 +1562,8 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         relation: prefix || "Root",
         groupKey: prefix ? prefix.split(".")[0] : "",
         groupLabel: prefix ? relationshipLabel(prefix.split(".")[0], joins) : "",
+        filterable: fieldRoleAllowed(column, "filter"),
+        sortable: fieldRoleAllowed(column, "sort"),
       });
     });
 
@@ -1589,7 +1627,8 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     const hidden = Array.isArray(components.filter_picker_hidden_paths)
       ? components.filter_picker_hidden_paths : [];
     const choices = components.filter_choices || {};
-    const available = fields.map((field) => {
+    // Fields published filterable: false are refused by the API, so they are not offered.
+    const available = fields.filter((field) => field.filterable !== false).map((field) => {
       const spec = choices[field.path] || {};
       return {
         ...field,
@@ -1614,10 +1653,29 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     return available.sort(compareSemanticFields);
   }
 
+  // Choice filters offer the choice operators their field type accepts (not_in wherever in
+  // is): a boolean Yes/No choice gets equals and does not equal, never one of.
   function operatorsForField(field) {
-    return Array.isArray(field && field.filterChoices)
-      ? ["eq", "ne", "in", "not_in", "is_null", "not_null"]
-      : operatorsForType(field.type);
+    if (!Array.isArray(field && field.filterChoices)) return operatorsForType(field.type);
+    const accepted = new Set(operatorsForType(field.type));
+    return ["eq", "ne", "in", "not_in", "is_null", "not_null"].filter((op) =>
+      accepted.has(op) || (op === "not_in" && accepted.has("in")));
+  }
+
+  // A new filter starts on one of for choices whose type accepts it, else on equals.
+  function initialFilterOperator(field) {
+    return field && field.filterChoices && operatorsForField(field).includes("in") ? "in" : "eq";
+  }
+
+  // Explicit field roles (as the API enforces them): the first of the flags present decides,
+  // and a field without any is allowed.
+  const FIELD_ROLE_FLAGS = {
+    filter: ["filterable", "filterable?", "query_filterable", "query_filterable?"],
+    sort: ["sortable", "sortable?"],
+  };
+  function fieldRoleAllowed(column, role) {
+    const flag = FIELD_ROLE_FLAGS[role].find((name) => Object.prototype.hasOwnProperty.call(column || {}, name));
+    return flag === undefined || Boolean(column[flag]);
   }
 
   function associationIsMany(association, schemas) {
@@ -1797,6 +1855,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       this.actionPath = `${this.base}/actions/{action}`;
       this.access = {read: true, write: true, action: true, importer: false};
       this.queryResponseFormats = [Object.assign({}, QUERY_RESPONSE_FORMATS[0])];
+      this.resourceDateFormats = {values: [], defaultValue: ""};
       this.fields = [];
       this.fieldMap = new Map();
       this.filterFields = [];
@@ -1809,6 +1868,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       this.state = {
         queryMethod: "post",
         resourceId: "",
+        dateFormat: "",
         mode: "select",
         selectedFields: [],
         configuredField: "",
@@ -1897,6 +1957,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
             } catch (error) { this.nestedAvailabilityError = error.message; this.nestedAvailabilityRefusal = this.nestedDiscoveryFailure(error); }
           }
         }
+        this.resourceDateFormats = discovery.resourceDateFormats || {values: [], defaultValue: ""};
         this.state.responseFormat = this.queryResponseFormats[0].id;
         this.state.responseFilename = suggestedDownloadFilename(
           this.domain.name, this.responseFormat(this.state.responseFormat).extension,
@@ -2071,12 +2132,20 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
             <aside class="sac-builder">
               <section class="sac-card">
                 <div class="sac-card-heading"><div><span class="sac-step">1</span><h2>Choose data</h2></div></div>
-                <label class="sac-label" for="sac-query-method">Request method</label>
-                <select id="sac-query-method" data-sac-query-method></select>
+                <fieldset class="sac-method-choice" data-sac-query-method-group hidden>
+                  <legend class="sac-label">Request method</legend>
+                  <label class="sac-method-option"><input type="radio" name="sac-query-method" value="post" data-sac-query-method> POST query</label>
+                  <label class="sac-method-option"><input type="radio" name="sac-query-method" value="get" data-sac-query-method> GET resource</label>
+                </fieldset>
                 <div data-sac-resource-id-wrap hidden>
                   <label class="sac-label" for="sac-resource-id">Resource ID</label>
                   <input id="sac-resource-id" type="text" inputmode="numeric" placeholder="7001" data-sac-resource-id>
-                  <p class="sac-help">The resource GET always returns ID, customer reference, and aggregate version. Selected fields are added through <code>fields=</code>.</p>
+                  <p class="sac-help">The resource GET always returns the ID. Selected fields are added through <code>fields=</code>; choose Aggregate Version, when the domain publishes it, for the resource version and its ETag.</p>
+                  <div data-sac-date-format-wrap hidden>
+                    <label class="sac-label" for="sac-date-format">Date format</label>
+                    <select id="sac-date-format" data-sac-date-format></select>
+                    <p class="sac-help">Applies to every date and time field of the resource, in UTC (<code>date_format=</code>).</p>
+                  </div>
                 </div>
                 <div data-sac-post-source>
                   <label class="sac-label" for="sac-source-mode">Query source</label>
@@ -2175,6 +2244,11 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
                     <button type="button" data-sac-result-tab="curl">cURL</button>
                   </div>
                 </div>
+                <div class="sac-page-info" data-sac-page-info hidden>
+                  <span data-sac-page-text></span>
+                  <button type="button" class="sac-text-button" data-sac-previous-page>← Previous page</button>
+                  <button type="button" class="sac-text-button" data-sac-next-page>Next page →</button>
+                </div>
                 <div class="sac-empty-response" data-sac-empty-response><strong>Build a query, then run it.</strong><span>The result table and canonical JSON response will appear here.</span></div>
                 <div class="sac-result-panel" data-sac-result-panel="table" hidden><div class="sac-table-wrap"><table><thead data-sac-result-head></thead><tbody data-sac-result-body></tbody></table></div></div>
                 <div class="sac-result-panel" data-sac-result-panel="json" hidden><div class="sac-code-heading"><span>Canonical response</span><button type="button" class="sac-text-button" data-sac-copy-response>Copy</button></div><pre data-sac-response-json></pre></div>
@@ -2227,14 +2301,8 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       this.root.querySelector("[data-sac-domain-name]").textContent = this.domain.name || "Domain";
       this.root.querySelector("[data-sac-base]").textContent = this.base;
       this.root.querySelector("[data-sac-query-path]").textContent = this.queryPath;
-      appendOptions(
-        this.root.querySelector("[data-sac-query-method]"),
-        [
-          {value: "post", label: "POST query"},
-          ...(this.resourcePath ? [{value: "get", label: "GET resource"}] : []),
-        ],
-        this.state.queryMethod,
-      );
+      // The method choice appears only when the API offers resource GET.
+      this.root.querySelector("[data-sac-query-method-group]").hidden = !this.resourcePath;
       this.root.querySelector("[data-sac-write-path]").textContent = this.writePath;
       this.root.querySelector("[data-sac-domain-link]").href = `${this.base}/domain`;
       this.root.querySelector("[data-sac-openapi-link]").href = `${this.base}/openapi.json`;
@@ -2850,9 +2918,12 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     renderAll() {
       const resourceGet = this.state.queryMethod === "get" && Boolean(this.resourcePath);
       const mode = this.state.mode;
-      this.root.querySelector("[data-sac-query-method]").value = resourceGet ? "get" : "post";
+      this.root.querySelectorAll("[data-sac-query-method]").forEach((radio) => {
+        radio.checked = radio.value === (resourceGet ? "get" : "post");
+      });
       this.root.querySelector("[data-sac-resource-id-wrap]").hidden = !resourceGet;
       this.root.querySelector("[data-sac-resource-id]").value = this.state.resourceId;
+      this.renderDateFormats();
       this.root.querySelector("[data-sac-post-source]").hidden = resourceGet;
       this.root.querySelectorAll("[data-sac-post-query-card]").forEach((card) => (card.hidden = resourceGet));
       this.root.querySelector("[data-sac-post-editor-actions]").hidden = resourceGet;
@@ -2885,6 +2956,17 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       this.renderFilterFieldList();
       this.renderOrders();
       this.syncRequest();
+    }
+
+    renderDateFormats() {
+      const {values, defaultValue} = this.resourceDateFormats;
+      this.root.querySelector("[data-sac-date-format-wrap]").hidden = !values.length;
+      const select = this.root.querySelector("[data-sac-date-format]");
+      select.replaceChildren();
+      appendOptions(select, [
+        {value: "", label: defaultValue ? `Default (${dateFormatLabel(defaultValue)})` : "Default"},
+        ...values.filter((value) => value !== defaultValue).map((value) => ({value, label: dateFormatLabel(value)})),
+      ], this.state.dateFormat);
     }
 
     renderNormalization() {
@@ -3225,7 +3307,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         const field = element("select", "");
         field.dataset.sacOrderField = "";
         field.disabled = named;
-        appendOptions(field, this.fields.map((item) => ({value: item.path, label: `${item.label} — ${item.path}`})), order.field);
+        appendOptions(field, this.sortFields().map((item) => ({value: item.path, label: `${item.label} — ${item.path}`})), order.field);
         const direction = element("select", "");
         direction.dataset.sacOrderDirection = "";
         direction.disabled = named;
@@ -3240,6 +3322,11 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       });
       if (named) container.append(element("p", "sac-help", "The named ordering replaces custom sort fields."));
       else if (!this.state.orders.length) container.append(element("p", "sac-muted", "No explicit ordering."));
+    }
+
+    // Fields that can be sorted on: the API refuses sortable: false.
+    sortFields() {
+      return this.fields.filter((field) => field.sortable !== false);
     }
 
     filterPayloads(filter) {
@@ -3348,8 +3435,12 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         fields.push(field);
       });
       if (fields.length > 50) errors.push("GET resource allows at most 50 additional fields.");
+      const dateFormat = String(this.state.dateFormat || "");
+      if (dateFormat && !this.resourceDateFormats.values.includes(dateFormat)) {
+        errors.push(`The API does not offer the date format ${dateFormat}.`);
+      }
       return {
-        path: errors.length ? "" : resourceRequestPath(this.resourcePath, id, fields),
+        path: errors.length ? "" : resourceRequestPath(this.resourcePath, id, fields, dateFormat),
         fields,
         errors,
       };
@@ -3471,6 +3562,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
           const extra = onlyKeys(filter, ["field", "op", "value", "end"]);
           if (extra.length) throw new Error(`Unsupported filter properties: ${extra.join(", ")}.`);
           const field = this.filterFieldMap.get(filter.field);
+          if (!field && this.fieldMap.has(filter.field)) throw new Error(`${filter.field} cannot be used in filters.`);
           if (!field) throw new Error(`The chooser does not know the filter field ${JSON.stringify(filter.field)}.`);
           if (typeof filter.op !== "string" || !operatorsForField(field).includes(filter.op)) throw new Error(`The ${filter.op} filter is not available for ${filter.field}.`);
           if (["in", "not_in"].includes(filter.op) && (!Array.isArray(filter.value) || filter.value.some((value) => typeof value !== "string"))) throw new Error("The chooser supports membership-filter values as an array of strings.");
@@ -3493,6 +3585,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
           if (!isPlainObject(order) || onlyKeys(order, ["field", "direction"]).length || !this.fieldMap.has(order.field) || !["asc", "desc"].includes(order.direction)) {
             throw new Error("Each custom ordering needs a known field and an asc or desc direction.");
           }
+          if (this.fieldMap.get(order.field).sortable === false) throw new Error(`${order.field} cannot be used for sorting.`);
           return {id: String(orderId++), field: order.field, direction: order.direction};
         });
       }
@@ -4763,7 +4856,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         this.state.filters.push({
           id: String(this.nextFilterId++),
           field: initialField.path,
-          op: initialField.filterChoices ? "in" : "eq",
+          op: initialFilterOperator(initialField),
           value: initialField.type === "boolean" ? "true" : "",
           end: "",
         });
@@ -4777,8 +4870,9 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         return;
       }
       if (event.target.closest("[data-sac-add-order]")) {
-        if (!this.fields.length || this.state.ordering) return;
-        this.state.orders.push({id: String(this.nextOrderId++), field: this.fields[0].path, direction: "asc"});
+        const sortable = this.sortFields();
+        if (!sortable.length || this.state.ordering) return;
+        this.state.orders.push({id: String(this.nextOrderId++), field: sortable[0].path, direction: "asc"});
         this.changed();
         return;
       }
@@ -4796,6 +4890,8 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       if (event.target.closest("[data-sac-reset-json]")) return this.syncRequest(true);
       if (event.target.closest("[data-sac-run]")) return this.run();
       if (event.target.closest("[data-sac-cancel-query]")) return this.cancelQuery();
+      if (event.target.closest("[data-sac-next-page]")) return this.goToPage("next");
+      if (event.target.closest("[data-sac-previous-page]")) return this.goToPage("previous");
       if (event.target.closest("[data-sac-add-write-filter]")) {
         const primaryKey = this.domain && this.domain.source && this.domain.source.primary_key || "id";
         this.writeState.filters.push({field: primaryKey, op: "eq", value: ""});
@@ -4908,6 +5004,10 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       if (target.matches("[data-sac-action-group-input]")) {
         this.actionState.groups[Number(target.dataset.groupIndex)].inputs[target.dataset.sacActionGroupInput] = target.value;
         return this.mutationFormChanged("action", false);
+      }
+      if (target.matches("[data-sac-date-format]")) {
+        this.state.dateFormat = target.value;
+        return this.syncRequest(true);
       }
       if (target.matches("[data-sac-mode]")) this.state.mode = target.value;
       else if (target.matches("[data-sac-projection]")) this.state.projection = target.value;
@@ -5445,7 +5545,45 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
         tr.append(td);
         body.append(tr);
       }
+      this.renderPageInfo(payload);
       this.switchResultTab(columns.length ? "table" : "json");
+    }
+
+    // A query page: which rows it holds and, from the API's has_more, whether more follow.
+    pageInfo(payload) {
+      const data = payload && payload.ok && payload.data;
+      if (this.state.queryMethod === "get" || !isPlainObject(data) || typeof data.has_more !== "boolean") return null;
+      const offset = Number.isInteger(data.offset) ? data.offset : Number.parseInt(this.state.offset, 10) || 0;
+      const limit = Number.isInteger(data.limit) ? data.limit : Number.parseInt(this.state.limit, 10) || 0;
+      const returned = Number.isInteger(data.returned) ? data.returned : (Array.isArray(data.rows) ? data.rows.length : 0);
+      const text = returned
+        ? `Rows ${offset + 1}–${offset + returned}${data.has_more ? "; more rows follow" : "; no more rows"}`
+        : (offset ? `No rows after row ${offset}` : "No rows");
+      return {offset, limit, returned, hasMore: data.has_more, text};
+    }
+
+    renderPageInfo(payload) {
+      const container = this.root.querySelector("[data-sac-page-info]");
+      if (!container) return;
+      const info = this.pageInfo(payload);
+      this.page = info;
+      container.hidden = !info;
+      if (!info) return;
+      container.querySelector("[data-sac-page-text]").textContent = info.text;
+      // Paging changes the chooser's offset, so it is not offered for manually edited JSON.
+      const editable = !this.state.rawDirty && info.limit > 0;
+      container.querySelector("[data-sac-next-page]").hidden = !(editable && info.hasMore);
+      container.querySelector("[data-sac-previous-page]").hidden = !(editable && info.offset > 0);
+    }
+
+    // Runs the next or previous page of the query just run.
+    goToPage(direction) {
+      const info = this.page;
+      if (!info || this.state.rawDirty || !info.limit) return;
+      this.state.limit = info.limit;
+      this.state.offset = direction === "next" ? info.offset + info.limit : Math.max(0, info.offset - info.limit);
+      this.changed();
+      return this.run();
     }
 
     async copy(text, source) {
@@ -5495,6 +5633,9 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     operatorsForField,
     compareSemanticFields,
     discoverQueryResponseFormats,
+    discoverResourceDateFormats,
+    fieldRoleAllowed,
+    initialFilterOperator,
     operationHeaderSpecs,
     downloadFilename,
     initialSurfaceTab,
