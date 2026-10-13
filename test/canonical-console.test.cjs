@@ -103,3 +103,37 @@ test("Console displays exact large integer and decimal strings without numeric c
   assert.equal(renderValue("9007199254740993"), "9007199254740993");
   assert.equal(renderValue("9007199254740993.123456"), "9007199254740993.123456");
 });
+
+test("canonical flat paging reruns the bound chooser while root and manual requests stay intact", () => {
+  const console = instance();
+  const result = {ok: true, data: {format: "selecto.remote-query-result", format_version: 1,
+    rows: [[1], [3]], row_count: 2, page: {limit: 2, offset: 0, has_more: true}}};
+  console.page = console.pageInfo(result);
+  assert.deepEqual(console.page, {offset: 0, limit: 2, returned: 2, hasMore: true, text: "Rows 1–2; more rows follow"});
+  const sent = [];
+  console.changed = () => {};
+  console.run = () => sent.push(console.buildPayload());
+  console.goToPage("next");
+  assert.equal(sent[0].query.offset, 2);
+  assert.equal(sent[0].query.limit, 2);
+  assert.equal(sent[0].domain.fingerprint, "fp");
+  assert.deepEqual(sent[0].query.select, ["id"]);
+  console.page = console.pageInfo({...result, data: {...result.data, page: {...result.data.page, offset: 2}}});
+  console.goToPage("previous");
+  assert.equal(sent[1].query.offset, 0);
+  for (const patch of [{state: {rawDirty: true}}, {rootMode: true}, {queryProfile: "root"}, {queryProfile: "nested"}]) {
+    console.state.rawDirty = false; console.rootMode = false; console.queryProfile = "flat";
+    if (patch.state) Object.assign(console.state, patch.state); else Object.assign(console, patch);
+    const before = structuredClone(console.state);
+    assert.equal(console.pageInfo(result), null);
+    console.goToPage("next");
+    assert.deepEqual(console.state, before);
+    assert.equal(sent.length, 2, "paging cannot rewrite a manual or complete root/nested request");
+  }
+  console.state.rawDirty = false; console.rootMode = false; console.queryProfile = "flat";
+  for (const mutate of [data => data.page.has_more = "true", data => data.row_count = "2",
+    data => data.row_count = 1, data => data.page.limit = 0, data => data.page.offset = -1]) {
+    const changed = structuredClone(result); mutate(changed.data);
+    assert.equal(console.pageInfo(changed), null, "invalid canonical pagination never falls back to chooser state");
+  }
+});
