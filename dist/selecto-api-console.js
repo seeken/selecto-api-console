@@ -2244,7 +2244,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
                     <button type="button" data-sac-result-tab="curl">cURL</button>
                   </div>
                 </div>
-                <div class="sac-page-info" data-sac-page-info hidden>
+                <div class="sac-page-info" data-sac-legacy-page-info hidden>
                   <span data-sac-page-text></span>
                   <button type="button" class="sac-text-button" data-sac-previous-page>← Previous page</button>
                   <button type="button" class="sac-text-button" data-sac-next-page>Next page →</button>
@@ -5460,6 +5460,8 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       const json = this.root.querySelector("[data-sac-response-json]"); if (json) json.textContent = "";
       const empty = this.root.querySelector("[data-sac-empty-response]"); if (empty) empty.hidden = false;
       const page = this.root.querySelector("[data-sac-page-info]"); if (page) {page.hidden = true;page.textContent = "";}
+      const pager = this.root.querySelector("[data-sac-legacy-page-info]"); if (pager) pager.hidden = true;
+      this.page = null;
     }
 
     renderNestedResponse(result, head, body) {
@@ -5552,18 +5554,25 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     // A query page: which rows it holds and, from the API's has_more, whether more follow.
     pageInfo(payload) {
       const data = payload && payload.ok && payload.data;
-      if (this.state.queryMethod === "get" || !isPlainObject(data) || typeof data.has_more !== "boolean") return null;
-      const offset = Number.isInteger(data.offset) ? data.offset : Number.parseInt(this.state.offset, 10) || 0;
-      const limit = Number.isInteger(data.limit) ? data.limit : Number.parseInt(this.state.limit, 10) || 0;
-      const returned = Number.isInteger(data.returned) ? data.returned : (Array.isArray(data.rows) ? data.rows.length : 0);
+      if (this.state.queryMethod === "get" || !isPlainObject(data)) return null;
+      const canonical = data.format === "selecto.remote-query-result";
+      const page = canonical ? data.page : data;
+      if (!isPlainObject(page) || typeof page.has_more !== "boolean") return null;
+      if (canonical && (data.format_version !== 1 || this.state.rawDirty || this.rootMode || this.queryProfile !== "flat" ||
+          !Number.isInteger(page.offset) || page.offset < 0 || !Number.isInteger(page.limit) || page.limit < 1 ||
+          !Number.isInteger(data.row_count) || data.row_count < 0 || data.row_count > page.limit ||
+          !Array.isArray(data.rows) || data.row_count !== data.rows.length)) return null;
+      const offset = Number.isInteger(page.offset) ? page.offset : Number.parseInt(this.state.offset, 10) || 0;
+      const limit = Number.isInteger(page.limit) ? page.limit : Number.parseInt(this.state.limit, 10) || 0;
+      const returned = canonical ? data.row_count : Number.isInteger(data.returned) ? data.returned : (Array.isArray(data.rows) ? data.rows.length : 0);
       const text = returned
-        ? `Rows ${offset + 1}–${offset + returned}${data.has_more ? "; more rows follow" : "; no more rows"}`
+        ? `Rows ${offset + 1}–${offset + returned}${page.has_more ? "; more rows follow" : "; no more rows"}`
         : (offset ? `No rows after row ${offset}` : "No rows");
-      return {offset, limit, returned, hasMore: data.has_more, text};
+      return {offset, limit, returned, hasMore: page.has_more, text};
     }
 
     renderPageInfo(payload) {
-      const container = this.root.querySelector("[data-sac-page-info]");
+      const container = this.root.querySelector("[data-sac-legacy-page-info]");
       if (!container) return;
       const info = this.pageInfo(payload);
       this.page = info;
@@ -5571,7 +5580,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
       if (!info) return;
       container.querySelector("[data-sac-page-text]").textContent = info.text;
       // Paging changes the chooser's offset, so it is not offered for manually edited JSON.
-      const editable = !this.state.rawDirty && info.limit > 0;
+      const editable = !this.state.rawDirty && !this.rootMode && this.queryProfile === "flat" && info.limit > 0;
       container.querySelector("[data-sac-next-page]").hidden = !(editable && info.hasMore);
       container.querySelector("[data-sac-previous-page]").hidden = !(editable && info.offset > 0);
     }
@@ -5579,7 +5588,7 @@ return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,toCanoni
     // Runs the next or previous page of the query just run.
     goToPage(direction) {
       const info = this.page;
-      if (!info || this.state.rawDirty || !info.limit) return;
+      if (!info || this.state.rawDirty || this.rootMode || this.queryProfile !== "flat" || !info.limit) return;
       this.state.limit = info.limit;
       this.state.offset = direction === "next" ? info.offset + info.limit : Math.max(0, info.offset - info.limit);
       this.changed();

@@ -1305,7 +1305,7 @@ test("pages through query results with the API's has_more", () => {
   const node = () => ({hidden: false, textContent: ""});
   const parts = {"[data-sac-page-text]": node(), "[data-sac-next-page]": node(), "[data-sac-previous-page]": node()};
   const container = {hidden: true, querySelector: (selector) => parts[selector]};
-  consoleInstance.root = {querySelector: (selector) => (selector === "[data-sac-page-info]" ? container : null)};
+  consoleInstance.root = {querySelector: (selector) => (selector === "[data-sac-legacy-page-info]" ? container : null)};
   consoleInstance.renderPageInfo({ok: true, data: {rows: [], returned: 50, limit: 50, offset: 0, has_more: true}});
   assert.equal(container.hidden, false);
   assert.deepEqual([parts["[data-sac-next-page]"].hidden, parts["[data-sac-previous-page]"].hidden], [false, true]);
@@ -1323,4 +1323,68 @@ test("pages through query results with the API's has_more", () => {
   consoleInstance.renderPageInfo({ok: true, data: {rows: [], returned: 50, limit: 50, offset: 50, has_more: true}});
   assert.deepEqual([parts["[data-sac-next-page]"].hidden, parts["[data-sac-previous-page]"].hidden], [true, true],
     "manually edited JSON is not paged");
+});
+
+test("canonical page status survives result rendering alongside the legacy pager", () => {
+  class FakeNode {
+    constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.hidden = true; this.textContent = ""; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+  }
+  const previousDocument = global.document;
+  global.document = {createElement: (tag) => new FakeNode(tag)};
+  try {
+    const canonical = new FakeNode("p");
+    const parts = Object.fromEntries(["page-text", "next-page", "previous-page"].map(name => [`[data-sac-${name}]`, new FakeNode("span")]));
+    const legacy = new FakeNode("div");
+    legacy.querySelector = selector => parts[selector];
+    legacy.append(...Object.values(parts));
+    const nodes = {
+      "[data-sac-page-info]": canonical,
+      "[data-sac-legacy-page-info]": legacy,
+      "[data-sac-empty-response]": new FakeNode("p"),
+      "[data-sac-response-json]": new FakeNode("pre"),
+      "[data-sac-result-head]": new FakeNode("thead"),
+      "[data-sac-result-body]": new FakeNode("tbody"),
+    };
+    const consoleInstance = new api.APIConsole({dataset: {}, querySelector: selector => nodes[selector] || null});
+    consoleInstance.state.queryMethod = "post";
+    consoleInstance.state.rawDirty = true;
+    consoleInstance.updateCurl = () => {};
+    consoleInstance.switchResultTab = () => {};
+    const result = hasMore => ({ok: true, data: {format: "selecto.remote-query-result", format_version: 1,
+      columns: [{id: "id", label: "Id"}], rows: [[1], [3]], row_count: 2,
+      page: {limit: 100, offset: 0, has_more: hasMore}}});
+    for (const [hasMore, text] of [[false, "No more rows"], [true, "More rows available"]]) {
+      consoleInstance.renderResponse(result(hasMore));
+      assert.equal(canonical.hidden, false);
+      assert.equal(canonical.textContent, text);
+      assert.equal(legacy.hidden, true);
+      assert.equal(consoleInstance.page, null);
+      assert.deepEqual(nodes["[data-sac-result-body]"].children.map(row => row.children[0].textContent), ["1", "3"]);
+    }
+    for (const untyped of [undefined, null, "false", 0]) {
+      consoleInstance.renderResponse(result(untyped));
+      assert.equal(canonical.hidden, true, "only a boolean has_more supplies canonical page status");
+    }
+    consoleInstance.state.rawDirty = false;
+    consoleInstance.renderResponse({ok: true, data: {columns: ["id"], rows: [[1], [3]],
+      returned: 2, offset: 2, limit: 2, has_more: true}});
+    assert.equal(canonical.hidden, true);
+    assert.equal(legacy.hidden, false);
+    assert.equal(parts["[data-sac-page-text]"].textContent, "Rows 3–4; more rows follow");
+    assert.equal(parts["[data-sac-next-page]"].hidden, false);
+    assert.equal(parts["[data-sac-previous-page]"].hidden, false);
+    consoleInstance.renderResponse(result(false));
+    assert.equal(canonical.hidden, false);
+    assert.equal(legacy.hidden, false, "an editable canonical flat query retains its pager");
+    consoleInstance.clearQueryResult();
+    assert.equal(canonical.hidden, true);
+    assert.equal(canonical.textContent, "");
+    assert.equal(legacy.hidden, true);
+    assert.equal(legacy.children.length, 3, "clearing retains the legacy pager controls");
+    assert.equal(consoleInstance.page, null);
+  } finally {
+    global.document = previousDocument;
+  }
 });
