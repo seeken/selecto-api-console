@@ -5,6 +5,7 @@ import {fileURLToPath} from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = resolve(packageRoot, "dist");
+const {version} = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8"));
 const files = [
   ["src/native.css", "native.css"],
   ["src/demo-theme.js", "demo-theme.js"],
@@ -32,5 +33,5 @@ for (const [, target] of files) {
 
 await writeFile(
   resolve(dist, "manifest.json"),
-  `${JSON.stringify({format: "selecto.web-assets.v1", version: "0.6.0", assets}, null, 2)}\n`
+  `${JSON.stringify({format: "selecto.web-assets.v1", version, assets}, null, 2)}\n`
 );
