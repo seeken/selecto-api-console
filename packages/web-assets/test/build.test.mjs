@@ -10,6 +10,8 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 test("the generated asset manifest covers every shared browser artifact", async () => {
   const manifest = JSON.parse(await readFile(resolve(packageRoot, "dist/manifest.json"), "utf8"));
   assert.equal(manifest.format, "selecto.web-assets.v1");
+  const metadata = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8"));
+  assert.equal(manifest.version, metadata.version);
   for (const [name, entry] of Object.entries(manifest.assets)) {
     const content = await readFile(resolve(packageRoot, "dist", name));
     assert.equal(content.length, entry.bytes);
