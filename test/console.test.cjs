@@ -19,6 +19,20 @@ test("links the Importer at the path every host mounts", () => {
   assert.doesNotMatch(source, /\$\{this\.base\}\/importer`/);
 });
 
+test("takes the host's header links, keeping only same-origin paths", () => {
+  const links = [
+    {label: "Privileges", href: "/explorer/privileges?page=load"},
+    {label: "Elsewhere", href: "https://example.test/"},
+    {label: "Protocol relative", href: "//example.test/"},
+    {label: "", href: "/empty-label"},
+    {href: "/no-label"},
+  ];
+  const consoleInstance = new api.APIConsole({dataset: {links: JSON.stringify(links)}});
+  assert.deepEqual(consoleInstance.links, [{label: "Privileges", href: "/explorer/privileges?page=load"}]);
+  assert.deepEqual(new api.APIConsole({dataset: {}}).links, []);
+  assert.deepEqual(new api.APIConsole({dataset: {links: "not json"}}).links, []);
+});
+
 test("hides narrow segments unless they are already selected", () => {
   const consoleInstance = new api.APIConsole({dataset: {}});
   consoleInstance.domain = {query_library: {segments: {
