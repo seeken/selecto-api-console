@@ -4,6 +4,8 @@
   "description": "Framework-neutral, fingerprint-bound Selecto remote query client",
   "type": "module",
   "license": "Artistic-2.0",
+  "repository": {"type": "git", "url": "git+https://github.com/seeken/selecto-api-console.git", "directory": "packages/canonical-client"},
+  "publishConfig": {"access": "public"},
   "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
   "types": "dist/index.d.ts",
   "files": ["dist", "README.md"],

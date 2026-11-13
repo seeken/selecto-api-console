@@ -3,6 +3,14 @@
   "version": "0.6.0",
   "description": "Shared Perl-derived visual assets and native browser behavior for Selecto web explorers.",
   "license": "Artistic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seeken/selecto-api-console.git",
+    "directory": "packages/web-assets"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "dist/native-dialogs.js",
   "style": "dist/native.css",
