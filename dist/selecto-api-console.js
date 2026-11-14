@@ -1066,6 +1066,7 @@ function assertExplorerRequestSupported(domain, request) {
   };
   requireFeature(`view.${request.view}`, "request.view");
   const state = request.state ?? {};
+  if (state.columns?.length) requireFeature("columns.occurrences", "request.state.columns");
   if (state.aggregateGrid) requireFeature("view.aggregate_grid", "request.state.aggregateGrid");
   if (request.view === "aggregate" && state.rollup === true) requireFeature("aggregate.rollup", "request.state.rollup");
   if (state.rowClickAction && state.rowClickAction !== "__default_modal__") requireFeature("service.actions", "request.state.rowClickAction");

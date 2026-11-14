@@ -145,3 +145,12 @@ test("Detail labels and descriptions survive descriptor and result conversion", 
   assert.equal(descriptor.fields[1].metadata.description, "About amount");
   assert.deepEqual(toExplorerResult(result(), request(), doc).columns.map((column) => column.label), ["Id", "Invoice total", "Large"]);
 });
+
+test("the shared guard refuses repeated restored columns before a SPA can drop them", async () => {
+  const {assertExplorerRequestSupported, toExplorerDescriptor} = await import("../dist/index.js");
+  const restored = request();
+  restored.state.columns = [{field: "source.id"}, {field: "source.id", alias: "Again"}];
+  const before = structuredClone(restored);
+  assert.throws(() => assertExplorerRequestSupported(toExplorerDescriptor(metadata()), restored), /Repeated columns is not available/);
+  assert.deepEqual(restored, before);
+});
