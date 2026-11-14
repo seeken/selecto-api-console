@@ -1,8 +1,8 @@
-import type {CatalogEntry, ClientOptions, Column, Manifest, RemoteQuery, RemoteResult} from "@selecto/canonical-client";
+import type {CanonicalClient, CatalogEntry, ClientOptions, Column, Manifest, RemoteQuery, RemoteResult} from "@selecto/canonical-client";
 export type {ClientOptions} from "@selecto/canonical-client";
 export interface ExplorerMetadata {format: "selecto.explorer-metadata"; format_version: 1; domain: {id: string; fingerprint: string; publication: string}; label: string; fields: Array<Column & {path: string}>; default_select: string[]; query: {profile: "remote_query.v1"; operators: string[]; limits: {max_limit: number; max_offset: number; max_filters: number}; supports: {detail: boolean; nested: boolean; recursive_filters: boolean; aggregates: boolean}}; services: Record<string, unknown>; links?: {api_console?: string};}
 export interface ExplorerQueryRequest {schema: "selecto.spa.query-request/v1"; domainId: string; view: string; state: {selected: string[]; orderBy: Array<{field: string; direction: "asc" | "desc"}>; groupBy: string[]; aggregates: unknown[]; preventDenormalization?: boolean; rowClickAction?: string; fieldConfigs?: unknown; groupConfigs?: unknown; rollup?: boolean; aggregateGrid?: boolean; aggregateGridColorize?: boolean; aggregateGridColorScale?: string; columns?: unknown[]; graph?: unknown; queryLibrary?: unknown}; filters: {conjunction: "and" | "or"; items: unknown[]}; page: {number: number; size: number}; presentation?: {timezone?: string; locale?: string}; publication?: {fingerprint: string; publication?: string}; exportShape?: string;}
-export interface ExplorerDescriptor {schema: "selecto.spa.domain-descriptor/v1"; schemaVersion: 1; id: string; name: string; source: string; capabilities: "detail"[]; protocolFeatures: "api_console"[]; fields: Array<{id: string; label: string; encoding?: Column["encoding"]; type: "boolean" | "date" | "datetime" | "decimal" | "integer" | "json" | "text" | "time" | "uuid" | "unknown"; selectable: boolean; sortable: boolean; groupable: boolean; aggregatable: boolean; filterOperators: Array<"equals" | "not_equals" | "greater_than" | "greater_than_or_equal" | "less_than" | "less_than_or_equal" | "is_null" | "is_not_null">}>; views: Array<{id: string; kind: string; label: string}>; defaults: {selected: string[]; orderBy: never[]; groupBy: never[]; aggregates: never[]; rollup: boolean; preventDenormalization: boolean}; release: {schema: string; id: string; version: string; fingerprint: string; status: string}; artifacts?: Record<string, string>; metadata: {canonical: {profile: string; fingerprint: string; publication: string; supports: ExplorerMetadata["query"]["supports"]; limits: ExplorerMetadata["query"]["limits"]}};}
+export interface ExplorerDescriptor {schema: "selecto.spa.domain-descriptor/v1"; schemaVersion: 1; id: string; name: string; source: string; capabilities: "detail"[]; protocolFeatures: "api_console"[]; fields: Array<{id: string; label: string; encoding?: Column["encoding"]; type: "boolean" | "date" | "datetime" | "decimal" | "integer" | "json" | "text" | "time" | "uuid" | "unknown"; selectable: boolean; sortable: boolean; groupable: boolean; aggregatable: boolean; filterOperators: Array<"equals" | "not_equals" | "greater_than" | "greater_than_or_equal" | "less_than" | "less_than_or_equal" | "is_null" | "is_not_null" | "between" | "in" | "not_in">}>; views: Array<{id: string; kind: string; label: string}>; defaults: {selected: string[]; orderBy: never[]; groupBy: never[]; aggregates: never[]; rollup: boolean; preventDenormalization: boolean}; release: {schema: string; id: string; version: string; fingerprint: string; status: string}; artifacts?: Record<string, string>; metadata: {canonical: {transport: "canonical"; profile: string; fingerprint: string; publication: string; supports: ExplorerMetadata["query"]["supports"]; limits: ExplorerMetadata["query"]["limits"]; unsupported: UnsupportedExplorerFeature[]}};}
 export interface ExplorerQueryResponse {schema: "selecto.spa.query-response/v1"; columns: Array<{id: string; label: string; encoding?: Column["encoding"]; type: ExplorerDescriptor["fields"][number]["type"]}>; rows: Array<Record<string, unknown>>; page: {number: number; size: number}; metadata: {canonical: {fingerprint: string; publication: string; hasMore: boolean}};}
 export interface ExplorerClient {getRootPredicateContext(id:string,options?:{signal?:AbortSignal}):Promise<RootPredicateContext>;executeRootPredicateIntent(intent:RootPredicateIntent,options?:{signal?:AbortSignal;requestId?:string}):Promise<ExplorerQueryResponse>;listDomains(): Promise<ExplorerDescriptor[]>; getDomain(id: string): Promise<ExplorerDescriptor>; execute(request: ExplorerQueryRequest, options?: {signal?: AbortSignal; requestId?: string}): Promise<ExplorerQueryResponse>;}
 export class ExplorerIntentError extends Error {code: string; path: string; details: {path: string}; constructor(path: string, message: string, code?: string);}
@@ -49,3 +49,30 @@ export function encodeNestedDetailState(state:NestedDetailState):string;
 export function decodeNestedDetailState(rawOrEncoded:string,context?:NestedDetailValidationContext):NestedDetailState;
 export function nestedDetailConsoleHref(path:string,state:NestedDetailState):string;
 export function toNestedDetailExplorerResult(envelope:NestedDetailResult,intent:NestedDetailIntent,context:NestedDetailValidationContext):NestedExplorerResult;
+
+export interface UnsupportedExplorerFeature {id: string; label: string; reason: string;}
+export function unsupportedExplorerFeatures(metadata: ExplorerMetadata): UnsupportedExplorerFeature[];
+export class StaleResultError extends Error {name: "AbortError"; code: "stale_result"; stale: true; constructor(message?: string);}
+export interface ExplorerProfileBinding {fingerprint: string; publication: string; revision?: string;}
+export interface ExplorerProfileContext {profile: string; entry: CatalogEntry; manifest: Manifest; canonicalDomain: Record<string, unknown>; binding: ExplorerProfileBinding; [key: string]: unknown;}
+/** A canonical profile strategy; `remote_query.explorer.v1` adds a second implementation. */
+export interface ExplorerProfileStrategy<Context extends ExplorerProfileContext = ExplorerProfileContext> {
+  id: string;
+  accepts(discovery: {manifest: Manifest; entry: CatalogEntry}): boolean;
+  discover(discovery: {client: CanonicalClient; entry: CatalogEntry; manifest: Manifest; canonicalDomain: Record<string, unknown>; signal?: AbortSignal}): Promise<Context>;
+  describe(context: Context): ExplorerDescriptor;
+  translate(request: ExplorerQueryRequest, context: Context): RemoteQuery;
+  run(client: CanonicalClient, context: Context, query: RemoteQuery, options: {signal?: AbortSignal; requestId?: string}): Promise<RemoteResult>;
+  toResponse(envelope: RemoteResult, request: ExplorerQueryRequest, context: Context): ExplorerQueryResponse;
+}
+export const detailProfile: ExplorerProfileStrategy<ExplorerProfileContext & {metadata: ExplorerMetadata}>;
+export interface CanonicalHostAdapterOptions extends ClientOptions {profiles?: ExplorerProfileStrategy<any>[]; supersede?: false | "domain" | "adapter";}
+export interface CanonicalHostAdapter extends Omit<ExplorerClient, "listDomains" | "getDomain" | "execute"> {
+  transport: "canonical";
+  profiles: string[];
+  binding(domainId: string): (ExplorerProfileBinding & {profile: string}) | undefined;
+  listDomains(options?: {signal?: AbortSignal}): Promise<ExplorerDescriptor[]>;
+  getDomain(id: string, options?: {signal?: AbortSignal}): Promise<ExplorerDescriptor>;
+  execute(request: ExplorerQueryRequest, options?: {signal?: AbortSignal; requestId?: string; channel?: string}): Promise<ExplorerQueryResponse>;
+}
+export function createCanonicalHostAdapter(options?: CanonicalHostAdapterOptions): CanonicalHostAdapter;

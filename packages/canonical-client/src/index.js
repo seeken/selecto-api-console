@@ -245,6 +245,33 @@ export function assertQueryResult(value, fingerprint, query = {}) {
   return value;
 }
 
+function pointerKey(key) { return String(key).replace(/~/g, "~0").replace(/\//g, "~1"); }
+function normalDecimal(text) {
+  let value = text.startsWith("-") ? text.slice(1) : text;
+  const negative = text.startsWith("-");
+  if (value.includes(".")) value = value.replace(/0+$/, "").replace(/\.$/, "");
+  return value === "0" ? "0" : `${negative ? "-" : ""}${value}`;
+}
+/**
+ * Exact numeric codecs: integer and decimal columns that use JSON numbers must
+ * carry plain lexemes that survive IEEE-754 decoding unchanged. Hosts publish
+ * values beyond that range as decimal-string; a lossy lexeme is a wire error,
+ * never a silently rounded display value.
+ */
+export function assertExactResultNumbers(value, numberTokens) {
+  if (!numberTokens) return value;
+  const data = value.data;
+  data.rows.forEach((row, i) => data.columns.forEach((column, j) => {
+    if (!["integer", "decimal"].includes(column.type) || column.encoding !== "json") return;
+    const token = numberTokens.get(`/data/rows/${i}/${Array.isArray(row) ? j : pointerKey(column.id)}`);
+    if (token === undefined) return;
+    const exact = column.type === "integer" ? /^-?(?:0|[1-9]\d*)$/.test(token) && Number.isSafeInteger(Number(token))
+      : /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(token) && !/e/i.test(String(Number(token))) && normalDecimal(token) === normalDecimal(String(Number(token)));
+    if (!exact) throw new CanonicalWireError(`rows.${i}.${column.id}`, "inexact numeric lexeme; exact values require decimal-string");
+  }));
+  return value;
+}
+
 export function buildRemoteRequest(fingerprint, query, requestId) {
   nonEmptyString(fingerprint, "domain.fingerprint");
   keys(query, ["select", "projection", "view", "filters", "group_by", "segments", "parameters", "order_by", "ordering", "limit", "offset", "timezone", "row_format"], "query");
@@ -272,7 +299,8 @@ export function createCanonicalClient(options = {}) {
     if (init.body !== undefined) headers.set("content-type", "application/json");
     new Headers(init.headers).forEach((value, key) => headers.set(key, value));
     const response = await transport(safePath(path), {...init, headers, credentials: "same-origin", redirect: "error"});
-    const payload = await response.arrayBuffer().then((bytes) => parseStrictJSON(new TextDecoder("utf-8", {fatal:true,ignoreBOM:!!selected}).decode(bytes), {maxBytes: selected ? (response.ok ? 262144 : 8192) : Number.POSITIVE_INFINITY, tokens: !!selected})).catch((error) => {
+    const maxBytes = selected?.exact ? Number.POSITIVE_INFINITY : selected ? (response.ok ? 262144 : 8192) : Number.POSITIVE_INFINITY;
+    const payload = await response.arrayBuffer().then((bytes) => parseStrictJSON(new TextDecoder("utf-8", {fatal:true,ignoreBOM:!!selected}).decode(bytes), {maxBytes, tokens: !!selected})).catch((error) => {
       if (error?.name === "AbortError") throw error;
       throw new CanonicalWireError("response", "server did not return JSON");
     });
@@ -292,8 +320,9 @@ export function createCanonicalClient(options = {}) {
     async query(manifest, query, requestOptions = {}) {
       assertManifest(manifest);
       const envelope = buildRemoteRequest(requestOptions.fingerprint ?? manifest.domain.fingerprint, query, requestOptions.requestId);
-      const result = await request(routePath(manifest, "queryDomain", "POST"), {method: "POST", body: JSON.stringify(envelope), signal: requestOptions.signal});
+      const result = await request(routePath(manifest, "queryDomain", "POST"), {method: "POST", body: JSON.stringify(envelope), signal: requestOptions.signal}, {exact: true});
       assertQueryResult(result.payload, envelope.domain.fingerprint, query);
+      assertExactResultNumbers(result.payload, result.numberTokens);
       return result.payload;
     },
     async nestedDetailFeatures(manifest, signal) {
