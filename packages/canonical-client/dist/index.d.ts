@@ -28,6 +28,7 @@ export function assertError(value: unknown): ErrorEnvelope;
 export function assertColumn(value: unknown, path?: string): Column;
 export function assertScalar(value: unknown, column: Column, path: string): void;
 export function assertQueryResult(value: unknown, fingerprint: string, query?: RemoteQuery): RemoteResult;
+export function assertExactResultNumbers(value: RemoteResult, numberTokens?: Map<string, string>): RemoteResult;
 export function routePath(manifest: Manifest, operation: string, method: string): string;
 export function buildRemoteRequest(fingerprint: string, query: RemoteQuery, requestId?: string): RemoteRequest;
 

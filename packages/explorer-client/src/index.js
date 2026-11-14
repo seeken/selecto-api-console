@@ -1,6 +1,8 @@
 import * as canonical from "@selecto/canonical-client";
 
-const operatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", is_null: "is_null", is_not_null: "is_not_null"};
+// Comparison/null operators are remote_query.v1 base; range/list operators are
+// translated only when the publication's metadata advertises them.
+const operatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", is_null: "is_null", is_not_null: "is_not_null", between: "between", in: "in", not_in: "not_in"};
 const reverseOperators = Object.fromEntries(Object.entries(operatorMap).map(([key, value]) => [value, key]));
 const {record, nonEmptyString, integer, keys, safePath, CanonicalWireError} = canonical;
 
@@ -77,8 +79,37 @@ export function toExplorerDescriptor(metadata) {
     defaults: {selected: metadata.default_select.slice(), orderBy: [], groupBy: [], aggregates: [], rollup: true, preventDenormalization: true},
     release: {schema: "selecto.domain-publication/v1", id: metadata.domain.publication, version: metadata.domain.fingerprint, fingerprint: metadata.domain.fingerprint, status: "published"},
     ...(metadata.links?.api_console ? {artifacts: {apiConsole: metadata.links.api_console}} : {}),
-    metadata: {canonical: {profile: metadata.query.profile, fingerprint: metadata.domain.fingerprint, publication: metadata.domain.publication, supports: {...metadata.query.supports}, limits: {...metadata.query.limits}}},
+    metadata: {canonical: {transport: "canonical", profile: metadata.query.profile, fingerprint: metadata.domain.fingerprint, publication: metadata.domain.publication, supports: {...metadata.query.supports}, limits: {...metadata.query.limits}, unsupported: unsupportedExplorerFeatures(metadata)}},
   };
+}
+
+/**
+ * Explorer features of the SPA protocol that this publication does not provide.
+ * Frameworks render this list so absent features are visible, never silently
+ * dropped. Ids are stable: `view.*`, `filters.*`, `fields.*`, `columns.*`,
+ * `operator.*`, `page.*` and `service.*`.
+ */
+export function unsupportedExplorerFeatures(metadata) {
+  const supports = metadata.query.supports;
+  const operators = new Set(metadata.query.operators);
+  const richer = "requires the remote_query.explorer.v1 profile";
+  const list = [
+    {id: "view.aggregate", label: "Aggregate view", reason: richer},
+    {id: "view.graph", label: "Graph view", reason: richer},
+    {id: "view.aggregate_grid", label: "Aggregate grid", reason: richer},
+  ];
+  if (!supports.recursive_filters) list.push({id: "filters.groups", label: "OR and nested filter groups", reason: "this publication accepts flat AND filters only"});
+  list.push({id: "fields.joined", label: "Joined fields", reason: "explorer metadata v1 publishes root fields only"});
+  if (!supports.nested) list.push({id: "fields.collections", label: "Nested collection columns", reason: richer});
+  list.push({id: "columns.occurrences", label: "Repeated columns", reason: richer});
+  for (const [spa, op] of [["between", "between"], ["in", "in"], ["not_in", "not_in"], ["contains", "text_contains"], ["starts_with", "starts_with"], ["ends_with", "ends_with"], ["date_shortcut", "date_shortcut"]]) {
+    if (!operators.has(op) || !operatorMap[spa]) list.push({id: `operator.${spa}`, label: `Filter operator ${spa.replaceAll("_", " ")}`, reason: "not advertised by this publication"});
+  }
+  list.push({id: "page.total_rows", label: "Total row count", reason: "no implicit count; paging uses has_more"});
+  for (const [id, label] of [["saved_views", "Saved views"], ["export", "Export"], ["actions", "Actions"], ["canned_pages", "Canned pages"], ["record_editors", "Record editors"], ["row_refresh", "Row refresh"], ["diagnostics", "SQL debug"], ["localization", "Localized descriptors"]]) {
+    if (!Object.hasOwn(metadata.services ?? {}, id)) list.push({id: `service.${id}`, label, reason: "host service not advertised"});
+  }
+  return list;
 }
 
 /** Translate the bounded Detail profile; never discard unsupported semantics. */
@@ -95,11 +126,21 @@ export function toCanonicalQuery(request, metadata) {
   if (request.exportShape !== undefined) refuse("request.exportShape", "export is not available");
   const state = record(request.state, "request.state");
   keys(state, ["selected", "preventDenormalization", "rowClickAction", "fieldConfigs", "orderBy", "groupBy", "groupConfigs", "rollup", "aggregateGrid", "aggregateGridColorize", "aggregateGridColorScale", "columns", "aggregates", "graph", "queryLibrary"], "request.state");
-  for (const key of ["groupBy", "groupConfigs", "aggregates", "graph", "queryLibrary", "aggregateGrid", "aggregateGridColorize", "aggregateGridColorScale"]) if (!isEmpty(state[key])) refuse(`request.state.${key}`, "requires a richer profile");
+  for (const key of ["groupBy", "aggregates", "graph", "queryLibrary", "aggregateGrid", "aggregateGridColorize", "aggregateGridColorScale"]) if (!isEmpty(state[key])) refuse(`request.state.${key}`, "requires a richer profile");
   if (state.preventDenormalization !== undefined && state.preventDenormalization !== true) refuse("request.state.preventDenormalization", "denormalization is unavailable");
   if (state.rowClickAction && state.rowClickAction !== "__default_modal__") refuse("request.state.rowClickAction", "configured row actions are unavailable");
   if (state.columns !== undefined && !isEmpty(state.columns)) refuse("request.state.columns", "repeated/formatted columns require a richer profile");
-  if (!isEmpty(state.fieldConfigs)) refuse("request.state.fieldConfigs", "formatted columns require a richer profile");
+  // Display alias/format are client-only presentation (PHASE0 R08, R09, R36);
+  // anything that changes query semantics (group formats, buckets) is refused.
+  for (const key of ["fieldConfigs", "groupConfigs"]) {
+    if (state[key] === undefined) continue;
+    for (const [id, config] of Object.entries(record(state[key], `request.state.${key}`))) {
+      const extra = Object.keys(record(config, `request.state.${key}.${id}`)).filter((member) => !["alias", "format"].includes(member));
+      if (extra.length) refuse(`request.state.${key}.${id}`, `unsupported members: ${extra.join(", ")}; they change query semantics and require a richer profile`);
+      if (config.alias !== undefined && typeof config.alias !== "string") refuse(`request.state.${key}.${id}.alias`, "expected text", "invalid_query");
+      if (config.format !== undefined && typeof config.format !== "string") refuse(`request.state.${key}.${id}.format`, "expected a display format", "invalid_query");
+    }
+  }
   const byId = new Map(metadata.fields.map((field) => [field.id, field]));
   function field(id, path) {
     const value = byId.get(id);
@@ -116,11 +157,18 @@ export function toCanonicalQuery(request, metadata) {
     const path = `request.filters.items.${index}`;
     if (filter?.items !== undefined || filter?.conjunction !== undefined) refuse(path, "recursive filters require a richer profile");
     keys(filter, ["id", "field", "operator", "value", "valueTo", "promoted", "groupConfig"], path);
-    if (filter.valueTo !== undefined || !isEmpty(filter.groupConfig)) refuse(path, "range/grouping semantics require a richer profile");
+    if (!isEmpty(filter.groupConfig)) refuse(path, "grouping semantics require a richer profile");
     const op = operatorMap[filter.operator];
     if (!op || !metadata.query.operators.includes(op)) refuse(`${path}.operator`, "operator not supported by this profile");
+    if (filter.valueTo !== undefined && op !== "between") refuse(`${path}.valueTo`, "only between carries an end value", "invalid_query");
     const result = {field: field(filter.field, `${path}.field`).path, op};
-    if (!["is_null", "is_not_null"].includes(op)) {
+    if (op === "between") {
+      if (!Object.hasOwn(filter, "value") || !Object.hasOwn(filter, "valueTo")) refuse(path, "between requires value and valueTo", "invalid_query");
+      result.value = filter.value; result.end = filter.valueTo;
+    } else if (op === "in" || op === "not_in") {
+      if (!Array.isArray(filter.value) || !filter.value.length) refuse(`${path}.value`, "a non-empty list is required", "invalid_query");
+      result.value = filter.value;
+    } else if (!["is_null", "is_not_null"].includes(op)) {
       if (!Object.hasOwn(filter, "value")) refuse(`${path}.value`, "a value is required", "invalid_query");
       result.value = filter.value;
     } else if (filter.value !== undefined && filter.value !== null && filter.value !== "") refuse(`${path}.value`, "null test cannot carry a value", "invalid_query");
@@ -233,6 +281,127 @@ export function createExplorerClient(options = {}) {
       const result = await client.query(manifest, query, requestOptions);
       return toExplorerResult(result, request, metadata);
     },
+  };
+}
+
+/** A result that a newer request on the same channel superseded. UIs treat it as cancellation. */
+export class StaleResultError extends Error {
+  constructor(message = "superseded by a newer request") {
+    super(message);
+    this.name = "AbortError";
+    this.code = "stale_result";
+    this.stale = true;
+  }
+}
+
+/**
+ * The Detail strategy: `remote_query.v1` plus `selecto.explorer-metadata` v1.
+ * Profile strategies share this shape so a later `remote_query.explorer.v1`
+ * strategy (features sidecar, explorer-query route) slots in ahead of it:
+ * `accepts(discovery)`, `discover(discovery)` -> context with `binding`,
+ * `describe(context)`, `translate(request, context)`, `run(client, context,
+ * query, options)` and `toResponse(envelope, request, context)`.
+ */
+export const detailProfile = Object.freeze({
+  id: "remote_query.v1",
+  accepts({manifest, entry}) { return manifest.profiles.includes("remote_query.v1") && typeof entry.explorer_metadata === "string"; },
+  async discover({client, entry, manifest, canonicalDomain, signal}) {
+    const metadata = assertExplorerMetadata(await client.metadata(entry.explorer_metadata, signal), manifest, entry, canonicalDomain);
+    return {profile: "remote_query.v1", entry, manifest, canonicalDomain, metadata,
+      binding: {fingerprint: metadata.domain.fingerprint, publication: metadata.domain.publication}};
+  },
+  describe(context) { return toExplorerDescriptor(context.metadata); },
+  translate(request, context) { return toCanonicalQuery(request, context.metadata); },
+  run(client, context, query, options) { return client.query(context.manifest, query, options); },
+  toResponse(envelope, request, context) { return toExplorerResult(envelope, request, context.metadata); },
+});
+
+/**
+ * One `SelectoHostAdapter`-shaped object for every framework (Vue, React,
+ * Angular, Svelte and their wrappers). Discovery (catalog -> manifest ->
+ * domain -> profile metadata) is refreshed for every call and never cached
+ * across requests. `getDomain`/`listDomains` bind each domain to the
+ * publication the UI loaded; `execute` refuses drift from that binding (or from
+ * the request's own `publication`) before any query, and the host refuses a
+ * stale fingerprint with 409. With `supersede: "domain"` (single-explorer
+ * pages) a new `execute` aborts the previous in-flight one on the same domain;
+ * an older result that still arrives is suppressed with `StaleResultError`.
+ * Unsupported explorer features are listed on the descriptor at
+ * `metadata.canonical.unsupported`; unsupported intent is refused explicitly.
+ */
+export function createCanonicalHostAdapter(options = {}) {
+  const {profiles = [detailProfile], supersede = false, ...clientOptions} = options;
+  if (!Array.isArray(profiles) || !profiles.length) throw new TypeError("At least one canonical profile strategy is required");
+  if (![false, "domain", "adapter"].includes(supersede)) throw new TypeError("supersede must be false, \"domain\" or \"adapter\"");
+  const client = canonical.createCanonicalClient(clientOptions);
+  const explorer = createExplorerClient(clientOptions);
+  const bindings = new Map();
+  const sequences = new Map();
+  const inflight = new Map();
+
+  async function discover(id, signal) {
+    const catalog = await client.catalog(signal);
+    const entry = catalog.domains.find((domain) => domain.id === id);
+    if (!entry) refuse("domainId", "domain is unavailable in the current publication", "operation_forbidden");
+    const manifest = await client.manifest(entry.manifest, signal);
+    const strategy = profiles.find((profile) => profile.accepts({entry, manifest}));
+    if (!strategy) refuse("domainId", "the host advertises no supported canonical explorer profile", "operation_unsupported");
+    const canonicalDomain = await client.domain(manifest, signal);
+    return {strategy, context: await strategy.discover({client, entry, manifest, canonicalDomain, signal})};
+  }
+  function describe(id, {strategy, context}) {
+    const descriptor = strategy.describe(context);
+    bindings.set(id, {profile: context.profile, ...context.binding});
+    return descriptor;
+  }
+  function channel(request, requestOptions) {
+    if (requestOptions.channel !== undefined) return String(requestOptions.channel);
+    return supersede === "adapter" ? "*" : supersede === "domain" ? `domain:${request.domainId}` : null;
+  }
+
+  return {
+    transport: "canonical",
+    profiles: profiles.map((profile) => profile.id),
+    /** The publication identity a domain is bound to, as loaded by the UI. */
+    binding(id) { const value = bindings.get(id); return value ? {...value} : undefined; },
+    async listDomains(requestOptions = {}) {
+      const catalog = await client.catalog(requestOptions.signal);
+      return Promise.all(catalog.domains.map(async (entry) => describe(entry.id, await discover(entry.id, requestOptions.signal))));
+    },
+    async getDomain(id, requestOptions = {}) { return describe(id, await discover(id, requestOptions.signal)); },
+    async execute(request, requestOptions = {}) {
+      const key = channel(request, requestOptions);
+      const sequence = (sequences.get(key) ?? 0) + 1;
+      if (key !== null) {
+        sequences.set(key, sequence);
+        inflight.get(key)?.abort(new StaleResultError());
+      }
+      const controller = new AbortController();
+      const relay = () => controller.abort(requestOptions.signal.reason);
+      if (requestOptions.signal?.aborted) relay();
+      else requestOptions.signal?.addEventListener("abort", relay, {once: true});
+      if (key !== null) inflight.set(key, controller);
+      try {
+        const {strategy, context} = await discover(request.domainId, controller.signal);
+        const bound = bindings.get(request.domainId);
+        if (bound && bound.profile !== context.profile) refuse("request", "the host's explorer profile changed; reload the domain", "stale_domain_fingerprint");
+        const publication = request.publication ?? (bound ? {fingerprint: bound.fingerprint, publication: bound.publication} : undefined);
+        const effective = publication ? {...request, publication} : request;
+        if (!bound) bindings.set(request.domainId, {profile: context.profile, ...context.binding});
+        const query = strategy.translate(effective, context);
+        const envelope = await strategy.run(client, context, query, {signal: controller.signal, requestId: requestOptions.requestId});
+        if (key !== null && sequences.get(key) !== sequence) throw new StaleResultError();
+        if (controller.signal.aborted) throw controller.signal.reason ?? new StaleResultError("request cancelled");
+        return strategy.toResponse(envelope, effective, context);
+      } finally {
+        requestOptions.signal?.removeEventListener("abort", relay);
+        if (key !== null && inflight.get(key) === controller) inflight.delete(key);
+      }
+    },
+    getRootPredicateContext: explorer.getRootPredicateContext,
+    executeRootPredicateIntent: explorer.executeRootPredicateIntent,
+    getNestedDetailContext: explorer.getNestedDetailContext,
+    executeNestedDetailIntent: explorer.executeNestedDetailIntent,
   };
 }
 

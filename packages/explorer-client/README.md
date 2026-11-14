@@ -85,3 +85,44 @@ Unicode and actual byte-cap failures remain distinct. Discovery classifies an
 actual authentication HTTP401 or an invalid published capability; arbitrary
 transport exceptions are not classified by their wording. Original exception
 classes, codes and messages remain available.
+
+## Shared host adapter
+
+`createCanonicalHostAdapter(options)` returns one `SelectoHostAdapter`-shaped
+object for every framework explorer. Frameworks keep only a thin wrapper that
+validates their own view models.
+
+```js
+import {createCanonicalHostAdapter} from "@selecto/explorer-client";
+const adapter = createCanonicalHostAdapter({
+  baseUrl: "/api/selecto/canonical", catalogPath: "/api/selecto/canonical/catalog",
+  headers: () => ({"X-CSRF-Token": csrfToken()}), supersede: "domain",
+});
+```
+
+- `listDomains` and `getDomain` refresh discovery (catalog, manifest, domain,
+  profile metadata) and bind each domain to the publication the UI loaded;
+  `binding(domainId)` returns it.
+- `execute(request, {signal, requestId, channel})` refreshes discovery again,
+  refuses drift from that binding (or from `request.publication`) with
+  `stale_domain_fingerprint` before any query, and leaves the host's 409 for a
+  changed fingerprint intact.
+- The caller's `signal` aborts the HTTP request. With `supersede: "domain"`
+  (single-explorer pages) or `"adapter"`, or an explicit `channel`, a newer call
+  aborts the older one; a late older result is rejected with
+  `StaleResultError` (`name` `"AbortError"`, `code` `"stale_result"`).
+- Descriptors carry `metadata.canonical.transport: "canonical"` and
+  `metadata.canonical.unsupported`, a stable list of `{id, label, reason}` for
+  every SPA feature the publication does not provide (views, filter groups,
+  joined/nested fields, unadvertised operators, totals and host services), so
+  UIs show absence instead of dropping intent.
+- Profiles are strategies (`detailProfile` today). A later
+  `remote_query.explorer.v1` strategy implements the same `accepts`,
+  `discover`, `describe`, `translate`, `run` and `toResponse` members and is
+  passed ahead of Detail in `profiles`.
+
+Display-only `fieldConfigs`/`groupConfigs` members (`alias`, `format`) are
+accepted and never sent. `between`, `in` and `not_in` are translated only when
+the publication advertises them. Integer and decimal columns encoded as JSON
+numbers must carry lossless lexemes (`assertExactResultNumbers` in
+`@selecto/canonical-client`); larger values must use `decimal-string`.

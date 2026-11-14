@@ -72,3 +72,14 @@ test("rejects unsafe routes and invalid positive paging before fetch", () => {
   assert.throws(() => buildRemoteRequest("fp", {select: ["id"], limit: 0}), /integer >= 1/);
   assert.throws(() => buildRemoteRequest("fp", {select: ["id"], tenant: "alpha"}), /unsupported members/);
 });
+
+test("query results keep exact numeric lexemes or refuse them", async () => {
+  const text = (rows) => `{"ok":true,"data":{"format":"selecto.remote-query-result","format_version":1,"domain":{"fingerprint":"fp"},"columns":[{"id":"id","label":"ID","type":"integer","encoding":"json","nullable":false},{"id":"ratio","label":"Ratio","type":"decimal","encoding":"json","nullable":false},{"id":"large","label":"Large","type":"integer","encoding":"decimal-string","nullable":false}],"rows":${rows},"row_count":1,"row_format":"arrays","page":{"limit":2,"offset":0,"has_more":false}}}`;
+  const run = (rows) => createCanonicalClient({baseUrl: "/api/items", fetch: async () => new Response(text(rows), {headers: {"content-type": "application/json"}})})
+    .query(manifest, {select: ["id", "ratio", "large"], limit: 2, offset: 0});
+  const ok = await run('[[7,12.50,"9007199254740993"]]');
+  assert.deepEqual(ok.data.rows[0], [7, 12.5, "9007199254740993"]);
+  for (const rows of ['[[7.0,1.5,"1"]]', '[[1e2,1.5,"1"]]', '[[7,12345678901234567.25,"1"]]', '[[7,1.5e3,"1"]]']) {
+    await assert.rejects(run(rows), (error) => error instanceof CanonicalWireError && /inexact numeric lexeme/.test(error.message), rows);
+  }
+});
