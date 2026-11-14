@@ -126,3 +126,14 @@ accepted and never sent. `between`, `in` and `not_in` are translated only when
 the publication advertises them. Integer and decimal columns encoded as JSON
 numbers must carry lossless lexemes (`assertExactResultNumbers` in
 `@selecto/canonical-client`); larger values must use `decimal-string`.
+
+### Choosing the transport
+
+`selectHostTransport({mode, baseUrl, catalogPath, fetch, headers})` resolves
+`"spa"`, `"canonical"` or `"auto"` before an explorer mounts. `"auto"` probes the
+canonical catalog: a valid `selecto.domain-catalog` selects the canonical
+adapter; an absent route (404, 405, 410) or a non-catalog answer (an HTML
+fallback page) selects the host's SPA routes. Refusals (401, 403), server
+errors, network failures and malformed catalogs are thrown, so a canonical host
+that refuses or breaks is never silently downgraded. Builder images use it so a
+frontend talks canonical to every backend that publishes the mount.
