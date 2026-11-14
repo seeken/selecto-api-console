@@ -98,7 +98,7 @@ test("aggregate with rollup: group/aggregate selections, no sort, rowMeta drilld
   assert.deepEqual(sent.features, {revision: "sha256:r1"});
   assert.deepEqual(sent.query, {select: ["active", {aggregate: "sum", field: "amount", alias: "sum_source_amount"}], row_format: "arrays", group_by: ["active"], rollup: true, limit: 30, offset: 0});
   assert.deepEqual(response.columns.map((column) => column.id), ["source.active", "sum_source_amount"]);
-  assert.equal(response.columns[1].label, "Sum of amount");
+  assert.equal(response.columns[1].label, "Sum of Amount");
   assert.equal(response.columns[1].encoding, "decimal-string");
   assert.deepEqual(response.rows[2], {"source.active": null, sum_source_amount: "13.50"});
   assert.deepEqual(response.rowMeta[0], {rollupLevel: 1, rollupKind: "detail", drilldowns: [{columnId: "source.active", constraints: [{field: "source.active", operator: "equals", value: false}]}]});
@@ -160,8 +160,8 @@ test("buckets: text grammar to structured specs; bucket measures emit one column
     aggregates: [{field: "source.due_on", function: "age_buckets", bucketRanges: "0-30, 31+"}]}), features());
   assert.deepEqual(plan.query.group_by, [{field: "amount", alias: "amount_buckets", buckets: {kind: "numeric", ranges: [{min: 0, max: 9, label: "0-9"}, {min: 10, label: "10+"}]}}]);
   assert.deepEqual(plan.query.select[1], {aggregate: "bucket_count", field: "due_on", alias: "age_buckets_source_due_on", buckets: {kind: "elapsed_days", ranges: [{min: 0, max: 30, label: "0-30"}, {min: 31, label: "31+"}]}});
-  assert.deepEqual(plan.columns.slice(1).map((column) => [column.wire, column.spa.id, column.spa.label]), [["age_buckets_source_due_on__bucket_1", "age_buckets_source_due_on__bucket_1", "due_on: 0-30 days"], ["age_buckets_source_due_on__bucket_2", "age_buckets_source_due_on__bucket_2", "due_on: 31+ days"]]);
-  assert.throws(() => planExplorerV1Query(spa("aggregate", {groupBy: ["source.name"], groupConfigs: {"source.name": {groupFormat: "text_prefix"}}, aggregates: []}), features()), /not part of remote_query.explorer.v1/);
+  assert.deepEqual(plan.columns.slice(1).map((column) => [column.wire, column.spa.id, column.spa.label]), [["age_buckets_source_due_on__bucket_1", "age_buckets_source_due_on__bucket_1", "Due On: 0-30 days"], ["age_buckets_source_due_on__bucket_2", "age_buckets_source_due_on__bucket_2", "Due On: 31+ days"]]);
+  assert.throws(() => planExplorerV1Query(spa("aggregate", {groupBy: ["source.name"], groupConfigs: {"source.name": {groupFormat: "text_prefix"}}, aggregates: []}), features()), /Text prefix groups is not available/);
   assert.throws(() => planExplorerV1Query(spa("aggregate", {groupBy: ["source.amount"], groupConfigs: {"source.amount": {groupFormat: "buckets", bucketRanges: "1-2"}}}), features({overrides: {buckets: false}})), /not available/);
 });
 
@@ -174,7 +174,7 @@ test("Detail: repeated columns alias, exact count, summary aggregates and refusa
   assert.deepEqual(summary.select, [{aggregate: "true_percentage", field: "active", alias: "true_percentage_source_active"}, {aggregate: "sum", field: "amount", alias: "sum_source_amount", ignore_nulls: "auto"}]);
   assert.equal(summary.group_by, undefined);
   assert.throws(() => planExplorerV1Query(spa("aggregate", {aggregates: [{field: "source.active", function: "true_count"}]}), features({overrides: {boolean_aggregates: false}})), /boolean aggregates/);
-  assert.throws(() => planExplorerV1Query(spa("graph", {groupBy: ["source.id"]}), features({overrides: {graph: false}})), /graph view is not available/);
+  assert.throws(() => planExplorerV1Query(spa("graph", {groupBy: ["source.id"]}), features({overrides: {graph: false}})), /Graph view is not available/);
   assert.equal(planExplorerV1Query(spa("detail", {}), features({overrides: {count_exact: false}})).query.count, undefined);
   assert.throws(() => planExplorerV1Query(spa("detail", {}, undefined, {number: 1, size: 500}), features()), /at most 100 rows/);
 });
@@ -216,4 +216,42 @@ test("descriptor of a narrow host lists every unpromised feature", () => {
   const ids = descriptor.metadata.canonical.unsupported.map((item) => item.id);
   for (const id of ["view.aggregate", "view.graph", "view.aggregate_grid", "group.buckets", "service.export", "page.total_rows"]) assert.ok(ids.includes(id), id);
   assert.ok(!descriptor.fields.find((field) => field.id === "source.amount").aggregateFunctions.includes("buckets"));
+});
+
+test("display labels humanize wire defaults and retain publication labels and descriptions", async () => {
+  const doc = features();
+  doc.fields = doc.fields.map((field) => field.path === "name" ? {...field, label: "Product title", description: "The public product name."} : field);
+  const descriptor = toExplorerV1Descriptor(doc);
+  assert.equal(descriptor.fields.find((field) => field.id === "source.id").label, "Id");
+  assert.equal(descriptor.fields.find((field) => field.id === "source.due_on").label, "Due On");
+  assert.equal(descriptor.fields.find((field) => field.id === "source.name").label, "Product title");
+  assert.equal(descriptor.fields.find((field) => field.id === "source.name").metadata.description, "The public product name.");
+  const {fetch} = host({doc: () => doc, answer: (body) => Response.json(result(body.query, [col("id", "integer", "field", {field: "id"}), col("name", "string", "field", {field: "name"})], [[1, "Widget"]], {total_count: 1}))});
+  const response = await adapterFor(fetch).execute(spa("detail", {selected: ["source.id", "source.name"]}));
+  assert.deepEqual(response.columns.map((column) => column.label), ["Id", "Product title"]);
+  assert.deepEqual(descriptor.fields.find((field) => field.id === "source.due_on").metadata.canonical.dateShortcuts, ["today", "this_year"]);
+});
+
+test("availability helpers keep unsupported shared intent intact and refuse before querying", async () => {
+  const {assertExplorerRequestSupported, isExplorerFeatureAvailable, unsupportedCanonicalFeatures} = await import("../dist/index.js");
+  const doc = features({overrides: {recursive_filters: false, rollup: false, group_formats: false, buckets: false}});
+  const descriptor = toExplorerV1Descriptor(doc);
+  assert.equal(isExplorerFeatureAvailable(descriptor, "service.saved_views"), false);
+  assert.equal(isExplorerFeatureAvailable(descriptor, "view.graph"), true);
+  assert.deepEqual(unsupportedCanonicalFeatures({}), []);
+  const cases = [
+    spa("detail", {rowClickAction: "edit"}),
+    spa("aggregate", {groupBy: ["source.id"], rollup: true}),
+    spa("aggregate", {groupBy: ["source.name"], groupConfigs: {"source.name": {groupFormat: "text_prefix", prefixLength: 1}}}),
+    spa("detail", {}, {conjunction: "or", items: []}),
+    spa("detail", {}, {conjunction: "and", items: [{conjunction: "and", items: []}]}),
+    spa("graph", {graph: {measures: [{transform: {type: "running_total"}}]}})
+  ];
+  for (const request of cases) {
+    const before = structuredClone(request);
+    assert.throws(() => assertExplorerRequestSupported(descriptor, request), ExplorerIntentError);
+    assert.throws(() => planExplorerV1Query(request, doc), ExplorerIntentError);
+    assert.deepEqual(request, before);
+    assert.equal(assertExplorerRequestSupported({}, request), request);
+  }
 });

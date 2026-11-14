@@ -176,3 +176,26 @@ host services the features document advertises.
 `adapter.export(request, format)` downloads the full result through
 `queryExplorer` with the format's `Accept` media type and returns
 `{data: Blob, filename, contentType}`; the Detail profile refuses it.
+
+Canonical hosts and graceful absence:
+
+- `explorerFieldLabel(field)` preserves authored labels and humanizes wire-default
+  path/id labels (`unit_price` -> `Unit Price`, `id` -> `Id`). Both profiles use
+  it for descriptors and result columns; descriptions remain in
+  `field.metadata.description`. Scalar codecs and wire identities are unchanged.
+- `unsupportedCanonicalFeatures(descriptor)` returns the publication's stable
+  `{id, label, reason}` entries. `isExplorerFeatureAvailable(descriptor, id)`
+  drives controls; ordinary SPA descriptors pass through as available.
+- `assertExplorerRequestSupported(descriptor, request)` refuses unavailable
+  shared/saved intent without modifying it. Call before restoring and before
+  stripping or normalizing state. The query translators also apply this guard.
+  Render the refusal visibly and retain the original state.
+- Explorer field descriptors additionally publish
+  `metadata.canonical.{groupFormats,buckets,dateShortcuts}` from advertised field
+  capabilities. Filter group controls, rollup and export format controls must
+  follow the descriptor's unsupported entries and `metadata.canonical.supports`.
+  In particular text prefix groups and host graph transforms are unavailable.
+
+These APIs are additive. `auto` still selects canonical when its catalog exists;
+SPA service routes (saved views, actions, pages, editors, row refresh, SQL debug
+and localized descriptors) are not supplied by the canonical adapter.

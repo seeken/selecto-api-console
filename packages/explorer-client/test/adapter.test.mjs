@@ -133,3 +133,15 @@ test("a later profile strategy is chosen ahead of Detail when the host advertise
   assert.equal(adapter.binding("items").profile, "remote_query.v1");
   assert.equal(toCanonicalQuery(request(), metadata()).select.length, 3);
 });
+
+test("Detail labels and descriptions survive descriptor and result conversion", async () => {
+  const {toExplorerDescriptor, toExplorerResult, humanizeExplorerLabel} = await import("../dist/index.js");
+  const doc = metadata();
+  doc.fields = doc.fields.map((field) => ({...field, label: field.path, description: `About ${field.path}`}));
+  doc.fields[1].label = "Invoice total";
+  assert.equal(humanizeExplorerLabel("unit_price  USD"), "Unit Price Usd");
+  const descriptor = toExplorerDescriptor(doc);
+  assert.deepEqual(descriptor.fields.map((field) => field.label), ["Id", "Invoice total", "Large"]);
+  assert.equal(descriptor.fields[1].metadata.description, "About amount");
+  assert.deepEqual(toExplorerResult(result(), request(), doc).columns.map((column) => column.label), ["Id", "Invoice total", "Large"]);
+});
