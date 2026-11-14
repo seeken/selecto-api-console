@@ -137,3 +137,34 @@ fallback page) selects the host's SPA routes. Refusals (401, 403), server
 errors, network failures and malformed catalogs are thrown, so a canonical host
 that refuses or breaks is never silently downgraded. Builder images use it so a
 frontend talks canonical to every backend that publishes the mount.
+
+## `remote_query.explorer.v1`
+
+`createCanonicalHostAdapter` tries `explorerProfile` ahead of `detailProfile`
+(the default `profiles`). A host whose manifest lists
+`remote_query.explorer.v1` with `getExplorerFeatures` and `queryExplorer` is
+discovered through the `selecto.explorer-features` sidecar, bound to the
+manifest fingerprint, the catalog publication and the features `revision`;
+any drift after the UI loaded the domain is refused before a query
+(`stale_domain_fingerprint`, `stale_explorer_features`). Hosts without the
+profile stay Detail-only and list what they lack at
+`metadata.canonical.unsupported`.
+
+The descriptor (`toExplorerV1Descriptor`) offers the Detail, Aggregate and
+Graph views, the aggregate grid and export only as the host's `supports`
+promise them. `planExplorerV1Query` translates the SPA request: field and
+aggregate selections (aliases follow the SPA column ids, for example
+`sum_amount`), `all`/`any` filter groups (empty groups dropped), the ten date
+group formats, buckets (`parseBucketRanges` turns the SPA `bucketRanges` text
+into the structured inclusive ranges or steps), rollup (sorts dropped, group
+path order), the grid as `complete: true`, an exact count when
+`supports.count_exact`, segments, the time zone and exports. Anything the
+features document does not promise is refused locally. `toExplorerV1Response`
+returns SPA columns and rows by id, `rowMeta` drilldowns from `row_meta`
+(formatted keys keep their `groupFormat`, so a drilldown runs as the host's
+derived-group leaf), `totalRows` from `total_count` and client-side grid colour
+bounds. Decimals stay decimal strings; JSON numbers must be exact lexemes.
+
+`adapter.export(request, format)` downloads the full result through
+`queryExplorer` with the format's `Accept` media type and returns
+`{data: Blob, filename, contentType}`; the Detail profile refuses it.

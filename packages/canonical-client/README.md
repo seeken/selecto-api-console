@@ -68,3 +68,13 @@ for their exact names). Only `duplicate-state-slot` belongs to the broader
 `invalid-nested-state` family; every other family equals its reason. Unknown
 errors stay unclassified. Products can expose these scalar values beside the
 visible message; neither message wording nor an expected test result supplies them.
+
+`remote_query.explorer.v1`: `explorerFeatures(manifest, signal, entry)` reads
+and validates the `selecto.explorer-features` sidecar (`assertExplorerFeatures`,
+bound to the manifest fingerprint and the catalog entry);
+`queryExplorer(manifest, features, query, {signal, requestId})` sends the closed
+`selecto.explorer-query` v1 envelope (`buildExplorerRequest`, carrying the
+features revision) and validates the result (`assertExplorerResult`: binding,
+column roles, scalar codecs, `row_meta`, `complete`, `total_count`, page) and
+exact numeric lexemes; `exportExplorer(manifest, features, query, format)`
+returns the download's bytes, media type and attachment filename.

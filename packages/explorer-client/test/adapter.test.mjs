@@ -36,7 +36,7 @@ test("descriptor lists unsupported features and advertised range operators", asy
   const {fetch} = host();
   const adapter = createCanonicalHostAdapter({baseUrl: "/api", catalogPath: "/api/catalog", fetch});
   assert.equal(adapter.transport, "canonical");
-  assert.deepEqual(adapter.profiles, ["remote_query.v1"]);
+  assert.deepEqual(adapter.profiles, ["remote_query.explorer.v1", "remote_query.v1"]);
   const [descriptor] = await adapter.listDomains();
   assert.deepEqual(descriptor.capabilities, ["detail"]);
   assert.ok(descriptor.fields[0].filterOperators.includes("between"));

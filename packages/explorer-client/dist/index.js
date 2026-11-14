@@ -343,6 +343,491 @@ export const detailProfile = Object.freeze({
   toResponse(envelope, request, context) { return toExplorerResult(envelope, request, context.metadata); },
 });
 
+// ---- remote_query.explorer.v1 strategy (harness docs/remote_query_explorer.md 6.6) ----
+
+const explorerOperatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", between: "between", in: "in", not_in: "not_in", contains: "text_contains", starts_with: "starts_with", ends_with: "ends_with", date_shortcut: "date_shortcut", is_null: "is_null", is_not_null: "not_null"};
+const explorerReverseOperators = Object.fromEntries(Object.entries(explorerOperatorMap).map(([spa, op]) => [op, spa]));
+const explorerFunctionLabel = {count: "Count", count_distinct: "Distinct count", sum: "Sum", avg: "Average", min: "Min", max: "Max", true_count: "True count", false_count: "False count", true_percentage: "True percentage"};
+const explorerGroupFormatIds = new Set(["day", "day_hour", "week", "month", "quarter", "year", "month_of_year", "day_of_month", "day_of_week", "hour"]);
+const explorerBucketFormats = {buckets: "numeric", age_buckets: "elapsed_days", custom_buckets: "relative_days", year_buckets: "year"};
+const explorerBucketAggregates = {buckets: "numeric", age_buckets: "elapsed_days"};
+const explorerServiceLabels = [["saved_views", "Saved views"], ["actions", "Actions"], ["canned_pages", "Canned pages"], ["record_editors", "Record editors"], ["row_refresh", "Row refresh"], ["diagnostics", "SQL debug"], ["localization", "Localized descriptors"]];
+
+function spaFieldType(type) {
+  return type === "string" ? "text" : type === "naive_datetime" || type === "utc_datetime" ? "datetime" : type;
+}
+function explorerAliasFor(text, used) {
+  let base = String(text).replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 56) || "c";
+  if (!/^[A-Za-z_]/.test(base)) base = `c_${base}`.slice(0, 56);
+  let alias = base, n = 1;
+  while (used.has(alias)) alias = `${base}_${++n}`;
+  used.add(alias);
+  return alias;
+}
+
+/**
+ * The SPA bucket text grammar (`bucketRanges`) as a section 5.3 bucket spec:
+ * `a-b`, `a+`, `-b`, `n`, `*\/n` (steps for numeric and year buckets) and, for
+ * relative day buckets, `today`, `yesterday`, `tomorrow`. Labels are the text
+ * of each part. Hosts only ever see the structured form.
+ */
+export function parseBucketRanges(text, kind, options = {}) {
+  if (typeof text !== "string" || !text.trim()) refuse("bucketRanges", "bucket ranges are required", "invalid_query");
+  const value = text.trim();
+  const step = /^\*\/([1-9]\d{0,8})$/.exec(value);
+  if (step) {
+    if (options.allowStep === false || !["numeric", "year"].includes(kind)) refuse("bucketRanges", "step buckets apply to numeric and year buckets only", "invalid_query");
+    return {kind, step: Number(step[1])};
+  }
+  const ranges = value.split(",").map((part) => part.trim()).map((part) => {
+    if (kind === "relative_days" && ["today", "yesterday", "tomorrow"].includes(part)) {
+      const day = {today: 0, yesterday: -1, tomorrow: 1}[part];
+      return {min: day, max: day, label: part};
+    }
+    let match;
+    if ((match = /^(\d{1,15})$/.exec(part))) return {min: Number(match[1]), max: Number(match[1]), label: part};
+    if ((match = /^(\d{1,15})-(\d{1,15})$/.exec(part))) {
+      const [min, max] = [Number(match[1]), Number(match[2])];
+      if (min > max) refuse("bucketRanges", `range ${part} is reversed`, "invalid_query");
+      return {min, max, label: part};
+    }
+    if ((match = /^(\d{1,15})\+$/.exec(part))) return {min: Number(match[1]), label: part};
+    if ((match = /^-(\d{1,15})$/.exec(part))) return {max: Number(match[1]), label: part};
+    refuse("bucketRanges", `unrecognized bucket range ${JSON.stringify(part)}`, "invalid_query");
+  });
+  const labels = new Set(ranges.map((range) => range.label));
+  if (labels.size !== ranges.length || labels.has("Other")) refuse("bucketRanges", "bucket labels must be unique and not Other", "invalid_query");
+  if (options.maxBuckets !== undefined && ranges.length > options.maxBuckets) refuse("bucketRanges", `at most ${options.maxBuckets} ranges are allowed`, "invalid_query");
+  return {kind, ranges};
+}
+
+/** Explorer features of the SPA protocol that this explorer.v1 host does not promise. */
+export function unsupportedExplorerV1Features(features) {
+  const supports = features.supports;
+  const list = [];
+  const flag = (on, id, label, reason = "not advertised by this host's explorer features") => { if (!on) list.push({id, label, reason}); };
+  flag(supports.aggregate, "view.aggregate", "Aggregate view");
+  flag(supports.graph, "view.graph", "Graph view");
+  flag(supports.grid, "view.aggregate_grid", "Aggregate grid");
+  flag(supports.rollup, "aggregate.rollup", "Rollup subtotals");
+  flag(supports.recursive_filters, "filters.groups", "OR and nested filter groups");
+  flag(supports.nested, "fields.collections", "Nested collection columns");
+  flag(supports.group_formats, "group.formats", "Date group formats");
+  flag(supports.buckets, "group.buckets", "Bucket groups and bucket measures");
+  flag(supports.boolean_aggregates, "aggregate.boolean", "True/false counts and percentages");
+  flag(supports.text_ops, "operator.text", "Text filter operators (contains, starts with, ends with)");
+  flag(supports.date_shortcuts, "operator.date_shortcut", "Date shortcut filters");
+  flag(supports.count_exact, "page.total_rows", "Total row count", "no exact count; paging uses has_more");
+  flag(supports.export.length > 0, "service.export", "Export");
+  list.push({id: "group.text_prefix", label: "Text prefix groups", reason: "not part of remote_query.explorer.v1"});
+  list.push({id: "graph.series_planning", label: "Host-planned graph series and transforms", reason: "series are built in the browser from the aggregate rows"});
+  for (const [id, label] of explorerServiceLabels) if (!Object.hasOwn(features.services ?? {}, id)) list.push({id: `service.${id}`, label, reason: "host service not advertised"});
+  return list;
+}
+
+/** The SPA domain descriptor for an explorer.v1 features document (hook `describe`). */
+export function toExplorerV1Descriptor(features) {
+  canonical.assertExplorerFeatures(features);
+  const supports = features.supports;
+  const collections = new Map(features.collections.map((collection) => [collection.id, collection]));
+  const fields = features.fields.filter((field) => field.collection === null || supports.nested).map((field) => {
+    const aggregateFunctions = field.aggregates.filter((name) => name !== "bucket_count" && (supports.boolean_aggregates || !name.startsWith("true_") && name !== "false_count"));
+    if (supports.buckets) for (const [spa, kind] of Object.entries(explorerBucketAggregates)) if (field.buckets.includes(kind)) aggregateFunctions.push(spa);
+    const descriptor = {id: field.id, label: field.label, type: spaFieldType(field.type), encoding: field.encoding,
+      selectable: field.selectable, sortable: field.sortable, groupable: field.groupable, aggregatable: aggregateFunctions.length > 0,
+      aggregateFunctions, filterOperators: field.operators.map((op) => explorerReverseOperators[op]).filter(Boolean)};
+    if (field.description) descriptor.metadata = {description: field.description};
+    if (Array.isArray(field.choices)) descriptor.choices = field.choices;
+    if (field.picker_hidden === true) descriptor.pickerHidden = true;
+    if (field.collection !== null) {
+      const collection = collections.get(field.collection);
+      descriptor.relationship = {path: [collection.path], cardinality: "many", collectionId: collection.id, collectionLabel: collection.label, targetSchema: collection.id, field: field.path.slice(collection.path.length + 1)};
+    }
+    return descriptor;
+  });
+  const byPath = new Map(features.fields.map((field) => [field.path, field.id]));
+  const id = (path) => byPath.get(path) ?? path;
+  const views = [];
+  if (supports.detail) views.push({id: "detail", kind: "detail", label: "Detail"});
+  if (supports.aggregate) views.push({id: "aggregate", kind: "aggregate", label: "Aggregate"});
+  if (supports.graph) views.push({id: "graph", kind: "graph", label: "Graph"});
+  const capabilities = views.map((view) => view.id);
+  if (supports.grid) capabilities.push("aggregate_grid");
+  if (supports.export.length) capabilities.push("export");
+  const segments = features.query_library.segments ?? [];
+  if (segments.length) capabilities.push("query_library");
+  const protocolFeatures = ["column_occurrences", "null_handling_auto"];
+  if (features.fields.some((field) => field.operators.includes("not_in"))) protocolFeatures.push("not_in");
+  if (supports.boolean_aggregates) protocolFeatures.push("true_percentage");
+  if (supports.grid) protocolFeatures.push("grid_colorize");
+  if (supports.grid && supports.export.length) protocolFeatures.push("grid_export");
+  if (features.links?.api_console) protocolFeatures.push("api_console");
+  const defaults = features.default ?? {};
+  const descriptor = {
+    schema: "selecto.spa.domain-descriptor/v1", schemaVersion: 1,
+    id: features.domain.id, name: features.label ?? features.domain.id, source: features.label ?? features.domain.id,
+    capabilities, protocolFeatures, fields, views,
+    defaults: {selected: (defaults.select ?? []).filter((path) => typeof path === "string").map(id), orderBy: (defaults.order_by ?? []).map((order) => ({field: id(order.field), direction: order.direction ?? "asc"})),
+      groupBy: (defaults.group_by ?? []).filter((path) => typeof path === "string").map(id), aggregates: [], rollup: defaults.rollup !== false, preventDenormalization: true},
+    release: {schema: "selecto.domain-publication/v1", id: features.domain.publication, version: features.domain.fingerprint, fingerprint: features.domain.fingerprint, status: "published"},
+    metadata: {canonical: {transport: "canonical", profile: canonical.EXPLORER_PROFILE, fingerprint: features.domain.fingerprint, publication: features.domain.publication, revision: features.revision,
+      supports: {...supports, export: [...supports.export]}, limits: {...features.limits}, unsupported: unsupportedExplorerV1Features(features)}},
+  };
+  if (segments.length) descriptor.queryLibrary = {
+    segments: segments.map((segment) => ({id: segment.name, label: segment.label ?? segment.name, parameters: (segment.parameters ?? []).map((parameter) => ({id: parameter.name, label: parameter.label ?? parameter.name, type: parameter.type ?? "string", required: parameter.required === true}))})),
+    views: (features.query_library.views ?? []).map((view) => ({id: view.name, label: view.label ?? view.name, segments: [...(view.segments ?? [])], preset: {selected: descriptor.defaults.selected.slice(), orderBy: []}})),
+  };
+  if (features.links?.api_console) descriptor.artifacts = {apiConsole: features.links.api_console};
+  return descriptor;
+}
+
+function explorerFilterValue(value, field, path) {
+  if (field.type === "integer") {
+    if (Number.isSafeInteger(value)) return value;
+    if (typeof value === "string" && /^-?(0|[1-9]\d*)$/.test(value.trim()) && Number.isSafeInteger(Number(value.trim()))) return Number(value.trim());
+    refuse(path, "expected an integer within the exact JSON number range", "invalid_query");
+  }
+  if (field.type === "decimal") {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && /^-?\d{1,30}(\.\d{1,30})?$/.test(value.trim())) return value.trim();
+    refuse(path, "expected a decimal number", "invalid_query");
+  }
+  if (field.type === "boolean") {
+    if (typeof value === "boolean") return value;
+    if (value === "true" || value === "false") return value === "true";
+    refuse(path, "expected true or false", "invalid_query");
+  }
+  if (typeof value !== "string" || (value === "" && field.type !== "string")) refuse(path, "expected a text value", "invalid_query");
+  if (field.type === "naive_datetime" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return `${value}:00`;
+  return value;
+}
+
+/**
+ * The SPA query request as a section 3 query plus the column plan that maps the
+ * explorer result back onto SPA column ids (hook `translate`). Everything the
+ * features document does not promise is refused here, before any request.
+ */
+export function planExplorerV1Query(request, features, options = {}) {
+  keys(request, ["schema", "domainId", "view", "state", "filters", "page", "presentation", "publication", "exportShape"], "request");
+  if (request.schema !== "selecto.spa.query-request/v1") refuse("request.schema", "unknown SPA request version", "invalid_query");
+  if (request.domainId !== features.domain.id) refuse("request.domainId", "does not match publication", "invalid_query");
+  if (request.publication !== undefined) {
+    keys(request.publication, ["fingerprint", "publication"], "request.publication");
+    if (request.publication.fingerprint !== features.domain.fingerprint || (request.publication.publication !== undefined && request.publication.publication !== features.domain.publication)) refuse("request.publication", "publication changed; reload the domain", "stale_domain_fingerprint");
+  }
+  const supports = features.supports, limits = features.limits;
+  const view = request.view;
+  if (!["detail", "aggregate", "graph"].includes(view) || !supports[view]) refuse("request.view", `the ${view} view is not available on this host`);
+  const state = record(request.state, "request.state");
+  keys(state, ["selected", "preventDenormalization", "rowClickAction", "fieldConfigs", "orderBy", "groupBy", "groupConfigs", "rollup", "aggregateGrid", "aggregateGridColorize", "aggregateGridColorScale", "columns", "aggregates", "graph", "queryLibrary"], "request.state");
+  if (state.rowClickAction && state.rowClickAction !== "__default_modal__") refuse("request.state.rowClickAction", "configured row actions are unavailable");
+  const byId = new Map(features.fields.map((field) => [field.id, field]));
+  const field = (id, path) => { const value = byId.get(id); if (!value) refuse(path, `unresolved field ${JSON.stringify(id)}`, "invalid_field"); return value; };
+  const query = {select: [], row_format: "arrays"};
+  const columns = [];
+  const used = new Set();
+
+  // Filters: the SPA tree as ANDed nodes; empty groups are dropped (Spa.pm).
+  let leaves = 0;
+  function node(item, depth, path) {
+    if (item && typeof item === "object" && Object.hasOwn(item, "items")) {
+      keys(item, ["conjunction", "items", "id"], path);
+      if (!["and", "or"].includes(item.conjunction ?? "and") || !Array.isArray(item.items)) refuse(path, "invalid filter group", "invalid_query");
+      const parts = item.items.map((child, i) => node(child, depth + 1, `${path}.items.${i}`)).filter(Boolean);
+      if (!parts.length) return null;
+      if (parts.length === 1) return parts[0];
+      if (!supports.recursive_filters) refuse(path, "OR and nested filter groups are not available on this host");
+      if (depth > limits.max_filter_depth) refuse(path, `filters nest deeper than ${limits.max_filter_depth} groups`, "invalid_query");
+      return {[(item.conjunction ?? "and") === "or" ? "any" : "all"]: parts};
+    }
+    keys(item, ["id", "field", "operator", "value", "valueTo", "promoted", "groupConfig"], path);
+    if (++leaves > limits.max_filters) refuse("request.filters", `more than ${limits.max_filters} filters`, "invalid_query");
+    const target = field(item.field, `${path}.field`);
+    if (!target.filterable && !(item.groupConfig?.groupFormat)) refuse(`${path}.field`, "field is not filterable", "invalid_field");
+    const config = item.groupConfig && !isEmpty(item.groupConfig) ? record(item.groupConfig, `${path}.groupConfig`) : null;
+    if (config) {
+      // A drilldown on a formatted group: the derived-group leaf (3.3).
+      const extra = Object.keys(config).filter((key) => !["groupFormat", "alias", "format"].includes(key));
+      if (extra.length || !explorerGroupFormatIds.has(config.groupFormat)) refuse(`${path}.groupConfig`, "only date group formats can be drilled into on this profile");
+      if (!["equals", "is_null"].includes(item.operator)) refuse(`${path}.operator`, "a group drilldown compares with equals or is null", "invalid_query");
+      if (item.operator === "is_null") return {field: target.path, format: config.groupFormat, op: "is_null"};
+      if (typeof item.value !== "string") refuse(`${path}.value`, "a formatted group value is text", "invalid_query");
+      return {field: target.path, format: config.groupFormat, op: "eq", value: item.value};
+    }
+    const op = explorerOperatorMap[item.operator];
+    if (!op || !target.operators.includes(op)) refuse(`${path}.operator`, `operator ${item.operator} is not available for ${target.label}`);
+    if (item.valueTo !== undefined && item.valueTo !== null && item.valueTo !== "" && op !== "between") refuse(`${path}.valueTo`, "only between carries an end value", "invalid_query");
+    const leaf = {field: target.path, op};
+    if (op === "between") {
+      leaf.value = explorerFilterValue(item.value, target, `${path}.value`);
+      leaf.end = explorerFilterValue(item.valueTo, target, `${path}.valueTo`);
+    } else if (op === "in" || op === "not_in") {
+      const values = Array.isArray(item.value) ? item.value : typeof item.value === "string" ? item.value.split(",").map((part) => part.trim()).filter(Boolean) : null;
+      if (!values?.length) refuse(`${path}.value`, "a non-empty list is required", "invalid_query");
+      if (values.length > limits.max_filter_values) refuse(`${path}.value`, `at most ${limits.max_filter_values} values`, "invalid_query");
+      leaf.value = values.map((value, i) => explorerFilterValue(value, target, `${path}.value.${i}`));
+    } else if (op === "date_shortcut") {
+      if (!target.date_shortcuts.includes(item.value)) refuse(`${path}.value`, "unknown date shortcut", "invalid_query");
+      leaf.value = item.value;
+    } else if (op !== "is_null" && op !== "not_null") {
+      leaf.value = explorerFilterValue(item.value, target, `${path}.value`);
+    } else if (item.value !== undefined && item.value !== null && item.value !== "") refuse(`${path}.value`, "null test cannot carry a value", "invalid_query");
+    return leaf;
+  }
+  const root = node(record(request.filters, "request.filters"), 0, "request.filters");
+  query.filters = !root ? [] : Object.hasOwn(root, "all") ? root.all : [root];
+
+  if (state.queryLibrary !== undefined && !isEmpty(state.queryLibrary)) {
+    keys(state.queryLibrary, ["view", "segments", "parameters"], "request.state.queryLibrary");
+    const known = new Set((features.query_library.segments ?? []).map((segment) => segment.name));
+    const names = [...new Set([...(state.queryLibrary.segments ?? []), ...((features.query_library.views ?? []).find((item) => item.name === state.queryLibrary.view)?.segments ?? [])])];
+    if (state.queryLibrary.view !== undefined && !(features.query_library.views ?? []).some((item) => item.name === state.queryLibrary.view)) refuse("request.state.queryLibrary.view", "unknown query library view", "invalid_query");
+    names.forEach((name) => { if (!known.has(name)) refuse("request.state.queryLibrary.segments", `unknown segment ${JSON.stringify(name)}`, "invalid_query"); });
+    if (names.length) query.segments = names;
+    if (state.queryLibrary.parameters !== undefined && !isEmpty(state.queryLibrary.parameters)) query.parameters = {...record(state.queryLibrary.parameters, "request.state.queryLibrary.parameters")};
+  }
+  if (request.presentation !== undefined) {
+    keys(request.presentation, ["timezone", "locale"], "request.presentation");
+    if (request.presentation.timezone !== undefined) query.timezone = canonical.assertTimezone(request.presentation.timezone);
+  }
+  keys(request.page, ["number", "size"], "request.page");
+  integer(request.page.number, "request.page.number", 1); integer(request.page.size, "request.page.size", 1);
+  const pageLimit = request.page.size, pageOffset = (request.page.number - 1) * request.page.size;
+  const zone = query.timezone ?? "UTC";
+  const instant = (target, path) => { if (target.type === "utc_datetime" && supports.timezones === "utc" && zone !== "UTC") refuse(path, "this host converts instants to UTC only"); };
+
+  let grid = false, rollup = false, groupIds = [], aggregateIds = [];
+  if (view === "detail") {
+    if (state.preventDenormalization === false && features.fields.some((item) => item.collection !== null)) refuse("request.state.preventDenormalization", "denormalized to-many rows are unavailable; collections are nested");
+    if (!Array.isArray(state.selected) || !state.selected.length || new Set(state.selected).size !== state.selected.length) refuse("request.state.selected", "expected unique non-empty fields", "invalid_query");
+    let occurrences = state.selected.map((id) => ({field: id}));
+    if (state.columns !== undefined && !isEmpty(state.columns)) {
+      if (!Array.isArray(state.columns)) refuse("request.state.columns", "expected an array", "invalid_query");
+      const distinct = [...new Set(state.columns.map((column) => record(column, "request.state.columns").field))];
+      if (distinct.length !== state.selected.length || distinct.some((id, i) => id !== state.selected[i])) refuse("request.state.columns", "columns must list the selected fields", "invalid_query");
+      occurrences = state.columns;
+    }
+    const count = new Map();
+    const nested = new Map();
+    for (const occurrence of occurrences) {
+      keys(occurrence, ["field", "alias", "format"], "request.state.columns");
+      const target = field(occurrence.field, "request.state.selected");
+      if (target.collection !== null && !supports.nested) refuse("request.state.selected", "nested collection columns are not available on this host");
+      if (!target.selectable) refuse("request.state.selected", `${target.label} is not selectable`, "invalid_field");
+      const label = typeof occurrence.alias === "string" && occurrence.alias.trim() ? occurrence.alias : target.label;
+      if (target.collection !== null) {
+        let slot = nested.get(target.collection);
+        if (!slot) {
+          const collection = features.collections.find((item) => item.id === target.collection);
+          slot = {children: [], column: {kind: "collection", collection, wire: null, spa: {id: collection.id, label: collection.label, type: "nested", nestedFields: []}}};
+          nested.set(target.collection, slot);
+          query.select.push(slot.children);
+          slot.column.wire = collection.path;
+          columns.push(slot.column);
+        }
+        if (slot.children.includes(target.path)) continue;
+        slot.children.push(target.path);
+        slot.column.spa.nestedFields.push({id: target.id, key: target.id, label, type: spaFieldType(target.type), encoding: target.encoding, nullable: target.nullable});
+        continue;
+      }
+      const n = (count.get(target.id) ?? 0) + 1;
+      count.set(target.id, n);
+      const wire = n === 1 && !used.has(target.path) ? target.path : explorerAliasFor(`${target.path}_${n}`, used);
+      used.add(wire);
+      query.select.push(wire === target.path ? target.path : {field: target.path, alias: wire});
+      const spa = {id: n === 1 ? target.id : `${target.id}~${n}`, label, type: spaFieldType(target.type), encoding: target.encoding};
+      if (typeof occurrence.format === "string") spa.format = occurrence.format;
+      if (n > 1) Object.assign(spa, {field: target.id, occurrence: n});
+      columns.push({kind: "field", field: target, wire, spa});
+    }
+    if (!Array.isArray(state.orderBy)) refuse("request.state.orderBy", "expected an array", "invalid_query");
+    query.order_by = state.orderBy.map((order, i) => {
+      keys(order, ["field", "direction"], `request.state.orderBy.${i}`);
+      const target = field(order.field, `request.state.orderBy.${i}.field`);
+      if (!target.sortable) refuse(`request.state.orderBy.${i}.field`, `${target.label} is not sortable`, "invalid_field");
+      return {field: target.path, direction: order.direction === "desc" ? "desc" : "asc"};
+    });
+    query.limit = pageLimit; query.offset = pageOffset;
+    if (supports.count_exact && !options.export) query.count = "exact";
+  } else {
+    const groupBy = state.groupBy ?? [];
+    if (!Array.isArray(groupBy) || new Set(groupBy).size !== groupBy.length) refuse("request.state.groupBy", "expected unique group fields", "invalid_query");
+    if (groupBy.length > limits.max_group_by) refuse("request.state.groupBy", `at most ${limits.max_group_by} groups`, "invalid_query");
+    const aggregates = state.aggregates ?? [];
+    if (!Array.isArray(aggregates)) refuse("request.state.aggregates", "expected an array", "invalid_query");
+    if (!groupBy.length && !aggregates.length) refuse("request.state", "choose a group or an aggregate", "invalid_query");
+    const groupConfigs = state.groupConfigs ?? {};
+    groupIds = groupBy;
+    const groupEntries = groupBy.map((id, i) => {
+      const target = field(id, `request.state.groupBy.${i}`);
+      if (!target.groupable) refuse(`request.state.groupBy.${i}`, `${target.label} cannot be grouped`, "invalid_field");
+      const config = groupConfigs[id] ?? {};
+      const spa = {id, label: typeof config.alias === "string" && config.alias.trim() ? config.alias : target.label, type: spaFieldType(target.type), encoding: target.encoding};
+      if (typeof config.format === "string") spa.format = config.format;
+      const format = config.groupFormat;
+      if (!format) { used.add(target.path); return {entry: target.path, wire: target.path, column: {kind: "group", field: target, wire: target.path, spa}}; }
+      const alias = explorerAliasFor(`${target.path}_${format}`, used);
+      if (explorerGroupFormatIds.has(format)) {
+        if (!supports.group_formats || !target.group_formats.includes(format)) refuse(`request.state.groupConfigs.${id}.groupFormat`, `grouping by ${format} is not available for ${target.label}`);
+        instant(target, `request.state.groupConfigs.${id}`);
+        Object.assign(spa, {type: "text", encoding: "string"}); delete spa.format;
+        return {entry: {field: target.path, alias, format}, wire: alias, column: {kind: "group", field: target, wire: alias, format, spa}};
+      }
+      const kind = explorerBucketFormats[format];
+      if (!kind) refuse(`request.state.groupConfigs.${id}.groupFormat`, `group format ${format} is not part of remote_query.explorer.v1`);
+      if (!supports.buckets || !target.buckets.includes(kind)) refuse(`request.state.groupConfigs.${id}.groupFormat`, `${format} are not available for ${target.label}`);
+      instant(target, `request.state.groupConfigs.${id}`);
+      Object.assign(spa, {type: "text", encoding: "string"}); delete spa.format;
+      return {entry: {field: target.path, alias, buckets: parseBucketRanges(config.bucketRanges, kind, {maxBuckets: limits.max_buckets})}, wire: alias, column: {kind: "group", field: target, wire: alias, bucket: true, spa}};
+    });
+    if (groupEntries.length) query.group_by = groupEntries.map((group) => group.entry);
+    for (const group of groupEntries) { query.select.push(typeof group.entry === "string" ? group.entry : {group: group.wire}); columns.push(group.column); }
+    if (aggregates.length > limits.max_aggregates) refuse("request.state.aggregates", `at most ${limits.max_aggregates} measures`, "invalid_query");
+    const spaIds = new Set(groupBy);
+    for (const [i, item] of aggregates.entries()) {
+      keys(item, ["field", "function", "alias", "format", "ignoreNulls", "bucketRanges"], `request.state.aggregates.${i}`);
+      const target = field(item.field, `request.state.aggregates.${i}.field`);
+      const explicit = typeof item.alias === "string" && item.alias !== "";
+      const id = explicit ? item.alias : `${item.function}_${item.field.replace(/\./g, "_")}`;
+      if (spaIds.has(id) || byId.has(id)) refuse(`request.state.aggregates.${i}.alias`, "duplicate aggregate alias", "invalid_query");
+      spaIds.add(id); aggregateIds.push({id, function: item.function});
+      const bucketKind = explorerBucketAggregates[item.function];
+      if (bucketKind) {
+        if (!supports.buckets || !target.buckets.includes(bucketKind)) refuse(`request.state.aggregates.${i}.function`, `${item.function} are not available for ${target.label}`);
+        instant(target, `request.state.aggregates.${i}`);
+        const spec = parseBucketRanges(item.bucketRanges, bucketKind, {allowStep: false, maxBuckets: limits.max_buckets});
+        const alias = explorerAliasFor(id, used);
+        query.select.push({aggregate: "bucket_count", field: target.path, alias, buckets: spec});
+        const prefix = explicit ? item.alias : target.label;
+        spec.ranges.forEach((range, n) => {
+          const text = item.function === "age_buckets" ? (range.label === "1" ? "1 day" : `${range.label} days`) : range.label;
+          columns.push({kind: "aggregate", wire: `${alias}__bucket_${n + 1}`, spa: {id: `${id}__bucket_${n + 1}`, label: `${prefix}: ${text}`, type: "integer", encoding: "json"}});
+        });
+        continue;
+      }
+      const name = item.function;
+      if (!explorerFunctionLabel[name] || !target.aggregates.includes(name)) refuse(`request.state.aggregates.${i}.function`, `${name} is not available for ${target.label}`);
+      if (name.startsWith("true_") || name === "false_count") { if (!supports.boolean_aggregates) refuse(`request.state.aggregates.${i}.function`, "boolean aggregates are not available on this host"); }
+      const alias = explorerAliasFor(id, used);
+      const selection = {aggregate: name, field: target.path, alias};
+      if (item.ignoreNulls !== undefined && item.ignoreNulls !== false) {
+        if (name !== "sum" || (item.ignoreNulls !== true && item.ignoreNulls !== "auto")) refuse(`request.state.aggregates.${i}.ignoreNulls`, "null handling applies to sums only", "invalid_query");
+        selection.ignore_nulls = "auto";
+      }
+      query.select.push(selection);
+      const spa = {id, label: explicit ? item.alias : `${explorerFunctionLabel[name]} of ${target.label}`, type: ["count", "count_distinct", "true_count", "false_count"].includes(name) ? "integer" : ["avg", "true_percentage"].includes(name) ? "decimal" : spaFieldType(target.type)};
+      if (typeof item.format === "string") spa.format = item.format;
+      columns.push({kind: "aggregate", wire: alias, spa});
+    }
+    if (query.select.length > limits.max_select) refuse("request.state", `at most ${limits.max_select} result columns`, "invalid_query");
+    grid = view === "aggregate" && state.aggregateGrid === true;
+    if (grid) {
+      if (!supports.grid) refuse("request.state.aggregateGrid", "the aggregate grid is not available on this host");
+      if (groupBy.length !== 2 || aggregates.length !== 1 || explorerBucketAggregates[aggregates[0].function]) refuse("request.state.aggregateGrid", "the grid needs two groups and one measure", "invalid_query");
+    }
+    rollup = view === "aggregate" && !grid && groupBy.length > 0 && state.rollup !== false;
+    if (rollup && !supports.rollup) rollup = false;
+    // Sorts name a group or a measure; a rollup keeps group-path order (6.1).
+    const orderBy = Array.isArray(state.orderBy) ? state.orderBy : [];
+    const wireFor = new Map([...columns.filter((column) => column.kind === "group").map((column) => [column.spa.id, column.wire]), ...columns.filter((column) => column.kind === "aggregate").map((column) => [column.spa.id, column.wire])]);
+    query.order_by = rollup ? [] : orderBy.filter((order) => wireFor.has(order?.field)).slice(0, limits.max_orders).map((order) => ({field: wireFor.get(order.field), direction: order.direction === "desc" ? "desc" : "asc"}));
+    if (groupBy.length) {
+      if (rollup) query.rollup = true;
+      if (grid) { query.complete = true; query.limit = Math.min(limits.max_groups, limits.max_limit); query.offset = 0; }
+      else { query.limit = pageLimit; query.offset = pageOffset; if (!rollup && supports.count_exact && !options.export) query.count = "exact"; }
+    } else { query.limit = pageLimit; query.offset = pageOffset; }
+  }
+  if (query.select.length > limits.max_select) refuse("request.state", `at most ${limits.max_select} result columns`, "invalid_query");
+  if (!options.export && query.limit > limits.max_limit) refuse("request.page.size", `at most ${limits.max_limit} rows per page`, "invalid_query");
+  if (!options.export && query.offset > limits.max_offset) refuse("request.page", `pages beyond row ${limits.max_offset} are unavailable`, "invalid_query");
+  if (!query.filters.length) delete query.filters;
+  if (!query.order_by?.length) delete query.order_by;
+  if (options.export) {
+    const shape = request.exportShape ?? "rows";
+    if (!["rows", "grid"].includes(shape)) refuse("request.exportShape", "unknown export shape", "invalid_query");
+    if (shape === "grid" && !grid) refuse("request.exportShape", "the grid shape exports the aggregate grid", "invalid_query");
+    delete query.count; delete query.complete; delete query.limit; delete query.offset;
+    if (shape === "grid") delete query.rollup;
+    query.export = {all_rows: true, shape};
+  } else if (request.exportShape !== undefined) refuse("request.exportShape", "export shapes apply to downloads only", "invalid_query");
+  return {query, columns, view, grid, rollup, groupIds, aggregateIds, page: {number: request.page.number, size: request.page.size}};
+}
+
+/** `translate` for remote_query.explorer.v1: the query object only. */
+export function toExplorerV1Query(request, features, options = {}) { return planExplorerV1Query(request, features, options).query; }
+
+function explorerGridColor(rows, measure, scale) {
+  const values = rows.map((row) => row[measure]).map((value) => typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN).filter(Number.isFinite);
+  const positive = values.filter((value) => value > 0);
+  return {scale: scale === "log" ? "log" : "linear", measure, minimum: values.length ? Math.min(...values) : null, maximum: values.length ? Math.max(...values) : null, minimumPositive: positive.length ? Math.min(...positive) : null};
+}
+
+/** `toResponse`: the explorer result as a `selecto.spa.query-response/v1` (6.6). */
+export function toExplorerV1Response(envelope, request, features) {
+  const plan = planExplorerV1Query(request, features);
+  canonical.assertExplorerResult(envelope, {features, query: plan.query});
+  const data = envelope.data;
+  if (data.columns.length !== plan.columns.length) throw new CanonicalWireError("response.columns", "result columns differ from the requested selection");
+  const byPath = new Map(features.fields.map((field) => [field.path, field]));
+  const spaColumnFor = new Map();
+  const columns = plan.columns.map((column, i) => {
+    const wire = data.columns[i];
+    if (wire.id !== column.wire) throw new CanonicalWireError(`response.columns.${i}`, "column differs from the requested selection");
+    const spa = {...column.spa};
+    if (column.kind !== "collection") {
+      if (!column.bucket && !column.format) spa.type = spaFieldType(wire.type);
+      spa.encoding = wire.encoding;
+    }
+    spaColumnFor.set(wire.id, spa.id);
+    return spa;
+  });
+  const rows = data.rows.map((row) => Object.fromEntries(plan.columns.map((column, i) => {
+    const value = Array.isArray(row) ? row[i] : row[data.columns[i].id];
+    if (column.kind !== "collection") return [columns[i].id, value];
+    const children = data.subtables[data.columns[i].id].columns;
+    return [columns[i].id, value.map((child) => Object.fromEntries(columns[i].nestedFields.map((nestedField, j) => [nestedField.id, Array.isArray(child) ? child[j] : child[children[j]]])))];
+  })));
+  const response = {schema: "selecto.spa.query-response/v1", columns, rows,
+    page: {...plan.page, ...(data.total_count !== undefined ? {totalRows: data.total_count} : {})},
+    metadata: {canonical: {profile: canonical.EXPLORER_PROFILE, fingerprint: features.domain.fingerprint, publication: features.domain.publication, revision: features.revision, hasMore: data.page.has_more, ...(data.complete ? {complete: true} : {})}}};
+  if (Array.isArray(data.row_meta)) response.rowMeta = data.row_meta.map((meta) => ({rollupLevel: meta.level, rollupKind: meta.kind,
+    drilldowns: meta.drilldown === null ? [] : [{columnId: spaColumnFor.get(meta.drilldown.column) ?? meta.drilldown.column,
+      constraints: meta.drilldown.filters.map((leaf) => {
+        const target = byPath.get(leaf.field);
+        if (!target) throw new CanonicalWireError("response.row_meta", "drilldown names an unpublished field");
+        return {field: target.id, operator: leaf.op === "is_null" ? "is_null" : "equals", ...(leaf.op === "eq" ? {value: leaf.value} : {}), ...(leaf.format ? {groupConfig: {groupFormat: leaf.format}} : {})};
+      })}]}));
+  if (plan.grid && request.state.aggregateGridColorize === true) response.gridColor = explorerGridColor(rows, columns[2].id, request.state.aggregateGridColorScale);
+  return response;
+}
+
+/**
+ * The `remote_query.explorer.v1` strategy, ahead of `detailProfile`: features
+ * are discovered (GET getExplorerFeatures) and bound to the manifest
+ * fingerprint, the catalog publication and the features revision; every
+ * explorer view runs through POST queryExplorer.
+ */
+export const explorerProfile = Object.freeze({
+  id: canonical.EXPLORER_PROFILE,
+  accepts({manifest}) {
+    return manifest.profiles.includes(canonical.EXPLORER_PROFILE) && ["getExplorerFeatures", "queryExplorer"].every((operation) => manifest.routes.some((route) => route.operation_id === operation));
+  },
+  async discover({client, entry, manifest, canonicalDomain, signal}) {
+    const features = await client.explorerFeatures(manifest, signal, entry);
+    return {profile: canonical.EXPLORER_PROFILE, entry, manifest, canonicalDomain, features,
+      binding: {fingerprint: features.domain.fingerprint, publication: features.domain.publication, revision: features.revision}};
+  },
+  describe(context) { return toExplorerV1Descriptor(context.features); },
+  translate(request, context) { return toExplorerV1Query(request, context.features); },
+  run(client, context, query, options) { return client.queryExplorer(context.manifest, context.features, query, options); },
+  toResponse(envelope, request, context) { return toExplorerV1Response(envelope, request, context.features); },
+  async export(client, context, request, format, options) {
+    const query = toExplorerV1Query(request, context.features, {export: true});
+    if (!context.features.supports.export.includes(format)) refuse("export", `${format} export is not available on this host`);
+    return client.exportExplorer(context.manifest, context.features, query, format, options);
+  },
+});
+
 /**
  * One `SelectoHostAdapter`-shaped object for every framework (Vue, React,
  * Angular, Svelte and their wrappers). Discovery (catalog -> manifest ->
@@ -357,7 +842,7 @@ export const detailProfile = Object.freeze({
  * `metadata.canonical.unsupported`; unsupported intent is refused explicitly.
  */
 export function createCanonicalHostAdapter(options = {}) {
-  const {profiles = [detailProfile], supersede = false, ...clientOptions} = options;
+  const {profiles = [explorerProfile, detailProfile], supersede = false, ...clientOptions} = options;
   if (!Array.isArray(profiles) || !profiles.length) throw new TypeError("At least one canonical profile strategy is required");
   if (![false, "domain", "adapter"].includes(supersede)) throw new TypeError("supersede must be false, \"domain\" or \"adapter\"");
   const client = canonical.createCanonicalClient(clientOptions);
@@ -380,6 +865,18 @@ export function createCanonicalHostAdapter(options = {}) {
     const descriptor = strategy.describe(context);
     bindings.set(id, {profile: context.profile, ...context.binding});
     return descriptor;
+  }
+  // The live discovery must match the publication, profile and features
+  // revision the UI loaded; drift is refused before any query (visible re-bind).
+  async function bound(request, signal) {
+    const {strategy, context} = await discover(request.domainId, signal);
+    const loaded = bindings.get(request.domainId);
+    if (loaded && loaded.profile !== context.profile) refuse("request", "the host's explorer profile changed; reload the domain", "stale_domain_fingerprint");
+    if (loaded && loaded.revision !== undefined && loaded.revision !== context.binding.revision) refuse("request", "the host's explorer features changed; reload the domain", "stale_explorer_features");
+    const publication = request.publication ?? (loaded ? {fingerprint: loaded.fingerprint, publication: loaded.publication} : undefined);
+    const effective = publication ? {...request, publication} : request;
+    if (!loaded) bindings.set(request.domainId, {profile: context.profile, ...context.binding});
+    return {strategy, context, effective};
   }
   function channel(request, requestOptions) {
     if (requestOptions.channel !== undefined) return String(requestOptions.channel);
@@ -409,12 +906,7 @@ export function createCanonicalHostAdapter(options = {}) {
       else requestOptions.signal?.addEventListener("abort", relay, {once: true});
       if (key !== null) inflight.set(key, controller);
       try {
-        const {strategy, context} = await discover(request.domainId, controller.signal);
-        const bound = bindings.get(request.domainId);
-        if (bound && bound.profile !== context.profile) refuse("request", "the host's explorer profile changed; reload the domain", "stale_domain_fingerprint");
-        const publication = request.publication ?? (bound ? {fingerprint: bound.fingerprint, publication: bound.publication} : undefined);
-        const effective = publication ? {...request, publication} : request;
-        if (!bound) bindings.set(request.domainId, {profile: context.profile, ...context.binding});
+        const {strategy, context, effective} = await bound(request, controller.signal);
         const query = strategy.translate(effective, context);
         const envelope = await strategy.run(client, context, query, {signal: controller.signal, requestId: requestOptions.requestId});
         if (key !== null && sequences.get(key) !== sequence) throw new StaleResultError();
@@ -424,6 +916,16 @@ export function createCanonicalHostAdapter(options = {}) {
         requestOptions.signal?.removeEventListener("abort", relay);
         if (key !== null && inflight.get(key) === controller) inflight.delete(key);
       }
+    },
+    /**
+     * Full-result download through the bound profile (explorer.v1 `export`):
+     * `{data: Blob, filename, contentType}`. Profiles without export refuse.
+     */
+    async export(request, format, requestOptions = {}) {
+      const {strategy, context, effective} = await bound(request, requestOptions.signal);
+      if (typeof strategy.export !== "function") refuse("export", "export requires the remote_query.explorer.v1 profile");
+      const result = await strategy.export(client, context, effective, format, {signal: requestOptions.signal, requestId: requestOptions.requestId});
+      return {data: new Blob([result.bytes], {type: result.contentType}), filename: result.filename ?? `${request.domainId}-export.${format}`, contentType: result.contentType};
     },
     getRootPredicateContext: explorer.getRootPredicateContext,
     executeRootPredicateIntent: explorer.executeRootPredicateIntent,
