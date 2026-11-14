@@ -165,6 +165,14 @@ returns SPA columns and rows by id, `rowMeta` drilldowns from `row_meta`
 derived-group leaf), `totalRows` from `total_count` and client-side grid colour
 bounds. Decimals stay decimal strings; JSON numbers must be exact lexemes.
 
+SPA field ids keep the SPA convention on every transport (`spaFieldId`:
+`source.<path>` for root fields, the path for association fields), so saved
+and shared states keep resolving when a host moves between the SPA routes,
+Detail and explorer.v1; wire paths come only from the features document.
+Malformed SPA requests (page, sort direction, filter nesting) are refused as
+`invalid_query`, and the descriptor's `metadata.canonical.services` lists the
+host services the features document advertises.
+
 `adapter.export(request, format)` downloads the full result through
 `queryExplorer` with the format's `Accept` media type and returns
 `{data: Blob, filename, contentType}`; the Detail profile refuses it.

@@ -100,3 +100,4 @@ export interface ExplorerV1Plan {query: ExplorerQuery; columns: Array<{kind: "fi
 export function planExplorerV1Query(request: ExplorerQueryRequest, features: ExplorerFeatures, options?: {export?: boolean}): ExplorerV1Plan;
 export function toExplorerV1Query(request: ExplorerQueryRequest, features: ExplorerFeatures, options?: {export?: boolean}): ExplorerQuery;
 export function toExplorerV1Response(envelope: ExplorerResult, request: ExplorerQueryRequest, features: ExplorerFeatures): ExplorerQueryResponse;
+export function spaFieldId(field: {path: string}): string;
