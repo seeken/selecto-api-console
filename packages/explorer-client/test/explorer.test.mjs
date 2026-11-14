@@ -241,6 +241,9 @@ test("availability helpers keep unsupported shared intent intact and refuse befo
   assert.deepEqual(unsupportedCanonicalFeatures({}), []);
   const cases = [
     spa("detail", {rowClickAction: "edit"}),
+    spa("detail", {preventDenormalization: false}),
+    spa("aggregate", {aggregates: [{field: "source.amount", function: "sum", ignoreNulls: true}]}),
+    spa("graph", {graph: {measures: [{axis: "right"}]}}),
     spa("aggregate", {groupBy: ["source.id"], rollup: true}),
     spa("aggregate", {groupBy: ["source.name"], groupConfigs: {"source.name": {groupFormat: "text_prefix", prefixLength: 1}}}),
     spa("detail", {}, {conjunction: "or", items: []}),
@@ -254,4 +257,17 @@ test("availability helpers keep unsupported shared intent intact and refuse befo
     assert.deepEqual(request, before);
     assert.equal(assertExplorerRequestSupported({}, request), request);
   }
+});
+
+
+test("advertised case-insensitive text operators are preserved in controls and intent", () => {
+  const doc = features();
+  doc.fields = doc.fields.map((field) => field.path === "name" ? {...field, operators: [...new Set([...field.operators, "starts_with_ci", "text_contains_ci", "ends_with_ci"])]} : field);
+  const descriptor = toExplorerV1Descriptor(doc);
+  for (const [operator, wire] of [["starts_with_ci", "starts_with_ci"], ["contains_ci", "text_contains_ci"], ["ends_with_ci", "ends_with_ci"]]) {
+    assert.ok(descriptor.fields.find((field) => field.id === "source.name").filterOperators.includes(operator));
+    const plan = planExplorerV1Query(spaRequest(operator), doc);
+    assert.deepEqual(plan.query.filters, [{field: "name", op: wire, value: "aurora"}]);
+  }
+  function spaRequest(operator) { return spa("detail", {}, {conjunction: "and", items: [{id: "f", field: "source.name", operator, value: "aurora"}]}); }
 });

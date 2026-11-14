@@ -199,3 +199,9 @@ Canonical hosts and graceful absence:
 These APIs are additive. `auto` still selects canonical when its catalog exists;
 SPA service routes (saved views, actions, pages, editors, row refresh, SQL debug
 and localized descriptors) are not supplied by the canonical adapter.
+
+The explorer profile preserves case-insensitive text intent as `contains_ci`,
+`starts_with_ci` and `ends_with_ci` (wire `text_contains_ci`, `starts_with_ci`,
+`ends_with_ci`). These are additive `ExplorerFilterOperator` values. Framework
+state codecs and operator types must retain them. Raw joined paths fall back to
+SPA-style words (`supplier.region_name` -> `Supplier Region Name`).

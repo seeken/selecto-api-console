@@ -154,3 +154,10 @@ test("the shared guard refuses repeated restored columns before a SPA can drop t
   assert.throws(() => assertExplorerRequestSupported(toExplorerDescriptor(metadata()), restored), /Repeated columns is not available/);
   assert.deepEqual(restored, before);
 });
+
+
+test("joined raw paths get SPA-style display words without changing field identity", async () => {
+  const {explorerFieldLabel} = await import("../dist/index.js");
+  assert.equal(explorerFieldLabel({id: "supplier.region_name", path: "supplier.region_name", label: "supplier.region_name"}), "Supplier Region Name");
+  assert.equal(explorerFieldLabel({path: "supplier.region_name", label: "Delivery region"}), "Delivery region");
+});

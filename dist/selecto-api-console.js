@@ -1045,7 +1045,7 @@ function humanizeExplorerLabel(value) {
 /** Raw path/id labels are wire defaults, not authored display labels. */
 function explorerFieldLabel(field) {
   return typeof field.label === "string" && field.label.trim() && field.label !== field.path && field.label !== field.id
-    ? field.label : humanizeExplorerLabel(field.path ?? field.id);
+    ? field.label : String(field.path ?? field.id).split(".").map(humanizeExplorerLabel).join(" ");
 }
 
 /** Stable, shared availability checks; ordinary SPA descriptors stay unchanged. */
@@ -1066,6 +1066,9 @@ function assertExplorerRequestSupported(domain, request) {
   };
   requireFeature(`view.${request.view}`, "request.view");
   const state = request.state ?? {};
+  if (state.preventDenormalization === false) requireFeature("detail.denormalization", "request.state.preventDenormalization");
+  for (const [i, item] of (state.aggregates ?? []).entries()) if (item.ignoreNulls === true) requireFeature("aggregate.nulls_zero", `request.state.aggregates.${i}.ignoreNulls`);
+  if (state.graph?.measures?.length) requireFeature("graph.series_planning", "request.state.graph.measures");
   if (state.columns?.length) requireFeature("columns.occurrences", "request.state.columns");
   if (state.aggregateGrid) requireFeature("view.aggregate_grid", "request.state.aggregateGrid");
   if (request.view === "aggregate" && state.rollup === true) requireFeature("aggregate.rollup", "request.state.rollup");
@@ -1165,10 +1168,11 @@ function unsupportedExplorerFeatures(metadata) {
     {id: "view.aggregate_grid", label: "Aggregate grid", reason: richer},
   ];
   if (!supports.recursive_filters) list.push({id: "filters.groups", label: "OR and nested filter groups", reason: "this publication accepts flat AND filters only"});
+  list.push({id: "detail.denormalization", label: "Denormalized to-many rows", reason: "canonical detail keeps parent rows separate"});
   list.push({id: "fields.joined", label: "Joined fields", reason: "explorer metadata v1 publishes root fields only"});
   if (!supports.nested) list.push({id: "fields.collections", label: "Nested collection columns", reason: richer});
   list.push({id: "columns.occurrences", label: "Repeated columns", reason: richer});
-  for (const [spa, op] of [["between", "between"], ["in", "in"], ["not_in", "not_in"], ["contains", "text_contains"], ["starts_with", "starts_with"], ["ends_with", "ends_with"], ["date_shortcut", "date_shortcut"]]) {
+  for (const [spa, op] of [["between", "between"], ["in", "in"], ["not_in", "not_in"], ["contains", "text_contains"], ["contains_ci", "text_contains_ci"], ["starts_with", "starts_with"], ["starts_with_ci", "starts_with_ci"], ["ends_with", "ends_with"], ["ends_with_ci", "ends_with_ci"], ["date_shortcut", "date_shortcut"]]) {
     if (!operators.has(op) || !operatorMap[spa]) list.push({id: `operator.${spa}`, label: `Filter operator ${spa.replaceAll("_", " ")}`, reason: "not advertised by this publication"});
   }
   list.push({id: "page.total_rows", label: "Total row count", reason: "no implicit count; paging uses has_more"});
@@ -1412,7 +1416,7 @@ const detailProfile = Object.freeze({
 
 // ---- remote_query.explorer.v1 strategy (harness docs/remote_query_explorer.md 6.6) ----
 
-const explorerOperatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", between: "between", in: "in", not_in: "not_in", contains: "text_contains", starts_with: "starts_with", ends_with: "ends_with", date_shortcut: "date_shortcut", is_null: "is_null", is_not_null: "not_null"};
+const explorerOperatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", between: "between", in: "in", not_in: "not_in", contains: "text_contains", contains_ci: "text_contains_ci", starts_with: "starts_with", starts_with_ci: "starts_with_ci", ends_with: "ends_with", ends_with_ci: "ends_with_ci", date_shortcut: "date_shortcut", is_null: "is_null", is_not_null: "not_null"};
 const explorerReverseOperators = Object.fromEntries(Object.entries(explorerOperatorMap).map(([spa, op]) => [op, spa]));
 const explorerFunctionLabel = {count: "Count", count_distinct: "Distinct count", sum: "Sum", avg: "Average", min: "Min", max: "Max", true_count: "True count", false_count: "False count", true_percentage: "True percentage"};
 const explorerGroupFormatIds = new Set(["day", "day_hour", "week", "month", "quarter", "year", "month_of_year", "day_of_month", "day_of_week", "hour"]);
@@ -1496,6 +1500,8 @@ function unsupportedExplorerV1Features(features) {
   flag(supports.date_shortcuts, "operator.date_shortcut", "Date shortcut filters");
   flag(supports.count_exact, "page.total_rows", "Total row count", "no exact count; paging uses has_more");
   flag(supports.export.length > 0, "service.export", "Export");
+  list.push({id: "detail.denormalization", label: "Denormalized to-many rows", reason: "canonical collections are nested"});
+  list.push({id: "aggregate.nulls_zero", label: "Always-zero NULL sums", reason: "this profile provides SQL or automatic sum handling"});
   list.push({id: "group.text_prefix", label: "Text prefix groups", reason: "not part of remote_query.explorer.v1"});
   list.push({id: "graph.series_planning", label: "Host-planned graph series and transforms", reason: "series are built in the browser from the aggregate rows"});
   for (const [id, label] of explorerServiceLabels) if (!Object.hasOwn(features.services ?? {}, id)) list.push({id: `service.${id}`, label, reason: "host service not advertised"});
