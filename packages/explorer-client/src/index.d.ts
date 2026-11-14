@@ -1,4 +1,4 @@
-import type {CanonicalClient, CatalogEntry, ClientOptions, Column, Manifest, RemoteQuery, RemoteResult} from "@selecto/canonical-client";
+import type {CanonicalClient, CatalogEntry, ClientOptions, Column, ExplorerFeatures, ExplorerQuery, ExplorerResult, Manifest, RemoteQuery, RemoteResult} from "@selecto/canonical-client";
 export type {ClientOptions} from "@selecto/canonical-client";
 export interface ExplorerMetadata {format: "selecto.explorer-metadata"; format_version: 1; domain: {id: string; fingerprint: string; publication: string}; label: string; fields: Array<Column & {path: string}>; default_select: string[]; query: {profile: "remote_query.v1"; operators: string[]; limits: {max_limit: number; max_offset: number; max_filters: number}; supports: {detail: boolean; nested: boolean; recursive_filters: boolean; aggregates: boolean}}; services: Record<string, unknown>; links?: {api_console?: string};}
 export interface ExplorerQueryRequest {schema: "selecto.spa.query-request/v1"; domainId: string; view: string; state: {selected: string[]; orderBy: Array<{field: string; direction: "asc" | "desc"}>; groupBy: string[]; aggregates: unknown[]; preventDenormalization?: boolean; rowClickAction?: string; fieldConfigs?: unknown; groupConfigs?: unknown; rollup?: boolean; aggregateGrid?: boolean; aggregateGridColorize?: boolean; aggregateGridColorScale?: string; columns?: unknown[]; graph?: unknown; queryLibrary?: unknown}; filters: {conjunction: "and" | "or"; items: unknown[]}; page: {number: number; size: number}; presentation?: {timezone?: string; locale?: string}; publication?: {fingerprint: string; publication?: string}; exportShape?: string;}
@@ -61,9 +61,11 @@ export interface ExplorerProfileStrategy<Context extends ExplorerProfileContext 
   accepts(discovery: {manifest: Manifest; entry: CatalogEntry}): boolean;
   discover(discovery: {client: CanonicalClient; entry: CatalogEntry; manifest: Manifest; canonicalDomain: Record<string, unknown>; signal?: AbortSignal}): Promise<Context>;
   describe(context: Context): ExplorerDescriptor;
-  translate(request: ExplorerQueryRequest, context: Context): RemoteQuery;
-  run(client: CanonicalClient, context: Context, query: RemoteQuery, options: {signal?: AbortSignal; requestId?: string}): Promise<RemoteResult>;
-  toResponse(envelope: RemoteResult, request: ExplorerQueryRequest, context: Context): ExplorerQueryResponse;
+  translate(request: ExplorerQueryRequest, context: Context): RemoteQuery | ExplorerQuery;
+  run(client: CanonicalClient, context: Context, query: any, options: {signal?: AbortSignal; requestId?: string}): Promise<RemoteResult | ExplorerResult>;
+  toResponse(envelope: any, request: ExplorerQueryRequest, context: Context): ExplorerQueryResponse;
+  /** Optional full-result download (explorer.v1). */
+  export?(client: CanonicalClient, context: Context, request: ExplorerQueryRequest, format: ExplorerExportFormat, options: {signal?: AbortSignal; requestId?: string}): Promise<ExplorerExportBytes>;
 }
 export const detailProfile: ExplorerProfileStrategy<ExplorerProfileContext & {metadata: ExplorerMetadata}>;
 export interface CanonicalHostAdapterOptions extends ClientOptions {profiles?: ExplorerProfileStrategy<any>[]; supersede?: false | "domain" | "adapter";}
@@ -74,9 +76,27 @@ export interface CanonicalHostAdapter extends Omit<ExplorerClient, "listDomains"
   listDomains(options?: {signal?: AbortSignal}): Promise<ExplorerDescriptor[]>;
   getDomain(id: string, options?: {signal?: AbortSignal}): Promise<ExplorerDescriptor>;
   execute(request: ExplorerQueryRequest, options?: {signal?: AbortSignal; requestId?: string; channel?: string}): Promise<ExplorerQueryResponse>;
+  /** Full-result download through the bound profile; refused unless it is remote_query.explorer.v1. */
+  export(request: ExplorerQueryRequest, format: ExplorerExportFormat, options?: {signal?: AbortSignal; requestId?: string}): Promise<{data: Blob; filename: string; contentType: string}>;
 }
 export function createCanonicalHostAdapter(options?: CanonicalHostAdapterOptions): CanonicalHostAdapter;
 
 /** Transport choice before an explorer mounts: "auto" probes the canonical catalog (absent -> "spa"; refusals and broken catalogs throw). */
 export type HostTransportMode = "spa" | "canonical" | "auto";
 export function selectHostTransport(options?: ClientOptions & {mode?: HostTransportMode; signal?: AbortSignal}): Promise<"spa" | "canonical">;
+
+// ---- remote_query.explorer.v1 ----
+export type ExplorerExportFormat = "csv" | "tsv" | "json" | "xlsx";
+export interface ExplorerExportBytes {bytes: ArrayBuffer; contentType: string; filename?: string;}
+export interface ExplorerV1Context extends ExplorerProfileContext {features: ExplorerFeatures; binding: ExplorerProfileBinding & {revision: string};}
+/** The explorer.v1 strategy; the adapter's default profiles are `[explorerProfile, detailProfile]`. */
+export const explorerProfile: ExplorerProfileStrategy<ExplorerV1Context>;
+export interface BucketSpec {kind: "numeric" | "year" | "elapsed_days" | "relative_days"; ranges?: Array<{min?: number; max?: number; label: string}>; step?: number;}
+/** The SPA `bucketRanges` text grammar as a structured bucket spec (section 5.3). */
+export function parseBucketRanges(text: string, kind: BucketSpec["kind"], options?: {allowStep?: boolean; maxBuckets?: number}): BucketSpec;
+export function unsupportedExplorerV1Features(features: ExplorerFeatures): UnsupportedExplorerFeature[];
+export function toExplorerV1Descriptor(features: ExplorerFeatures): ExplorerDescriptor;
+export interface ExplorerV1Plan {query: ExplorerQuery; columns: Array<{kind: "field" | "group" | "aggregate" | "collection"; wire: string; spa: Record<string, unknown>; [key: string]: unknown}>; view: string; grid: boolean; rollup: boolean; page: {number: number; size: number};}
+export function planExplorerV1Query(request: ExplorerQueryRequest, features: ExplorerFeatures, options?: {export?: boolean}): ExplorerV1Plan;
+export function toExplorerV1Query(request: ExplorerQueryRequest, features: ExplorerFeatures, options?: {export?: boolean}): ExplorerQuery;
+export function toExplorerV1Response(envelope: ExplorerResult, request: ExplorerQueryRequest, features: ExplorerFeatures): ExplorerQueryResponse;
