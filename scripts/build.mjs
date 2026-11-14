@@ -17,7 +17,7 @@ for (const file of files) {
   let bundled = "(function(global) {\n";
   for (const name of ["canonical-client", "explorer-client"]) {
     const source = await readFile(resolve(packageRoot, "packages", name, "src/index.js"), "utf8");
-    const names = [...source.matchAll(/^export (?:function|class|const) (\w+)/gm)].map((match) => match[1]);
+    const names = [...source.matchAll(/^export (?:async function|function|class|const) (\w+)/gm)].map((match) => match[1]);
     const content = source
       .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
     const globalName = name === "canonical-client" ? "SelectoCanonicalClient" : "SelectoExplorerClient";

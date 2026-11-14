@@ -1055,6 +1055,33 @@ function createExplorerClient(options = {}) {
   };
 }
 
+/**
+ * Chooses a host transport before an explorer mounts. `mode` "spa" and
+ * "canonical" are explicit choices. "auto" asks the host whether it publishes a
+ * canonical domain catalog at `catalogPath` (default `<baseUrl>/catalog`):
+ * "canonical" when it answers a valid `selecto.domain-catalog`, "spa" when the
+ * route is absent (404, 405, 410) or answers something that is not a catalog
+ * (an HTML fallback page). Any other failure (401, 403, 5xx, network, a
+ * malformed catalog) is thrown: a refusing or broken canonical host is never
+ * silently downgraded to the SPA routes.
+ */
+async function selectHostTransport(options = {}) {
+  const {mode = "auto", baseUrl = "/api/v1/selecto", catalogPath, signal} = options;
+  if (mode === "spa" || mode === "canonical") return mode;
+  if (mode !== "auto") throw new TypeError("transport mode must be \"spa\", \"canonical\" or \"auto\"");
+  const path = canonical.safePath(catalogPath ?? `${String(baseUrl).replace(/\/+$/, "")}/catalog`);
+  const headers = new Headers(typeof options.headers === "function" ? options.headers() : options.headers);
+  headers.set("accept", "application/json");
+  const response = await (options.fetch ?? globalThis.fetch)(path, {headers, credentials: "same-origin", redirect: "error", signal});
+  if ([404, 405, 410].includes(response.status)) return "spa";
+  if (!response.ok) throw new canonical.CanonicalHttpError(response.status, {error: {code: "transport_selection_failed", message: `canonical catalog probe failed (${response.status})`}});
+  let body;
+  try { body = JSON.parse(await response.text()); } catch { return "spa"; }
+  if (!body || typeof body !== "object" || body.format !== "selecto.domain-catalog") return "spa";
+  canonical.assertCatalog(body);
+  return "canonical";
+}
+
 /** A result that a newer request on the same channel superseded. UIs treat it as cancellation. */
 class StaleResultError extends Error {
   constructor(message = "superseded by a newer request") {
@@ -1397,7 +1424,7 @@ function toNestedDetailExplorerResult(envelope,intent,context) {
   return {schema:"selecto.spa.query-response/v1",columns,rows,page:{number:Math.floor(intent.offset/intent.limit)+1,size:intent.limit},metadata:{canonical:{profile:"canonical_nested_detail.v1",fingerprint:intent.binding.fingerprint,publication:intent.binding.publication,hasMore:envelope.data.page.has_more,nestedContext:canonical.nestedDetailContext(features),completeChildren:true}}};
 }
 
-return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,unsupportedExplorerFeatures,toCanonicalQuery,toExplorerResult,createExplorerClient,StaleResultError,detailProfile,createCanonicalHostAdapter,rootPredicateBinding,assertRootPredicateIntent,toRootPredicateQuery,parseRootPredicateState,encodeRootPredicateState,decodeRootPredicateState,validateRootPredicateFeaturesAndMap,toRootPredicateExplorerResult,flatSnapshotToRequest,nestedDetailBinding,createNestedDetailIntent,assertNestedDetailIntent,toNestedDetailQuery,parseNestedDetailState,encodeNestedDetailState,decodeNestedDetailState,nestedDetailConsoleHref,toNestedDetailExplorerResult};
+return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,unsupportedExplorerFeatures,toCanonicalQuery,toExplorerResult,createExplorerClient,selectHostTransport,StaleResultError,detailProfile,createCanonicalHostAdapter,rootPredicateBinding,assertRootPredicateIntent,toRootPredicateQuery,parseRootPredicateState,encodeRootPredicateState,decodeRootPredicateState,validateRootPredicateFeaturesAndMap,toRootPredicateExplorerResult,flatSnapshotToRequest,nestedDetailBinding,createNestedDetailIntent,assertNestedDetailIntent,toNestedDetailQuery,parseNestedDetailState,encodeNestedDetailState,decodeNestedDetailState,nestedDetailConsoleHref,toNestedDetailExplorerResult};
 })();
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 (function (global) {

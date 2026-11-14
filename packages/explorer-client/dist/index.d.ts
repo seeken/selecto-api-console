@@ -76,3 +76,7 @@ export interface CanonicalHostAdapter extends Omit<ExplorerClient, "listDomains"
   execute(request: ExplorerQueryRequest, options?: {signal?: AbortSignal; requestId?: string; channel?: string}): Promise<ExplorerQueryResponse>;
 }
 export function createCanonicalHostAdapter(options?: CanonicalHostAdapterOptions): CanonicalHostAdapter;
+
+/** Transport choice before an explorer mounts: "auto" probes the canonical catalog (absent -> "spa"; refusals and broken catalogs throw). */
+export type HostTransportMode = "spa" | "canonical" | "auto";
+export function selectHostTransport(options?: ClientOptions & {mode?: HostTransportMode; signal?: AbortSignal}): Promise<"spa" | "canonical">;
