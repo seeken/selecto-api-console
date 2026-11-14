@@ -1093,7 +1093,7 @@ function toExplorerDescriptor(metadata) {
     defaults: {selected: metadata.default_select.slice(), orderBy: [], groupBy: [], aggregates: [], rollup: true, preventDenormalization: true},
     release: {schema: "selecto.domain-publication/v1", id: metadata.domain.publication, version: metadata.domain.fingerprint, fingerprint: metadata.domain.fingerprint, status: "published"},
     ...(metadata.links?.api_console ? {artifacts: {apiConsole: metadata.links.api_console}} : {}),
-    metadata: {canonical: {transport: "canonical", profile: metadata.query.profile, fingerprint: metadata.domain.fingerprint, publication: metadata.domain.publication, supports: {...metadata.query.supports}, limits: {...metadata.query.limits}, unsupported: unsupportedExplorerFeatures(metadata)}},
+    metadata: {canonical: {transport: "canonical", profile: metadata.query.profile, fingerprint: metadata.domain.fingerprint, publication: metadata.domain.publication, supports: {...metadata.query.supports}, limits: {...metadata.query.limits}, services: {...(metadata.services ?? {})}, unsupported: unsupportedExplorerFeatures(metadata)}},
   };
 }
 
@@ -1367,6 +1367,16 @@ const explorerBucketFormats = {buckets: "numeric", age_buckets: "elapsed_days", 
 const explorerBucketAggregates = {buckets: "numeric", age_buckets: "elapsed_days"};
 const explorerServiceLabels = [["saved_views", "Saved views"], ["actions", "Actions"], ["canned_pages", "Canned pages"], ["record_editors", "Record editors"], ["row_refresh", "Row refresh"], ["diagnostics", "SQL debug"], ["localization", "Localized descriptors"]];
 
+/**
+ * The SPA field id of a published field: `source.<path>` for root fields and
+ * the path for association fields (`customer.name`, `lines.sku`), the SPA
+ * descriptor convention every transport uses, so saved and shared states
+ * keep resolving when a host moves between the SPA routes, Detail and
+ * explorer.v1. Wire paths are always taken from the features document.
+ */
+function spaFieldId(field) {
+  return field.path.includes(".") ? field.path : `source.${field.path}`;
+}
 function spaFieldType(type) {
   return type === "string" ? "text" : type === "naive_datetime" || type === "utc_datetime" ? "datetime" : type;
 }
@@ -1447,7 +1457,7 @@ function toExplorerV1Descriptor(features) {
   const fields = features.fields.filter((field) => field.collection === null || supports.nested).map((field) => {
     const aggregateFunctions = field.aggregates.filter((name) => name !== "bucket_count" && (supports.boolean_aggregates || !name.startsWith("true_") && name !== "false_count"));
     if (supports.buckets) for (const [spa, kind] of Object.entries(explorerBucketAggregates)) if (field.buckets.includes(kind)) aggregateFunctions.push(spa);
-    const descriptor = {id: field.id, label: field.label, type: spaFieldType(field.type), encoding: field.encoding,
+    const descriptor = {id: spaFieldId(field), label: field.label, type: spaFieldType(field.type), encoding: field.encoding,
       selectable: field.selectable, sortable: field.sortable, groupable: field.groupable, aggregatable: aggregateFunctions.length > 0,
       aggregateFunctions, filterOperators: field.operators.map((op) => explorerReverseOperators[op]).filter(Boolean)};
     if (field.description) descriptor.metadata = {description: field.description};
@@ -1459,7 +1469,7 @@ function toExplorerV1Descriptor(features) {
     }
     return descriptor;
   });
-  const byPath = new Map(features.fields.map((field) => [field.path, field.id]));
+  const byPath = new Map(features.fields.map((field) => [field.path, spaFieldId(field)]));
   const id = (path) => byPath.get(path) ?? path;
   const views = [];
   if (supports.detail) views.push({id: "detail", kind: "detail", label: "Detail"});
@@ -1485,7 +1495,7 @@ function toExplorerV1Descriptor(features) {
       groupBy: (defaults.group_by ?? []).filter((path) => typeof path === "string").map(id), aggregates: [], rollup: defaults.rollup !== false, preventDenormalization: true},
     release: {schema: "selecto.domain-publication/v1", id: features.domain.publication, version: features.domain.fingerprint, fingerprint: features.domain.fingerprint, status: "published"},
     metadata: {canonical: {transport: "canonical", profile: canonical.EXPLORER_PROFILE, fingerprint: features.domain.fingerprint, publication: features.domain.publication, revision: features.revision,
-      supports: {...supports, export: [...supports.export]}, limits: {...features.limits}, unsupported: unsupportedExplorerV1Features(features)}},
+      supports: {...supports, export: [...supports.export]}, limits: {...features.limits}, services: {...features.services}, unsupported: unsupportedExplorerV1Features(features)}},
   };
   if (segments.length) descriptor.queryLibrary = {
     segments: segments.map((segment) => ({id: segment.name, label: segment.label ?? segment.name, parameters: (segment.parameters ?? []).map((parameter) => ({id: parameter.name, label: parameter.label ?? parameter.name, type: parameter.type ?? "string", required: parameter.required === true}))})),
@@ -1522,6 +1532,12 @@ function explorerFilterValue(value, field, path) {
  * features document does not promise is refused here, before any request.
  */
 function planExplorerV1Query(request, features, options = {}) {
+  // Shape errors in the SPA request are the request's (invalid_query), not
+  // wire errors of the host.
+  try { return planExplorerV1(request, features, options); }
+  catch (error) { throw error instanceof CanonicalWireError ? new ExplorerIntentError(error.path, error.message.replace(/^[^:]*: /, ""), "invalid_query") : error; }
+}
+function planExplorerV1(request, features, options) {
   keys(request, ["schema", "domainId", "view", "state", "filters", "page", "presentation", "publication", "exportShape"], "request");
   if (request.schema !== "selecto.spa.query-request/v1") refuse("request.schema", "unknown SPA request version", "invalid_query");
   if (request.domainId !== features.domain.id) refuse("request.domainId", "does not match publication", "invalid_query");
@@ -1535,7 +1551,7 @@ function planExplorerV1Query(request, features, options = {}) {
   const state = record(request.state, "request.state");
   keys(state, ["selected", "preventDenormalization", "rowClickAction", "fieldConfigs", "orderBy", "groupBy", "groupConfigs", "rollup", "aggregateGrid", "aggregateGridColorize", "aggregateGridColorScale", "columns", "aggregates", "graph", "queryLibrary"], "request.state");
   if (state.rowClickAction && state.rowClickAction !== "__default_modal__") refuse("request.state.rowClickAction", "configured row actions are unavailable");
-  const byId = new Map(features.fields.map((field) => [field.id, field]));
+  const byId = new Map(features.fields.map((field) => [spaFieldId(field), field]));
   const field = (id, path) => { const value = byId.get(id); if (!value) refuse(path, `unresolved field ${JSON.stringify(id)}`, "invalid_field"); return value; };
   const query = {select: [], row_format: "arrays"};
   const columns = [];
@@ -1546,12 +1562,13 @@ function planExplorerV1Query(request, features, options = {}) {
   function node(item, depth, path) {
     if (item && typeof item === "object" && Object.hasOwn(item, "items")) {
       keys(item, ["conjunction", "items", "id"], path);
+      // SPA nesting depth, before single-member groups collapse (Spa.pm _group).
+      if (depth > limits.max_filter_depth) refuse(path, `filters nest deeper than ${limits.max_filter_depth} groups`, "invalid_query");
       if (!["and", "or"].includes(item.conjunction ?? "and") || !Array.isArray(item.items)) refuse(path, "invalid filter group", "invalid_query");
       const parts = item.items.map((child, i) => node(child, depth + 1, `${path}.items.${i}`)).filter(Boolean);
       if (!parts.length) return null;
       if (parts.length === 1) return parts[0];
       if (!supports.recursive_filters) refuse(path, "OR and nested filter groups are not available on this host");
-      if (depth > limits.max_filter_depth) refuse(path, `filters nest deeper than ${limits.max_filter_depth} groups`, "invalid_query");
       return {[(item.conjunction ?? "and") === "or" ? "any" : "all"]: parts};
     }
     keys(item, ["id", "field", "operator", "value", "valueTo", "promoted", "groupConfig"], path);
@@ -1605,7 +1622,8 @@ function planExplorerV1Query(request, features, options = {}) {
     if (request.presentation.timezone !== undefined) query.timezone = canonical.assertTimezone(request.presentation.timezone);
   }
   keys(request.page, ["number", "size"], "request.page");
-  integer(request.page.number, "request.page.number", 1); integer(request.page.size, "request.page.size", 1);
+  if (!Number.isSafeInteger(request.page.number) || request.page.number < 1) refuse("request.page.number", "expected a page number of at least 1", "invalid_query");
+  if (!Number.isSafeInteger(request.page.size) || request.page.size < 1) refuse("request.page.size", "expected a page size of at least 1", "invalid_query");
   const pageLimit = request.page.size, pageOffset = (request.page.number - 1) * request.page.size;
   const zone = query.timezone ?? "UTC";
   const instant = (target, path) => { if (target.type === "utc_datetime" && supports.timezones === "utc" && zone !== "UTC") refuse(path, "this host converts instants to UTC only"); };
@@ -1641,17 +1659,17 @@ function planExplorerV1Query(request, features, options = {}) {
         }
         if (slot.children.includes(target.path)) continue;
         slot.children.push(target.path);
-        slot.column.spa.nestedFields.push({id: target.id, key: target.id, label, type: spaFieldType(target.type), encoding: target.encoding, nullable: target.nullable});
+        slot.column.spa.nestedFields.push({id: spaFieldId(target), key: spaFieldId(target), label, type: spaFieldType(target.type), encoding: target.encoding, nullable: target.nullable});
         continue;
       }
-      const n = (count.get(target.id) ?? 0) + 1;
-      count.set(target.id, n);
+      const n = (count.get(spaFieldId(target)) ?? 0) + 1;
+      count.set(spaFieldId(target), n);
       const wire = n === 1 && !used.has(target.path) ? target.path : explorerAliasFor(`${target.path}_${n}`, used);
       used.add(wire);
       query.select.push(wire === target.path ? target.path : {field: target.path, alias: wire});
-      const spa = {id: n === 1 ? target.id : `${target.id}~${n}`, label, type: spaFieldType(target.type), encoding: target.encoding};
+      const spa = {id: n === 1 ? spaFieldId(target) : `${spaFieldId(target)}~${n}`, label, type: spaFieldType(target.type), encoding: target.encoding};
       if (typeof occurrence.format === "string") spa.format = occurrence.format;
-      if (n > 1) Object.assign(spa, {field: target.id, occurrence: n});
+      if (n > 1) Object.assign(spa, {field: spaFieldId(target), occurrence: n});
       columns.push({kind: "field", field: target, wire, spa});
     }
     if (!Array.isArray(state.orderBy)) refuse("request.state.orderBy", "expected an array", "invalid_query");
@@ -1659,7 +1677,7 @@ function planExplorerV1Query(request, features, options = {}) {
       keys(order, ["field", "direction"], `request.state.orderBy.${i}`);
       const target = field(order.field, `request.state.orderBy.${i}.field`);
       if (!target.sortable) refuse(`request.state.orderBy.${i}.field`, `${target.label} is not sortable`, "invalid_field");
-      return {field: target.path, direction: order.direction === "desc" ? "desc" : "asc"};
+      return {field: target.path, direction: sortDirection(order, `request.state.orderBy.${i}.direction`)};
     });
     query.limit = pageLimit; query.offset = pageOffset;
     if (supports.count_exact && !options.export) query.count = "exact";
@@ -1743,6 +1761,7 @@ function planExplorerV1Query(request, features, options = {}) {
     if (rollup && !supports.rollup) rollup = false;
     // Sorts name a group or a measure; a rollup keeps group-path order (6.1).
     const orderBy = Array.isArray(state.orderBy) ? state.orderBy : [];
+    orderBy.forEach((order, i) => sortDirection(order ?? {}, `request.state.orderBy.${i}.direction`));
     const wireFor = new Map([...columns.filter((column) => column.kind === "group").map((column) => [column.spa.id, column.wire]), ...columns.filter((column) => column.kind === "aggregate").map((column) => [column.spa.id, column.wire])]);
     query.order_by = rollup ? [] : orderBy.filter((order) => wireFor.has(order?.field)).slice(0, limits.max_orders).map((order) => ({field: wireFor.get(order.field), direction: order.direction === "desc" ? "desc" : "asc"}));
     if (groupBy.length) {
@@ -1769,6 +1788,12 @@ function planExplorerV1Query(request, features, options = {}) {
 
 /** `translate` for remote_query.explorer.v1: the query object only. */
 function toExplorerV1Query(request, features, options = {}) { return planExplorerV1Query(request, features, options).query; }
+
+function sortDirection(order, path) {
+  const direction = order.direction ?? "asc";
+  if (direction !== "asc" && direction !== "desc") refuse(path, "sort direction must be asc or desc", "invalid_query");
+  return direction;
+}
 
 function explorerGridColor(rows, measure, scale) {
   const values = rows.map((row) => row[measure]).map((value) => typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN).filter(Number.isFinite);
@@ -1809,7 +1834,7 @@ function toExplorerV1Response(envelope, request, features) {
       constraints: meta.drilldown.filters.map((leaf) => {
         const target = byPath.get(leaf.field);
         if (!target) throw new CanonicalWireError("response.row_meta", "drilldown names an unpublished field");
-        return {field: target.id, operator: leaf.op === "is_null" ? "is_null" : "equals", ...(leaf.op === "eq" ? {value: leaf.value} : {}), ...(leaf.format ? {groupConfig: {groupFormat: leaf.format}} : {})};
+        return {field: spaFieldId(target), operator: leaf.op === "is_null" ? "is_null" : "equals", ...(leaf.op === "eq" ? {value: leaf.value} : {}), ...(leaf.format ? {groupConfig: {groupFormat: leaf.format}} : {})};
       })}]}));
   if (plan.grid && request.state.aggregateGridColorize === true) response.gridColor = explorerGridColor(rows, columns[2].id, request.state.aggregateGridColorScale);
   return response;
@@ -2169,7 +2194,7 @@ function toNestedDetailExplorerResult(envelope,intent,context) {
   return {schema:"selecto.spa.query-response/v1",columns,rows,page:{number:Math.floor(intent.offset/intent.limit)+1,size:intent.limit},metadata:{canonical:{profile:"canonical_nested_detail.v1",fingerprint:intent.binding.fingerprint,publication:intent.binding.publication,hasMore:envelope.data.page.has_more,nestedContext:canonical.nestedDetailContext(features),completeChildren:true}}};
 }
 
-return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,unsupportedExplorerFeatures,toCanonicalQuery,toExplorerResult,createExplorerClient,selectHostTransport,StaleResultError,detailProfile,parseBucketRanges,unsupportedExplorerV1Features,toExplorerV1Descriptor,planExplorerV1Query,toExplorerV1Query,toExplorerV1Response,explorerProfile,createCanonicalHostAdapter,rootPredicateBinding,assertRootPredicateIntent,toRootPredicateQuery,parseRootPredicateState,encodeRootPredicateState,decodeRootPredicateState,validateRootPredicateFeaturesAndMap,toRootPredicateExplorerResult,flatSnapshotToRequest,nestedDetailBinding,createNestedDetailIntent,assertNestedDetailIntent,toNestedDetailQuery,parseNestedDetailState,encodeNestedDetailState,decodeNestedDetailState,nestedDetailConsoleHref,toNestedDetailExplorerResult};
+return {ExplorerIntentError,assertExplorerMetadata,toExplorerDescriptor,unsupportedExplorerFeatures,toCanonicalQuery,toExplorerResult,createExplorerClient,selectHostTransport,StaleResultError,detailProfile,spaFieldId,parseBucketRanges,unsupportedExplorerV1Features,toExplorerV1Descriptor,planExplorerV1Query,toExplorerV1Query,toExplorerV1Response,explorerProfile,createCanonicalHostAdapter,rootPredicateBinding,assertRootPredicateIntent,toRootPredicateQuery,parseRootPredicateState,encodeRootPredicateState,decodeRootPredicateState,validateRootPredicateFeaturesAndMap,toRootPredicateExplorerResult,flatSnapshotToRequest,nestedDetailBinding,createNestedDetailIntent,assertNestedDetailIntent,toNestedDetailQuery,parseNestedDetailState,encodeNestedDetailState,decodeNestedDetailState,nestedDetailConsoleHref,toNestedDetailExplorerResult};
 })();
 })(typeof globalThis !== 'undefined' ? globalThis : this);
 (function (global) {

@@ -50,7 +50,7 @@ function host({explorer = true, answer, doc = () => features(), exported} = {}) 
 }
 const adapterFor = (fetch) => createCanonicalHostAdapter({baseUrl: "/api", catalogPath: "/api/catalog", fetch});
 function spa(view, state, filters = {conjunction: "and", items: []}, page = {number: 1, size: 30}) {
-  return {schema: "selecto.spa.query-request/v1", domainId: "items", view, state: {selected: ["id"], orderBy: [], groupBy: [], aggregates: [], ...state}, filters, page};
+  return {schema: "selecto.spa.query-request/v1", domainId: "items", view, state: {selected: ["source.id"], orderBy: [], groupBy: [], aggregates: [], ...state}, filters, page};
 }
 const col = (id, type, role, extra = {}) => ({id, label: id, type, encoding: type === "decimal" ? "decimal-string" : type === "string" ? "string" : "json", nullable: true, role, ...extra});
 
@@ -61,11 +61,11 @@ test("explorer.v1 descriptor advertises views, grid, export and field capabiliti
   assert.deepEqual(descriptor.views.map((view) => view.id), ["detail", "aggregate", "graph"]);
   assert.deepEqual(descriptor.capabilities, ["detail", "aggregate", "graph", "aggregate_grid", "export"]);
   for (const feature of ["not_in", "true_percentage", "grid_export", "grid_colorize", "column_occurrences"]) assert.ok(descriptor.protocolFeatures.includes(feature), feature);
-  const amount = descriptor.fields.find((field) => field.id === "amount");
+  const amount = descriptor.fields.find((field) => field.id === "source.amount");
   assert.deepEqual(amount.aggregateFunctions, ["count", "count_distinct", "sum", "avg", "min", "max", "buckets"]);
   assert.equal(amount.encoding, "decimal-string");
-  assert.ok(descriptor.fields.find((field) => field.id === "name").filterOperators.includes("contains"));
-  assert.ok(descriptor.fields.find((field) => field.id === "due_on").aggregateFunctions.includes("age_buckets"));
+  assert.ok(descriptor.fields.find((field) => field.id === "source.name").filterOperators.includes("contains"));
+  assert.ok(descriptor.fields.find((field) => field.id === "source.due_on").aggregateFunctions.includes("age_buckets"));
   assert.deepEqual(adapter.binding("items"), {profile: "remote_query.explorer.v1", fingerprint: "fp", publication: "alpha", revision: "sha256:r1"});
   const unsupported = descriptor.metadata.canonical.unsupported.map((item) => item.id);
   assert.ok(!unsupported.includes("view.aggregate"));
@@ -79,7 +79,7 @@ test("a host without explorer.v1 stays Detail-only with the unsupported list", a
   assert.deepEqual(descriptor.capabilities, ["detail"]);
   assert.ok(descriptor.metadata.canonical.unsupported.some((item) => item.id === "view.aggregate"));
   assert.ok(!calls.some((call) => call.path.endsWith("/explorer-features")));
-  await assert.rejects(adapter.execute(spa("aggregate", {groupBy: ["id"]})), (error) => error instanceof ExplorerIntentError && error.code === "operation_unsupported");
+  await assert.rejects(adapter.execute(spa("aggregate", {groupBy: ["source.id"]})), (error) => error instanceof ExplorerIntentError && error.code === "operation_unsupported");
   await assert.rejects(adapter.export(spa("detail", {}), "csv"), /export requires/);
 });
 
@@ -87,21 +87,21 @@ test("aggregate with rollup: group/aggregate selections, no sort, rowMeta drilld
   let sent;
   const {fetch} = host({answer: (body) => {
     sent = body;
-    return Response.json(result(body.query, [col("active", "boolean", "group", {field: "active"}), col("sum_amount", "decimal", "aggregate", {aggregate: "sum", field: "amount"})],
+    return Response.json(result(body.query, [col("active", "boolean", "group", {field: "active"}), col("sum_source_amount", "decimal", "aggregate", {aggregate: "sum", field: "amount"})],
       [[false, "10.5"], [true, "3"], [null, "13.50"]],
       {row_meta: [{level: 1, kind: "detail", drilldown: {column: "active", filters: [{field: "active", op: "eq", value: false}]}}, {level: 1, kind: "detail", drilldown: {column: "active", filters: [{field: "active", op: "eq", value: true}]}}, {level: 0, kind: "total", drilldown: null}]}));
   }});
   const adapter = adapterFor(fetch);
   await adapter.getDomain("items");
-  const response = await adapter.execute(spa("aggregate", {groupBy: ["active"], aggregates: [{field: "amount", function: "sum"}], rollup: true, orderBy: [{field: "id", direction: "desc"}]}));
+  const response = await adapter.execute(spa("aggregate", {groupBy: ["source.active"], aggregates: [{field: "source.amount", function: "sum"}], rollup: true, orderBy: [{field: "source.id", direction: "desc"}]}));
   assert.equal(sent.format, "selecto.explorer-query");
   assert.deepEqual(sent.features, {revision: "sha256:r1"});
-  assert.deepEqual(sent.query, {select: ["active", {aggregate: "sum", field: "amount", alias: "sum_amount"}], row_format: "arrays", group_by: ["active"], rollup: true, limit: 30, offset: 0});
-  assert.deepEqual(response.columns.map((column) => column.id), ["active", "sum_amount"]);
+  assert.deepEqual(sent.query, {select: ["active", {aggregate: "sum", field: "amount", alias: "sum_source_amount"}], row_format: "arrays", group_by: ["active"], rollup: true, limit: 30, offset: 0});
+  assert.deepEqual(response.columns.map((column) => column.id), ["source.active", "sum_source_amount"]);
   assert.equal(response.columns[1].label, "Sum of amount");
   assert.equal(response.columns[1].encoding, "decimal-string");
-  assert.deepEqual(response.rows[2], {active: null, sum_amount: "13.50"});
-  assert.deepEqual(response.rowMeta[0], {rollupLevel: 1, rollupKind: "detail", drilldowns: [{columnId: "active", constraints: [{field: "active", operator: "equals", value: false}]}]});
+  assert.deepEqual(response.rows[2], {"source.active": null, sum_source_amount: "13.50"});
+  assert.deepEqual(response.rowMeta[0], {rollupLevel: 1, rollupKind: "detail", drilldowns: [{columnId: "source.active", constraints: [{field: "source.active", operator: "equals", value: false}]}]});
   assert.deepEqual(response.rowMeta[2], {rollupLevel: 0, rollupKind: "total", drilldowns: []});
 });
 
@@ -113,18 +113,18 @@ test("grid: complete, two groups, date format group, derived drilldown leaf roun
       [["2026-01", true, 2]], {complete: true, row_meta: [{level: 2, kind: "detail", drilldown: {column: "active", filters: [{field: "due_on", format: "month", op: "eq", value: "2026-01"}, {field: "active", op: "eq", value: true}]}}]}));
   }});
   const adapter = adapterFor(fetch);
-  const response = await adapter.execute(spa("aggregate", {groupBy: ["due_on", "active"], groupConfigs: {due_on: {groupFormat: "month"}}, aggregates: [{field: "id", function: "count", alias: "n"}], aggregateGrid: true, aggregateGridColorize: true, rollup: true}));
+  const response = await adapter.execute(spa("aggregate", {groupBy: ["source.due_on", "source.active"], groupConfigs: {"source.due_on": {groupFormat: "month"}}, aggregates: [{field: "source.id", function: "count", alias: "n"}], aggregateGrid: true, aggregateGridColorize: true, rollup: true}));
   assert.equal(sent.query.complete, true);
   assert.equal(sent.query.rollup, undefined);
   assert.equal(sent.query.limit, 50);
   assert.deepEqual(sent.query.group_by, [{field: "due_on", alias: "due_on_month", format: "month"}, "active"]);
   assert.deepEqual(sent.query.select, [{group: "due_on_month"}, "active", {aggregate: "count", field: "id", alias: "n"}]);
-  assert.equal(response.columns[0].id, "due_on");
+  assert.equal(response.columns[0].id, "source.due_on");
   assert.equal(response.columns[0].type, "text");
   assert.equal(response.metadata.canonical.complete, true);
   assert.deepEqual(response.gridColor, {scale: "linear", measure: "n", minimum: 2, maximum: 2, minimumPositive: 2});
   const constraint = response.rowMeta[0].drilldowns[0].constraints[0];
-  assert.deepEqual(constraint, {field: "due_on", operator: "equals", value: "2026-01", groupConfig: {groupFormat: "month"}});
+  assert.deepEqual(constraint, {field: "source.due_on", operator: "equals", value: "2026-01", groupConfig: {groupFormat: "month"}});
   // The drilldown constraint as a Detail filter is the host's derived-group leaf.
   const plan = planExplorerV1Query(spa("detail", {}, {conjunction: "and", items: [{id: "d", ...constraint}]}), features());
   assert.deepEqual(plan.query.filters, [{field: "due_on", format: "month", op: "eq", value: "2026-01"}]);
@@ -132,22 +132,22 @@ test("grid: complete, two groups, date format group, derived drilldown leaf roun
 
 test("OR groups become any/all nodes; empty groups drop; integer text values are exact JSON integers", () => {
   const filters = {conjunction: "and", items: [
-    {conjunction: "or", items: [{id: "a", field: "name", operator: "contains", value: "lt"}, {id: "b", field: "id", operator: "in", value: ["1", 3]}]},
+    {conjunction: "or", items: [{id: "a", field: "source.name", operator: "contains", value: "lt"}, {id: "b", field: "source.id", operator: "in", value: ["1", 3]}]},
     {conjunction: "and", items: []},
-    {id: "c", field: "amount", operator: "between", value: "1.00", valueTo: "99999999999999999.99"},
-    {id: "d", field: "active", operator: "is_not_null"},
+    {id: "c", field: "source.amount", operator: "between", value: "1.00", valueTo: "99999999999999999.99"},
+    {id: "d", field: "source.active", operator: "is_not_null"},
   ]};
-  const {query} = planExplorerV1Query(spa("detail", {selected: ["id", "amount"]}, filters), features());
+  const {query} = planExplorerV1Query(spa("detail", {selected: ["source.id", "source.amount"]}, filters), features());
   assert.deepEqual(query.filters, [
     {any: [{field: "name", op: "text_contains", value: "lt"}, {field: "id", op: "in", value: [1, 3]}]},
     {field: "amount", op: "between", value: "1.00", end: "99999999999999999.99"},
     {field: "active", op: "not_null"},
   ]);
   assert.equal(query.count, "exact");
-  const only = planExplorerV1Query(spa("detail", {}, {conjunction: "or", items: [{id: "a", field: "id", operator: "equals", value: 1}, {id: "b", field: "id", operator: "equals", value: 2}]}), features()).query;
+  const only = planExplorerV1Query(spa("detail", {}, {conjunction: "or", items: [{id: "a", field: "source.id", operator: "equals", value: 1}, {id: "b", field: "source.id", operator: "equals", value: 2}]}), features()).query;
   assert.deepEqual(only.filters, [{any: [{field: "id", op: "eq", value: 1}, {field: "id", op: "eq", value: 2}]}]);
-  assert.throws(() => planExplorerV1Query(spa("detail", {}, {conjunction: "or", items: [{id: "a", field: "id", operator: "equals", value: 1}, {id: "b", field: "id", operator: "equals", value: 2}]}), features({overrides: {recursive_filters: false}})), /OR and nested/);
-  assert.throws(() => planExplorerV1Query(spa("detail", {}, {conjunction: "and", items: [{id: "a", field: "id", operator: "equals", value: "9007199254740993"}]}), features()), /exact JSON number range/);
+  assert.throws(() => planExplorerV1Query(spa("detail", {}, {conjunction: "or", items: [{id: "a", field: "source.id", operator: "equals", value: 1}, {id: "b", field: "source.id", operator: "equals", value: 2}]}), features({overrides: {recursive_filters: false}})), /OR and nested/);
+  assert.throws(() => planExplorerV1Query(spa("detail", {}, {conjunction: "and", items: [{id: "a", field: "source.id", operator: "equals", value: "9007199254740993"}]}), features()), /exact JSON number range/);
 });
 
 test("buckets: text grammar to structured specs; bucket measures emit one column per range", () => {
@@ -156,25 +156,25 @@ test("buckets: text grammar to structured specs; bucket measures emit one column
   assert.deepEqual(parseBucketRanges("today, yesterday, 2-7", "relative_days").ranges[1], {min: -1, max: -1, label: "yesterday"});
   assert.throws(() => parseBucketRanges("*/5", "elapsed_days"), /step/);
   assert.throws(() => parseBucketRanges("9-1", "numeric"), /reversed/);
-  const plan = planExplorerV1Query(spa("aggregate", {groupBy: ["amount"], groupConfigs: {amount: {groupFormat: "buckets", bucketRanges: "0-9, 10+"}},
-    aggregates: [{field: "due_on", function: "age_buckets", bucketRanges: "0-30, 31+"}]}), features());
+  const plan = planExplorerV1Query(spa("aggregate", {groupBy: ["source.amount"], groupConfigs: {"source.amount": {groupFormat: "buckets", bucketRanges: "0-9, 10+"}},
+    aggregates: [{field: "source.due_on", function: "age_buckets", bucketRanges: "0-30, 31+"}]}), features());
   assert.deepEqual(plan.query.group_by, [{field: "amount", alias: "amount_buckets", buckets: {kind: "numeric", ranges: [{min: 0, max: 9, label: "0-9"}, {min: 10, label: "10+"}]}}]);
-  assert.deepEqual(plan.query.select[1], {aggregate: "bucket_count", field: "due_on", alias: "age_buckets_due_on", buckets: {kind: "elapsed_days", ranges: [{min: 0, max: 30, label: "0-30"}, {min: 31, label: "31+"}]}});
-  assert.deepEqual(plan.columns.slice(1).map((column) => [column.wire, column.spa.id, column.spa.label]), [["age_buckets_due_on__bucket_1", "age_buckets_due_on__bucket_1", "due_on: 0-30 days"], ["age_buckets_due_on__bucket_2", "age_buckets_due_on__bucket_2", "due_on: 31+ days"]]);
-  assert.throws(() => planExplorerV1Query(spa("aggregate", {groupBy: ["name"], groupConfigs: {name: {groupFormat: "text_prefix"}}, aggregates: []}), features()), /not part of remote_query.explorer.v1/);
-  assert.throws(() => planExplorerV1Query(spa("aggregate", {groupBy: ["amount"], groupConfigs: {amount: {groupFormat: "buckets", bucketRanges: "1-2"}}}), features({overrides: {buckets: false}})), /not available/);
+  assert.deepEqual(plan.query.select[1], {aggregate: "bucket_count", field: "due_on", alias: "age_buckets_source_due_on", buckets: {kind: "elapsed_days", ranges: [{min: 0, max: 30, label: "0-30"}, {min: 31, label: "31+"}]}});
+  assert.deepEqual(plan.columns.slice(1).map((column) => [column.wire, column.spa.id, column.spa.label]), [["age_buckets_source_due_on__bucket_1", "age_buckets_source_due_on__bucket_1", "due_on: 0-30 days"], ["age_buckets_source_due_on__bucket_2", "age_buckets_source_due_on__bucket_2", "due_on: 31+ days"]]);
+  assert.throws(() => planExplorerV1Query(spa("aggregate", {groupBy: ["source.name"], groupConfigs: {"source.name": {groupFormat: "text_prefix"}}, aggregates: []}), features()), /not part of remote_query.explorer.v1/);
+  assert.throws(() => planExplorerV1Query(spa("aggregate", {groupBy: ["source.amount"], groupConfigs: {"source.amount": {groupFormat: "buckets", bucketRanges: "1-2"}}}), features({overrides: {buckets: false}})), /not available/);
 });
 
 test("Detail: repeated columns alias, exact count, summary aggregates and refusals of unpromised members", () => {
-  const plan = planExplorerV1Query(spa("detail", {selected: ["id", "amount"], columns: [{field: "id"}, {field: "amount", alias: "Amt"}, {field: "id", alias: "Again"}], orderBy: [{field: "amount", direction: "desc"}]}), features());
+  const plan = planExplorerV1Query(spa("detail", {selected: ["source.id", "source.amount"], columns: [{field: "source.id"}, {field: "source.amount", alias: "Amt"}, {field: "source.id", alias: "Again"}], orderBy: [{field: "source.amount", direction: "desc"}]}), features());
   assert.deepEqual(plan.query.select, ["id", "amount", {field: "id", alias: "id_2"}]);
-  assert.deepEqual(plan.columns.map((column) => column.spa.id), ["id", "amount", "id~2"]);
+  assert.deepEqual(plan.columns.map((column) => column.spa.id), ["source.id", "source.amount", "source.id~2"]);
   assert.deepEqual(plan.query.order_by, [{field: "amount", direction: "desc"}]);
-  const summary = planExplorerV1Query(spa("aggregate", {aggregates: [{field: "active", function: "true_percentage"}, {field: "amount", function: "sum", ignoreNulls: "auto"}]}), features()).query;
-  assert.deepEqual(summary.select, [{aggregate: "true_percentage", field: "active", alias: "true_percentage_active"}, {aggregate: "sum", field: "amount", alias: "sum_amount", ignore_nulls: "auto"}]);
+  const summary = planExplorerV1Query(spa("aggregate", {aggregates: [{field: "source.active", function: "true_percentage"}, {field: "source.amount", function: "sum", ignoreNulls: "auto"}]}), features()).query;
+  assert.deepEqual(summary.select, [{aggregate: "true_percentage", field: "active", alias: "true_percentage_source_active"}, {aggregate: "sum", field: "amount", alias: "sum_source_amount", ignore_nulls: "auto"}]);
   assert.equal(summary.group_by, undefined);
-  assert.throws(() => planExplorerV1Query(spa("aggregate", {aggregates: [{field: "active", function: "true_count"}]}), features({overrides: {boolean_aggregates: false}})), /boolean aggregates/);
-  assert.throws(() => planExplorerV1Query(spa("graph", {groupBy: ["id"]}), features({overrides: {graph: false}})), /graph view is not available/);
+  assert.throws(() => planExplorerV1Query(spa("aggregate", {aggregates: [{field: "source.active", function: "true_count"}]}), features({overrides: {boolean_aggregates: false}})), /boolean aggregates/);
+  assert.throws(() => planExplorerV1Query(spa("graph", {groupBy: ["source.id"]}), features({overrides: {graph: false}})), /graph view is not available/);
   assert.equal(planExplorerV1Query(spa("detail", {}), features({overrides: {count_exact: false}})).query.count, undefined);
   assert.throws(() => planExplorerV1Query(spa("detail", {}, undefined, {number: 1, size: 500}), features()), /at most 100 rows/);
 });
@@ -198,14 +198,14 @@ test("export downloads through queryExplorer with the Accept media type and host
   let sent, accept;
   const {fetch} = host({answer: () => {throw new Error("no json query");}, exported: (body, init) => { sent = body; accept = new Headers(init.headers).get("accept"); return new Response("id\r\n1\r\n", {headers: {"content-type": "text/csv; charset=utf-8", "content-disposition": "attachment; filename=\"items.csv\""}}); }});
   const adapter = adapterFor(fetch);
-  const file = await adapter.export(spa("aggregate", {groupBy: ["active", "due_on"], aggregates: [{field: "id", function: "count"}], aggregateGrid: true}, undefined, {number: 2, size: 10}), "csv");
+  const file = await adapter.export(spa("aggregate", {groupBy: ["source.active", "source.due_on"], aggregates: [{field: "source.id", function: "count"}], aggregateGrid: true}, undefined, {number: 2, size: 10}), "csv");
   assert.equal(accept, "text/csv");
   assert.deepEqual(sent.query.export, {all_rows: true, shape: "rows"});
   assert.equal(sent.query.limit, undefined);
   assert.equal(file.filename, "items.csv");
   assert.equal(await file.data.text(), "id\r\n1\r\n");
   await assert.rejects(adapter.export(spa("detail", {}), "xlsx"), /xlsx export is not available/);
-  const grid = planExplorerV1Query({...spa("aggregate", {groupBy: ["active", "due_on"], aggregates: [{field: "id", function: "count"}], aggregateGrid: true}), exportShape: "grid"}, features(), {export: true}).query;
+  const grid = planExplorerV1Query({...spa("aggregate", {groupBy: ["source.active", "source.due_on"], aggregates: [{field: "source.id", function: "count"}], aggregateGrid: true}), exportShape: "grid"}, features(), {export: true}).query;
   assert.deepEqual(grid.export, {all_rows: true, shape: "grid"});
   assert.equal(grid.complete, undefined);
 });
@@ -215,5 +215,5 @@ test("descriptor of a narrow host lists every unpromised feature", () => {
   assert.deepEqual(descriptor.capabilities, ["detail"]);
   const ids = descriptor.metadata.canonical.unsupported.map((item) => item.id);
   for (const id of ["view.aggregate", "view.graph", "view.aggregate_grid", "group.buckets", "service.export", "page.total_rows"]) assert.ok(ids.includes(id), id);
-  assert.ok(!descriptor.fields.find((field) => field.id === "amount").aggregateFunctions.includes("buckets"));
+  assert.ok(!descriptor.fields.find((field) => field.id === "source.amount").aggregateFunctions.includes("buckets"));
 });
