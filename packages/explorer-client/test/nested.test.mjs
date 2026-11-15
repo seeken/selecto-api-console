@@ -83,3 +83,25 @@ test("fresh discovery every execution rejects authenticated publication drift be
   const client=e.createExplorerClient({fetch});const current=await client.getNestedDetailContext("pilot"),i=fullIntent(x);await client.executeNestedDetailIntent(i);assert.equal(posts,1);assert.equal(current.binding.publication,"pub/alpha");assert.equal(gets.filter(p=>p==="/api/v1/selecto/catalog").length,2);
   pub="pub/beta";await assert.rejects(client.executeNestedDetailIntent(i),error=>error.code==="stale_nested_detail_context");assert.equal(posts,1);
 });
+
+for (const [code, status] of [
+  ["unsupported_media_type", 415],
+  ["unsupported_protocol_version", 400],
+  ["missing_tenant_scope", 403],
+  ["operation_forbidden", 403],
+]) {
+  test(`nested Explorer execution preserves governed ${code}`, async () => {
+    const x = context();
+    const fetch = async path => {
+      if (path === "/api/v1/selecto/catalog") return Response.json({format: "selecto.domain-catalog", format_version: 1, domains: [x.entry]});
+      if (path === "/api/pilot/manifest") return Response.json(x.manifest);
+      if (path === "/api/pilot/domain") return Response.json(x.canonicalDomain);
+      if (path === "/api/pilot/nested") return Response.json(x.features);
+      assert.equal(path, "/api/pilot/query");
+      return Response.json({ok: false, error: {code, message: "Request refused.", details: {}}}, {status});
+    };
+    const client = e.createExplorerClient({fetch});
+    await assert.rejects(client.executeNestedDetailIntent(fullIntent(x)), error =>
+      error instanceof c.CanonicalHttpError && error.status === status && error.code === code && c.nestedDetailRefusal(error) === null);
+  });
+}

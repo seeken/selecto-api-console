@@ -99,3 +99,21 @@ test("sidecar requires whole encoded context to fit, independently of per-token 
   const c0=structuredClone(features);c0.revision="\x01".repeat(1024);assert.throws(()=>c.assertNestedDetailFeatures(c0),/header limit/);
   const all=structuredClone(features);for(const key of ["fingerprint","publication"])all.domain[key]="\x01".repeat(1024);all.revision="\x01".repeat(1024);assert.throws(()=>c.assertNestedDetailFeatures(all),/header limit/);
 });
+
+for (const [code, status] of [
+  ["unsupported_media_type", 415],
+  ["unsupported_protocol_version", 400],
+  ["missing_tenant_scope", 403],
+  ["operation_forbidden", 403],
+]) {
+  test(`nested transport preserves governed ${code} and rejects mismatched status`, async () => {
+    const {features, context, query, manifest} = fixture();
+    const envelope = {ok: false, error: {code, message: "Request refused.", details: {}}};
+    let responseStatus = status;
+    const client = c.createCanonicalClient({fetch: async () => Response.json(envelope, {status: responseStatus})});
+    await assert.rejects(client.queryNestedDetail(manifest, query, {features, context}), error =>
+      error instanceof c.CanonicalHttpError && error.status === status && error.code === code);
+    responseStatus = 500;
+    await assert.rejects(client.queryNestedDetail(manifest, query, {features, context}), c.CanonicalWireError);
+  });
+}
