@@ -27,3 +27,17 @@ test("the generated asset manifest covers every shared browser artifact", async 
     "perl.css"
   ].sort().map((name) => name.endsWith("min.js") ? `vendor/${name}` : name).sort());
 });
+
+
+test("the canonical Perl theme and built asset retain description and debug-trip styles", async () => {
+  const source = await readFile(resolve(packageRoot, "src/perl.css"), "utf8");
+  const built = await readFile(resolve(packageRoot, "dist/perl.css"), "utf8");
+  for (const css of [source, built]) {
+    assert.match(css, /\.sc-field-description[^{}]*\{[^}]*white-space: pre-line;/);
+    assert.match(css, /th\.sc-described\s*\{[^}]*cursor: help;/);
+    assert.match(css, /\.sc-debug-trips ol\s*\{[^}]*overflow: auto;/);
+    assert.match(css, /\.sc-debug-trip-phase\s*\{[^}]*color: var\(--sc-accent\);/);
+    assert.match(css, /\.sc-debug-trip-ms\s*\{[^}]*text-align: right;/);
+  }
+  assert.equal(built, source);
+});
