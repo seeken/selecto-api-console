@@ -361,6 +361,81 @@ test("discovers safe OpenAPI operation headers for governed writes", () => {
   assert.doesNotMatch(consoleInstance.buildWriteRequest().errors.join(" "), /If-Match/);
 });
 
+test("shows host-declared write properties such as an order's vehicles", () => {
+  const vehicle = {
+    type: "object", additionalProperties: false,
+    properties: {vin: {type: "string"}, make: {type: "string"}},
+  };
+  const insertExample = [{vin: "1FTER4HP9SG346599", make: "FORD"}, {vin: "1HGCM82633A004352", make: "HONDA"}];
+  const openapi = {
+    paths: {"/api2/consignments/v1/write": {post: {requestBody: {content: {
+      "application/json": {schema: {$ref: "#/components/schemas/SelectoWrite"}},
+    }}}}},
+    components: {schemas: {
+      ConsignmentVehicle: vehicle,
+      SelectoWrite: {type: "object", properties: {
+        operation: {type: "string"}, assignments: {type: "object"},
+        rush: {type: "boolean", description: "Rush the order.", "x-selecto-operations": ["insert", "update"]},
+        vehicles: {
+          description: "Insert: the vehicles (an array). Update: {add, update, remove}.",
+          "x-selecto-operations": ["insert", "update"],
+          "x-selecto-examples": {insert: insertExample, update: {add: [insertExample[0]], remove: [9001]}},
+          oneOf: [{type: "array", items: {$ref: "#/components/schemas/ConsignmentVehicle"}}],
+        },
+      }},
+    }},
+  };
+  const path = "/api2/consignments/v1/write";
+  assert.deepEqual(api.writeExtensionSpecs(openapi, path).map((spec) => [spec.name, spec.boolean]),
+    [["rush", true], ["vehicles", false]], "governed properties are not repeated as extensions");
+  assert.deepEqual(api.schemaExample(openapi, {oneOf: [{type: "array", items: {$ref: "#/components/schemas/ConsignmentVehicle"}}]}, "insert"),
+    [{vin: "", make: ""}], "an example follows the schema when the host gives none");
+
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.writePath = path;
+  consoleInstance.openapi = openapi;
+  consoleInstance.domain = {
+    source: {
+      primary_key: "id", fields: ["id", "cons_ref"],
+      columns: {id: {type: "integer"}, cons_ref: {type: "string"}},
+    },
+    writes: {
+      operations: {insert: {enabled: true}, update: {enabled: true}, delete: {enabled: true}},
+      fields: {cons_ref: {insertable: true, updatable: true}},
+    },
+  };
+  consoleInstance.seedMutationState();
+  assert.equal(consoleInstance.writeState.operation, "insert");
+  assert.deepEqual(consoleInstance.writeExtensions().map((spec) => spec.name), ["rush", "vehicles"]);
+  assert.deepEqual(consoleInstance.writeExtensions("delete"), [], "delete takes no extra properties");
+  const [, vehicles] = consoleInstance.writeExtensions();
+  assert.deepEqual(JSON.parse(consoleInstance.writeExtensionExample(vehicles)), insertExample,
+    "the insert example shows several vehicles");
+  assert.deepEqual(JSON.parse(consoleInstance.writeExtensionExample(vehicles, "update")).remove, [9001]);
+
+  consoleInstance.writeState.included.cons_ref = true;
+  consoleInstance.writeState.assignments.cons_ref = "PO-77";
+  consoleInstance.writeState.extensions = {
+    vehicles: {included: true, text: consoleInstance.writeExtensionExample(vehicles)},
+    rush: {included: true, text: "false"},
+  };
+  const built = consoleInstance.buildWriteRequest();
+  assert.deepEqual(built.errors, []);
+  assert.deepEqual(built.payload, {
+    operation: "insert", assignments: {cons_ref: "PO-77"}, expected_count: 1,
+    vehicles: insertExample, rush: false,
+  });
+
+  consoleInstance.loadWritePayloadIntoForm(built.payload);
+  assert.deepEqual(consoleInstance.buildWriteRequest(), {payload: built.payload, errors: []},
+    "a request with vehicles loads back into the form");
+
+  consoleInstance.writeState.extensions.vehicles.text = "[{";
+  assert.deepEqual(consoleInstance.buildWriteRequest().errors, ["vehicles must be valid JSON."]);
+  assert.throws(() => consoleInstance.writeStateFromPayload({operation: "insert", rush: "yes"}), /rush must be true or false/);
+  assert.throws(() => consoleInstance.writeStateFromPayload({operation: "delete", vehicles: []}), /Unsupported write properties: vehicles/);
+});
+
 test("builds write and resolved action cURL commands from their current JSON", () => {
   const consoleInstance = new api.APIConsole({dataset: {curlAuth: "basic"}});
   const previousWindow = global.window;
