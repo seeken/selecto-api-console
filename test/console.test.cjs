@@ -436,6 +436,142 @@ test("shows host-declared write properties such as an order's vehicles", () => {
   assert.throws(() => consoleInstance.writeStateFromPayload({operation: "delete", vehicles: []}), /Unsupported write properties: vehicles/);
 });
 
+test("keeps a referenced write property's own hints and offers its example choices", () => {
+  const openapi = {
+    paths: {"/api2/consignments/v1/write": {post: {requestBody: {content: {
+      "application/json": {schema: {$ref: "#/components/schemas/SelectoWrite"}},
+    }}}}},
+    components: {schemas: {
+      LocationRef: {description: "A location.", oneOf: [{type: "string"}, {type: "object"}]},
+      SelectoWrite: {type: "object", properties: {
+        operation: {type: "string"},
+        origin: {
+          $ref: "#/components/schemas/LocationRef",
+          description: "The origin.",
+          "x-selecto-operations": ["insert"],
+          "x-selecto-examples": {insert: "consignor"},
+          "x-selecto-example-choices": [
+            {label: "Your own company", value: "consignor"},
+            {label: "A location by key", value: {key: "LOT7"}},
+            {label: "", value: "unlabelled"},
+            {label: "No value"},
+          ],
+        },
+      }},
+    }},
+  };
+  const path = "/api2/consignments/v1/write";
+  const [origin] = api.writeExtensionSpecs(openapi, path);
+  assert.deepEqual(origin.operations, ["insert"], "sibling hints survive the $ref");
+  assert.equal(origin.description, "The origin.", "and take precedence over the target's");
+  assert.ok(Array.isArray(origin.schema.oneOf), "while the target's schema is kept");
+  assert.deepEqual(origin.choices.map((choice) => choice.label), ["Your own company", "A location by key"],
+    "choices need a label and a value");
+
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.writePath = path;
+  consoleInstance.openapi = openapi;
+  consoleInstance.domain = {
+    source: {primary_key: "id", fields: ["id", "cons_ref"], columns: {id: {type: "integer"}, cons_ref: {type: "string"}}},
+    writes: {operations: {insert: {enabled: true}}, fields: {cons_ref: {insertable: true}}},
+  };
+  consoleInstance.seedMutationState();
+  assert.equal(consoleInstance.writeExtensionExample(origin), '"consignor"');
+  consoleInstance.chooseWriteExtensionExample("origin", "1");
+  assert.deepEqual(consoleInstance.writeState.extensions.origin, {included: true, text: JSON.stringify({key: "LOT7"}, null, 2)},
+    "choosing an example includes the property with it");
+  consoleInstance.writeState.included.cons_ref = true;
+  consoleInstance.writeState.assignments.cons_ref = "PO-1";
+  assert.deepEqual(consoleInstance.buildWriteRequest().payload.origin, {key: "LOT7"});
+  consoleInstance.chooseWriteExtensionExample("origin", "");
+  assert.deepEqual(consoleInstance.buildWriteRequest().payload.origin, {key: "LOT7"}, "the placeholder changes nothing");
+});
+
+test("does not require a field while a host property given instead of it is included", () => {
+  const path = "/api2/consignments/v1/write";
+  const openapi = {
+    paths: {[path]: {post: {requestBody: {content: {
+      "application/json": {schema: {$ref: "#/components/schemas/SelectoWrite"}},
+    }}}}},
+    components: {schemas: {SelectoWrite: {type: "object", properties: {
+      operation: {type: "string"},
+      origin: {type: "string", "x-selecto-operations": ["insert"], "x-selecto-replaces": ["orig_id", 7]},
+    }}}},
+  };
+  assert.deepEqual(api.writeExtensionSpecs(openapi, path)[0].replaces, ["orig_id"]);
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.writePath = path;
+  consoleInstance.openapi = openapi;
+  consoleInstance.domain = {
+    source: {primary_key: "id", fields: ["id", "orig_id", "cons_ref"],
+      columns: {id: {type: "integer"}, orig_id: {type: "integer", label: "Origin ID"}, cons_ref: {type: "string"}}},
+    writes: {operations: {insert: {enabled: true}},
+      fields: {orig_id: {insertable: true, required: true}, cons_ref: {insertable: true}}},
+  };
+  consoleInstance.seedMutationState();
+  Object.assign(consoleInstance.writeState.included, {orig_id: true, cons_ref: true});
+  Object.assign(consoleInstance.writeState.assignments, {orig_id: "", cons_ref: "PO-1"});
+  assert.ok(consoleInstance.buildWriteRequest().errors.some((error) => /orig_id\) is required/.test(error)),
+    "the field is required without the property");
+
+  consoleInstance.writeState.extensions = {origin: {included: true, text: '"consignor"'}};
+  assert.deepEqual(consoleInstance.buildWriteRequest(), {
+    payload: {operation: "insert", assignments: {cons_ref: "PO-1"}, expected_count: 1, origin: "consignor"},
+    errors: [],
+  }, "with it, the blank field is left out");
+  consoleInstance.writeState.assignments.orig_id = "12";
+  assert.deepEqual(consoleInstance.buildWriteRequest().errors, ["Give orig_id or origin, not both."]);
+});
+
+test("groups a required field with the properties it can be given as", () => {
+  const path = "/api2/consignments/v1/write";
+  const openapi = {
+    paths: {[path]: {post: {requestBody: {content: {
+      "application/json": {schema: {$ref: "#/components/schemas/SelectoWrite"}},
+    }}}}},
+    components: {schemas: {SelectoWrite: {type: "object", properties: {
+      operation: {type: "string"},
+      origin: {type: "object", "x-selecto-operations": ["insert", "update"], "x-selecto-replaces": ["orig_id"],
+        "x-selecto-examples": {insert: "consignor"}},
+      origin_key: {type: "string", "x-selecto-operations": ["insert", "update"], "x-selecto-replaces": ["orig_id"],
+        "x-selecto-examples": {insert: "LOT7"}},
+      rush: {type: "boolean"},
+    }}}},
+  };
+  const consoleInstance = new api.APIConsole({dataset: {}});
+  consoleInstance.writePath = path;
+  consoleInstance.openapi = openapi;
+  consoleInstance.domain = {
+    source: {primary_key: "id", fields: ["id", "orig_id"],
+      columns: {id: {type: "integer"}, orig_id: {type: "integer", label: "Origin ID"}}},
+    writes: {operations: {insert: {enabled: true}, update: {enabled: true}},
+      fields: {orig_id: {insertable: true, updatable: true, required: true}}},
+  };
+  consoleInstance.seedMutationState();
+  assert.deepEqual(Array.from(consoleInstance.writeAlternatives().get("orig_id"), (spec) => spec.name),
+    ["origin", "origin_key"]);
+  assert.equal(consoleInstance.writeAlternatives("update").size, 0, "only where the field is required");
+  assert.equal(consoleInstance.writeAlternativeChoice("orig_id", consoleInstance.writeAlternatives().get("orig_id")), "orig_id",
+    "the field itself is chosen first");
+  assert.match(consoleInstance.buildWriteRequest().errors.join("\n"),
+    /Origin ID \(orig_id\) is required for insert: give one of orig_id, origin, origin_key\./);
+
+  consoleInstance.chooseWriteAlternative("orig_id", "origin_key");
+  assert.equal(consoleInstance.writeState.included.orig_id, false);
+  assert.deepEqual(consoleInstance.writeState.extensions.origin_key, {included: true, text: '"LOT7"'},
+    "choosing a property includes it with its example");
+  assert.deepEqual(consoleInstance.buildWriteRequest(), {
+    payload: {operation: "insert", assignments: {}, expected_count: 1, origin_key: "LOT7"},
+    errors: ["Choose at least one assignment."],
+  });
+  consoleInstance.chooseWriteAlternative("orig_id", "origin");
+  assert.equal(consoleInstance.writeState.extensions.origin_key.included, false, "one form at a time");
+  assert.equal(consoleInstance.writeAlternativeChoice("orig_id", consoleInstance.writeAlternatives().get("orig_id")), "origin");
+  consoleInstance.chooseWriteAlternative("orig_id", "orig_id");
+  assert.equal(consoleInstance.writeState.included.orig_id, true);
+  assert.equal(consoleInstance.writeState.extensions.origin.included, false);
+});
+
 test("builds write and resolved action cURL commands from their current JSON", () => {
   const consoleInstance = new api.APIConsole({dataset: {curlAuth: "basic"}});
   const previousWindow = global.window;
