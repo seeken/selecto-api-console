@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Pivot tables set their column groups apart: a divider before each group (`sc-pivot-group-start`), a stronger one before Total (`sc-pivot-total-start`), and column values centred over their sub-columns.
+
 ## 0.6.0
 
 - Add the `spring-components` profile: `perl.css` as `selecto-components.css`, the dialog helper as `selecto-dialogs.js` and htmx 4 as `htmx.min.js`, for the Spring Boot Explorer.
