@@ -184,6 +184,31 @@ publication binding refresh before execution; changed identity blocks retained
 state instead of silently rebinding. The ordinary flat v1 chooser, snapshots,
 writes, actions and legacy bare query behavior remain separate.
 
+## Aggregates
+
+A host whose manifest lists `getExplorerFeatures` and `queryExplorer` (the
+`remote_query.explorer.v1` profile) gets an **Aggregates (explorer v1)** entry
+in Query profile. The builder offers only what the publication's
+`selecto.explorer-features` document publishes: groupable fields, the
+aggregate functions each field allows, and the subtotal modes the host
+supports.
+
+- **Group by** takes fields in order; **Aggregates** take a function, a field
+  where the function needs one, and a name.
+- **Subtotal rows** is one of none, rollup, cube, or grouping sets. Grouping
+  sets are chosen from every combination of the groups, including the grand
+  total, and every group must appear in at least one.
+- The request editor holds the `selecto.explorer-query` envelope, bound to
+  the domain fingerprint and the features revision. It can be edited by hand
+  and is sent as written; changing the builder rewrites it.
+- In the result table subtotal rows are bold and the total row is ruled off.
+  A group that a row leaves out reads **All** (or **Total**), so it is not
+  mistaken for a stored `NULL`.
+
+An incomplete draft disables Run and says what is missing. The profile is
+disabled when the host does not publish it. `remote_query.v1` itself still
+has no grouping, so the other profiles are unchanged.
+
 ## Complete nested Detail
 
 Canonical hosts can advertise `getNestedDetailFeatures` for the explicit
