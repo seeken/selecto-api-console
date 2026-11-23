@@ -370,8 +370,10 @@ th.sc-described { cursor: help; text-decoration: underline dotted; text-decorati
 .sc-table-wrap th { background: var(--sc-table-fixed-bg); color: var(--sc-muted); font-size: .72rem; letter-spacing: .05em; position: sticky; text-transform: uppercase; }
 .sc-table-wrap > table > thead > tr > th { z-index: 4; }
 .sc-table-wrap > table > thead > tr > th:first-child { box-shadow: 7px 0 10px -10px var(--sc-shadow); left: 0; z-index: 6; }
-.sc-table-wrap > table > tbody > tr > td:first-child { background: var(--sc-table-fixed-bg); box-shadow: 7px 0 10px -10px var(--sc-shadow); left: 0; position: sticky; z-index: 2; }
-.sc-table-wrap > table > tbody > tr:hover > td:first-child { background: var(--sc-table-hover-bg); }
+/* The first body cell names the row (a td, or a th when one group names it):
+   frozen like the heading above it. */
+.sc-table-wrap > table > tbody > tr > :is(td, th):first-child { background: var(--sc-table-fixed-bg); box-shadow: 7px 0 10px -10px var(--sc-shadow); left: 0; position: sticky; z-index: 2; }
+.sc-table-wrap > table > tbody > tr:hover > :is(td, th):first-child { background: var(--sc-table-hover-bg); }
 .sc-table-wrap tr:hover td { background: var(--sc-table-hover-bg); }
 .sc-aggregate-grid-wrap { max-height: 70vh; overflow: auto; }
 .sc-table-wrap > .sc-aggregate-grid > thead .sc-grid-corner { left: 0; z-index: 4; }
@@ -444,6 +446,22 @@ th.sc-described { cursor: help; text-decoration: underline dotted; text-decorati
 .sc-table-wrap .sc-pivot-group-start { box-shadow: inset 2px 0 0 var(--sc-border); padding-left: 20px; }
 .sc-table-wrap .sc-pivot-total-start { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--sc-accent) 45%, var(--sc-border)); }
 .sc-table-wrap th.sc-pivot-group-start[scope="colgroup"]:not(.sc-pivot-axis-heading) { text-align: center; }
+/* Row-group headings span every header row, so a later row's first cell is a
+   column heading: not frozen, and it keeps its divider. */
+.sc-table-wrap > :is(.sc-pivot-table, .sc-pivot-grid) > thead > tr:not(:first-child) > th:first-child { left: auto; z-index: auto; }
+.sc-table-wrap > :is(.sc-pivot-table, .sc-pivot-grid) > thead > tr:not(:first-child) > th.sc-pivot-group-start:first-child { box-shadow: inset 2px 0 0 var(--sc-border); }
+.sc-table-wrap > :is(.sc-pivot-table, .sc-pivot-grid) > thead > tr:not(:first-child) > th.sc-pivot-total-start:first-child { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--sc-accent) 45%, var(--sc-border)); }
+/* Each column heading gets a rule over the columns it spans, broken at the
+   group edges, so it visibly owns the measures below it. A heavier rule
+   closes the header. */
+.sc-table-wrap th.sc-pivot-group-start[scope="colgroup"] { padding-bottom: 14px; }
+.sc-table-wrap th.sc-pivot-group-start[scope="colgroup"]::after { border-bottom: 2px solid color-mix(in srgb, var(--sc-accent) 50%, var(--sc-border)); bottom: 6px; content: ""; left: 14px; position: absolute; right: 10px; }
+.sc-table-wrap th.sc-pivot-group-start.sc-pivot-axis-heading[scope="colgroup"]::after { border-bottom-color: var(--sc-border); border-bottom-width: 1px; }
+/* No borders between header rows: they would break the group dividers,
+   which are drawn inside the cells. The closing rule is drawn inside too. */
+.sc-table-wrap :is(.sc-pivot-table, .sc-pivot-grid) > thead th { border-bottom: 0; }
+.sc-table-wrap :is(.sc-pivot-table, .sc-pivot-grid) > thead th:not([scope="colgroup"]) { vertical-align: bottom; }
+.sc-table-wrap :is(.sc-pivot-table, .sc-pivot-grid) > thead th:not([scope="colgroup"])::after { border-bottom: 2px solid var(--sc-border); bottom: 0; content: ""; left: 0; position: absolute; right: 0; }
 .sc-rollup-continued-label, .sc-rollup-continued-measure { color: var(--sc-accent); }
 .sc-empty-cell { color: var(--sc-muted); padding: 28px !important; text-align: center !important; }
 .sc-empty { display: grid; min-height: 520px; place-content: center; text-align: center; }
@@ -564,6 +582,17 @@ th.sc-described { cursor: help; text-decoration: underline dotted; text-decorati
 .sc-row-dialog-toolbar [data-sc-row-dialog-position] { color: var(--sc-muted); font-size: .75rem; margin-left: auto; }
 .sc-row-dialog-frame-shell { background: var(--sc-canvas); min-height: 0; position: relative; }
 .sc-row-dialog-frame { display: block; }
+/* A drilldown opened over the page (Ctrl+Shift+click): its header, then the frame. */
+.sc-drilldown-dialog-panel { grid-template-rows: auto minmax(0, 1fr); }
+.sc-drilldown-dialog-tools { align-items: center; display: flex; gap: 10px; }
+.sc-drilldown-dialog-tools .sc-button { font-size: .76rem; min-height: 32px; padding: 5px 10px; }
+/* With a drilldown modifier held (data-sc-drill-open), the drilldown under
+   the pointer shows where a click opens it: a window, a tab or a dialog. */
+:root[data-sc-drill-open] .sc-drilldown-value { position: relative; }
+:root[data-sc-drill-open] .sc-drilldown-value:hover::after { background-color: var(--sc-accent); border-radius: 4px; box-shadow: 0 1px 3px var(--sc-shadow); content: ""; height: 16px; pointer-events: none; position: absolute; right: -12px; top: -10px; width: 16px; background-image: var(--sc-drill-icon); background-position: center; background-repeat: no-repeat; background-size: 12px 12px; }
+:root[data-sc-drill-open="window"] { --sc-drill-icon: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 12 12%27 fill=%27none%27 stroke=%27%23fff%27 stroke-width=%271.6%27%3E%3Cpath d=%27M5 2H2v8h8V7M7 1h4v4M11 1 5.5 6.5%27/%3E%3C/svg%3E"); }
+:root[data-sc-drill-open="tab"] { --sc-drill-icon: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 12 12%27 fill=%27none%27 stroke=%27%23fff%27 stroke-width=%271.6%27%3E%3Cpath d=%27M1 4h10v7H1zM1 4V1.5h4.5V4%27/%3E%3C/svg%3E"); }
+:root[data-sc-drill-open="dialog"] { --sc-drill-icon: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 12 12%27 fill=%27none%27 stroke=%27%23fff%27 stroke-width=%271.6%27%3E%3Crect x=%271%27 y=%271.5%27 width=%2710%27 height=%279%27 rx=%271%27/%3E%3Cpath d=%27M1 4.5h10%27/%3E%3C/svg%3E"); }
 .sc-row-dialog iframe { background: var(--sc-canvas); border: 0; display: block; height: 100%; opacity: 1; transition: opacity .12s ease; width: 100%; }
 .sc-row-dialog iframe.is-loading { opacity: .28; }
 .sc-row-dialog-loading { background: rgba(255, 255, 255, .92); border: 1px solid #d7dce0; border-radius: 8px; color: #273138; font-size: .82rem; font-weight: 750; left: 50%; padding: 9px 12px; position: absolute; top: 50%; transform: translate(-50%, -50%); z-index: 2; }

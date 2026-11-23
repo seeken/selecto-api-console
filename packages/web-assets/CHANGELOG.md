@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Row labels stay frozen while a table scrolls sideways, including summary pivots whose rows are named by a `th`.
+- Carry over the Perl components' pivot header rules (row-group headings span every header row, per-group header rules, closing rule) and the drilldown dialog layout, so `perl.css` matches what the components ship.
 - Pivot tables set their column groups apart: a divider before each group (`sc-pivot-group-start`), a stronger one before Total (`sc-pivot-total-start`), and column values centred over their sub-columns.
 
 ## 0.6.0
