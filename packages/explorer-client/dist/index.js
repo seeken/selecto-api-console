@@ -1167,7 +1167,8 @@ function nestedID(value,path,max=256) {
 }
 function nestedIntentShape(intent) {
   try {
-    requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation"],"nested.intent");
+    requiredKeys(intent,["format","format_version","mode","binding","collection_id","select","filters","order_by","limit","offset","row_format","presentation",...(Object.hasOwn(intent,"as_of")?["as_of"]:[])],"nested.intent");
+    if (Object.hasOwn(intent,"as_of")) canonical.assertAsOf(intent.as_of);
   } catch (error) {
     if (intent && typeof intent === "object" && !Array.isArray(intent) && ["where", "child_order_by", "formatter"].some(key => Object.hasOwn(intent, key))) throw nestedValidationFailure(error, "closed-intent-violation");
     throw error;
@@ -1208,7 +1209,7 @@ function validateNestedDetailIntent(intent,context) {
 }
 export function toNestedDetailQuery(intent,context) {
   assertNestedDetailIntent(intent,context);const collection=context.features.collections[0],roots=new Map(context.features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
-  const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};canonical.assertNestedDetailQuery(query,context.features);return query;
+  const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};if (intent.as_of !== undefined) query.as_of = intent.as_of;canonical.assertNestedDetailQuery(query,context.features);return query;
 }
 export function parseNestedDetailState(raw,context) {
   try {

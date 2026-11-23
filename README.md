@@ -33,8 +33,20 @@ Month to Date, Month/Quarter/Year to Date across all years, and Last 30 Days.
 The console sends the selected semantic value,
 for example `{ "op": "date_shortcut", "value": "this_week" }`; the API host
 resolves its half-open date boundaries when it executes the query (Selecto Perl
-measures them from the database's current date, so the session time zone
-decides when a day begins).
+uses the current clock by default, so the query time zone decides when a day
+begins).
+
+When the request's OpenAPI schema publishes `as_of`, an optional **As of**
+control beside the filters accepts an ISO date or full timestamp (including
+fractional seconds and an optional `Z` or `+HH:MM`/`-HH:MM` offset). **Today**
+clears it and restores the real clock. Impossible dates, times and offsets
+are refused before Run. The value survives request import, form edits, query
+URLs, profile drafts and nested private state, and appears in the cURL body.
+Bare queries send top-level `as_of`; versioned envelopes send `query.as_of`.
+Aggregate and nested controls follow their own request route's schema.
+Recursive v2 has a separate closed contract without this v1 member. Resource
+GETs expose it only if the route publishes an `as_of` query parameter. A
+response's `meta.as_of` echo appears beside the result as **As of …**.
 
 Fields follow their published roles: a field with `filterable: false` (or
 `query_filterable: false`) is not offered as a filter, and one with

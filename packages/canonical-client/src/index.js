@@ -183,6 +183,18 @@ function validDate(value) {
   const date = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
+// remote-query v1: shape plus calendar/time/offset correctness (no clock access).
+export function assertAsOf(value) {
+  const match = typeof value === "string" && value.length <= 45
+    && /^([0-9]{4}-[0-9]{2}-[0-9]{2})(?:T([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})?)?$/.exec(value);
+  const zone = match && match[6];
+  if (!match || value.startsWith("0000-") || !validDate(match[1])
+      || (match[2] !== undefined && (+match[2] > 23 || +match[3] > 59 || +match[4] > 59))
+      || (zone && zone !== "Z" && (+zone.slice(1, 3) > 23 || +zone.slice(4) > 59))) {
+    throw new CanonicalWireError("as_of", "must be a valid ISO date or timestamp");
+  }
+  return value;
+}
 function jsonScalar(value) {
   if (typeof value === "number") return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value));
   if (value === null || ["string", "boolean"].includes(typeof value)) return true;
@@ -274,7 +286,7 @@ export function assertExactResultNumbers(value, numberTokens) {
 
 export function buildRemoteRequest(fingerprint, query, requestId) {
   nonEmptyString(fingerprint, "domain.fingerprint");
-  keys(query, ["select", "projection", "view", "filters", "group_by", "segments", "parameters", "order_by", "ordering", "limit", "offset", "timezone", "row_format"], "query");
+  keys(query, ["select", "projection", "view", "filters", "group_by", "segments", "parameters", "order_by", "ordering", "limit", "offset", "timezone", "row_format", "as_of"], "query");
   if (["select", "projection", "view"].filter((key) => Object.hasOwn(query, key)).length !== 1) throw new CanonicalWireError("query", "exactly one authoring mode is required");
   if (query.select !== undefined) {
     const selected = array(query.select, "query.select");
@@ -284,6 +296,7 @@ export function buildRemoteRequest(fingerprint, query, requestId) {
   if (query.offset !== undefined) integer(query.offset, "query.offset");
   if (query.row_format !== undefined) oneOf(query.row_format, ["arrays", "objects"], "query.row_format");
   if (query.timezone !== undefined) nonEmptyString(query.timezone, "query.timezone");
+  if (query.as_of !== undefined) assertAsOf(query.as_of);
   if (!jsonScalar(query)) throw new CanonicalWireError("query", "must contain finite JSON values");
   const result = {format: "selecto.remote-query", format_version: 1, domain: {fingerprint}, query};
   if (requestId !== undefined) { nonEmptyString(requestId, "request_id"); if (requestId.length > 128) throw new CanonicalWireError("request_id", "too long"); result.request_id = requestId; }
@@ -752,7 +765,8 @@ export function assertNestedDetailScalar(value,field,path="nested.scalar",option
   if(!valid)throw new CanonicalWireError(path,`invalid nested ${field.type}/${field.encoding}`);return value;
 }
 export function assertNestedDetailQuery(query,features,options={}) {
-  assertNestedDetailFeatures(features);keys(query,["select","filters","order_by","limit","offset","row_format","timezone"],"nested.query");nestedSelection(query.select,features);
+  assertNestedDetailFeatures(features);keys(query,["select","filters","order_by","limit","offset","row_format","timezone","as_of"],"nested.query");
+  if (query.as_of !== undefined) assertAsOf(query.as_of);nestedSelection(query.select,features);
   const byPath=new Map(features.root_fields.map(f=>[f.path,f]));
   if(Object.hasOwn(query,"filters")) {
     const filters=array(query.filters,"nested.filters");if(filters.length>20)throw new CanonicalWireError("nested.filters","filter bound");
@@ -778,7 +792,7 @@ export function parseNestedDetailRequestText(text,options) {
 }
 function nestedEcho(meta,context,required) {
   if(meta===undefined){if(required)throw new CanonicalWireError("nested.meta","context required");return;}
-  keys(meta,["selecto_nested_detail","request_id"],"nested.meta");if(Object.hasOwn(meta,"request_id"))nestedRequestId(meta.request_id);
+  keys(meta,["selecto_nested_detail","request_id","as_of"],"nested.meta");if(Object.hasOwn(meta,"as_of"))assertAsOf(meta.as_of);if(Object.hasOwn(meta,"request_id"))nestedRequestId(meta.request_id);
   if(Object.hasOwn(meta,"selecto_nested_detail")){exactKeys(meta.selecto_nested_detail,["profile","fingerprint","publication","revision"],"nested.meta.context");if(Object.keys(context).some(k=>meta.selecto_nested_detail[k]!==context[k]))throw new CanonicalWireError("nested.meta.context","context drift");}
   else if(required)throw new CanonicalWireError("nested.meta.context","missing admitted context");
 }
@@ -893,12 +907,13 @@ export function assertExplorerFeatures(value, context = {}) {
 export function buildExplorerRequest(features, query, requestId) {
   record(features, "features"); record(features.domain, "features.domain");
   nonEmptyString(features.domain.fingerprint, "domain.fingerprint");
-  keys(query, ["select", "filters", "group_by", "order_by", "segments", "parameters", "limit", "offset", "timezone", "row_format", "rollup", "complete", "count", "export"], "query");
+  keys(query, ["select", "filters", "group_by", "order_by", "segments", "parameters", "limit", "offset", "timezone", "row_format", "rollup", "complete", "count", "export", "as_of"], "query");
   const selected = array(query.select, "query.select");
   if (!selected.length) throw new CanonicalWireError("query.select", "selection cannot be empty");
   if (query.limit !== undefined) integer(query.limit, "query.limit");
   if (query.offset !== undefined) integer(query.offset, "query.offset");
   if (query.row_format !== undefined) oneOf(query.row_format, ["arrays", "objects"], "query.row_format");
+  if (query.as_of !== undefined) assertAsOf(query.as_of);
   if (query.count !== undefined) oneOf(query.count, ["none", "exact"], "query.count");
   for (const key of ["rollup", "complete"]) if (query[key] !== undefined) bool(query[key], `query.${key}`);
   if (query.timezone !== undefined) assertTimezone(query.timezone);
