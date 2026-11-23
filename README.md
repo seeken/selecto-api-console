@@ -106,8 +106,12 @@ An included date field must contain an ISO `YYYY-MM-DD` value; leave an optional
 date unchecked instead of sending an empty string.
 Writable one-to-one relationships published in `writes.relationships` appear
 as optional nested forms and produce a governed `relationships` request
-object; the host remains responsible for implementing its advertised atomic
-relationship semantics.
+object. A root update may contain only an enabled related record, keeping
+`assignments: {}` at the root. For a root update, related **Delete** is offered
+only when both `allowed_ops` and the related domain's enabled operations allow
+it; it sends only `{ "operation": "delete" }` and has no assignment fields.
+An update with neither assignments nor related records remains incomplete.
+The host implements its advertised atomic relationship semantics.
 
 The **Actions** tab uses the governed action catalog published in OpenAPI.
 Input types, required values, choices, bounds, and target IDs become form

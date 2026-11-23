@@ -1429,6 +1429,16 @@
       });
     }
 
+    relationshipWriteOperations(spec, rootOperation = this.writeState.operation) {
+      if (!["insert", "update"].includes(rootOperation)) return [];
+      const allowed = new Set(Array.isArray(spec.allowed_ops) ? spec.allowed_ops : []);
+      return ["insert", "update", "delete"].filter(operation => {
+        const rule = spec.domain.writes.operations?.[operation];
+        return allowed.has(operation) && rule?.enabled
+          && (operation === "insert" || rootOperation === "update");
+      });
+    }
+
     writeOperations() {
       const operations = this.domain && this.domain.writes && this.domain.writes.operations || {};
       return ["insert", "update", "upsert", "delete"].filter((name) => {
@@ -1743,12 +1753,7 @@
       container.append(element("span", "sac-label", "Related records"));
       relationships.forEach(([name, spec]) => {
         const nestedWrites = spec.domain.writes || {};
-        const allowed = new Set(Array.isArray(spec.allowed_ops) ? spec.allowed_ops : []);
-        const operations = ["insert", "update"].filter((operation) => {
-          const operationSpec = nestedWrites.operations && nestedWrites.operations[operation];
-          return allowed.has(operation) && operationSpec && operationSpec.enabled
-            && !(operation === "update" && this.writeState.operation !== "update");
-        });
+        const operations = this.relationshipWriteOperations(spec);
         if (!operations.length) return;
         const state = this.writeState.relationships[name] || (this.writeState.relationships[name] = {
           enabled: false, operation: operations[0], assignments: {}, included: {}, returning: [],
@@ -1769,6 +1774,7 @@
         operation.dataset.sacWriteRelationshipOperation = name;
         appendOptions(operation, operations.map((value) => ({value, label: humanize(value)})), state.operation);
         fieldset.append(operationLabel, operation);
+        if (state.operation === "delete") {container.append(fieldset); return;}
 
         const fields = this.writeFieldsForOperation(
           this.relationshipFields(spec), nestedWrites.fields || {}, state.operation,
@@ -3581,7 +3587,12 @@
           const extra = onlyKeys(related, ["operation", "assignments", "returning"]);
           if (extra.length) throw new Error(`${humanize(name)} has unsupported properties: ${extra.join(", ")}.`);
           const nestedOperation = related.operation;
-          if (!["insert", "update"].includes(nestedOperation)) throw new Error(`${humanize(name)} requires an insert or update operation.`);
+          if (!this.relationshipWriteOperations(spec, operation).includes(nestedOperation)) throw new Error(`${humanize(name)} does not allow ${nestedOperation} with a root ${operation}.`);
+          if (nestedOperation === "delete") {
+            if (Object.hasOwn(related, "assignments") || Object.hasOwn(related, "returning")) throw new Error(`${humanize(name)} delete accepts only an operation.`);
+            draft.relationships[name] = {enabled: true, operation: "delete", assignments: {}, included: {}, returning: []};
+            return;
+          }
           const nestedWrites = spec.domain.writes || {};
           const nestedFields = new Map(this.relationshipFields(spec).map((field) => [field.name, field]));
           const nested = this.writeAssignmentState(
@@ -3668,7 +3679,7 @@
           payload.assignments[name] = converted.value;
           if (converted.error) errors.push(converted.error);
         });
-        if (!Object.keys(payload.assignments).length) errors.push("Choose at least one assignment.");
+        if (operation !== "update" && !Object.keys(payload.assignments).length) errors.push("Choose at least one assignment.");
       }
 
       if (["update", "delete"].includes(operation)) {
@@ -3718,15 +3729,13 @@
         const state = this.writeState.relationships[name];
         if (!state || !state.enabled) return;
         const nestedWrites = spec.domain.writes || {};
-        const allowed = new Set(Array.isArray(spec.allowed_ops) ? spec.allowed_ops : []);
         const nestedOperation = state.operation;
-        const operationSpec = nestedWrites.operations && nestedWrites.operations[nestedOperation];
-        if (!allowed.has(nestedOperation) || !operationSpec || !operationSpec.enabled) {
-          errors.push(`${humanize(name)} does not allow ${nestedOperation}.`);
+        if (!this.relationshipWriteOperations(spec, operation).includes(nestedOperation)) {
+          errors.push(`${humanize(name)} does not allow ${nestedOperation} with a root ${operation}.`);
           return;
         }
-        if (nestedOperation === "update" && operation !== "update") {
-          errors.push(`${humanize(name)} can only be updated with a root update.`);
+        if (nestedOperation === "delete") {
+          related[name] = {operation: "delete"};
           return;
         }
         const permission = nestedOperation === "insert" ? "insertable" : "updatable";
@@ -3760,6 +3769,10 @@
         if (state.returning && state.returning.length) related[name].returning = state.returning.slice();
       });
       if (Object.keys(related).length) payload.relationships = related;
+      if (operation === "update" && !Object.keys(payload.assignments).length && !Object.keys(related).length) {
+        const offersRelated = this.writeRelationships().some(([, spec]) => this.relationshipWriteOperations(spec, operation).length);
+        errors.push(offersRelated ? "Choose at least one assignment or related record." : "Choose at least one assignment.");
+      }
       this.writeExtensions(operation).forEach((spec) => {
         const state = (this.writeState.extensions || {})[spec.name];
         if (!state || !state.included) return;
