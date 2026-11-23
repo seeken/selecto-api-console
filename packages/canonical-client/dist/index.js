@@ -183,6 +183,30 @@ function validDate(value) {
   const date = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
+const periodTypes = new Set(["date", "datetime", "naive_datetime", "utc_datetime", "epoch_datetime"]);
+/** Validate an absolute calendar period; retain wall-clock text, never convert zones. */
+export function assertPeriodOn(value, type, path = "on.value") {
+  const match = typeof value === "string" && /^(\d{4})(?:-(\d{2})(?:-(\d{2})(?:[T ](\d{2})(?::(\d{2}))?)?)?)?$/.exec(value);
+  const date = match && `${match[1]}-${match[2] || "01"}-${match[3] || "01"}`;
+  if (!periodTypes.has(type) || !match || match[1] === "0000" || !validDate(date)
+      || (match[4] !== undefined && (type === "date" || +match[4] > 23))
+      || (match[5] !== undefined && +match[5] > 59)) {
+    throw new CanonicalWireError(path, "on requires a valid calendar period (year, month, day, hour or minute; date fields allow year/month/day only)");
+  }
+  return value.replace(" ", "T");
+}
+function validatePeriodOnFilters(filters, fields) {
+  if (!Array.isArray(filters)) return;
+  for (const filter of filters) {
+    if (!filter || typeof filter !== "object") continue;
+    validatePeriodOnFilters(filter.all, fields); validatePeriodOnFilters(filter.any, fields);
+    if (filter.not) validatePeriodOnFilters([filter.not], fields);
+    if (filter.op !== "on") continue;
+    const field = fields?.find(f => f.path === filter.field);
+    if (fields && (!field || !field.operators?.includes("on"))) throw new CanonicalWireError("filters", "on is not published for this field");
+    assertPeriodOn(filter.value, field?.type || "datetime");
+  }
+}
 // remote-query v1: shape plus calendar/time/offset correctness (no clock access).
 export function assertAsOf(value) {
   const match = typeof value === "string" && value.length <= 45
@@ -297,6 +321,7 @@ export function buildRemoteRequest(fingerprint, query, requestId) {
   if (query.row_format !== undefined) oneOf(query.row_format, ["arrays", "objects"], "query.row_format");
   if (query.timezone !== undefined) nonEmptyString(query.timezone, "query.timezone");
   if (query.as_of !== undefined) assertAsOf(query.as_of);
+  validatePeriodOnFilters(query.filters);
   if (!jsonScalar(query)) throw new CanonicalWireError("query", "must contain finite JSON values");
   const result = {format: "selecto.remote-query", format_version: 1, domain: {fingerprint}, query};
   if (requestId !== undefined) { nonEmptyString(requestId, "request_id"); if (requestId.length > 128) throw new CanonicalWireError("request_id", "too long"); result.request_id = requestId; }
@@ -671,7 +696,7 @@ function nestedField(field,path,child=false) {
   rootPair(field,path);
   if (!child) {
     const expected = field.type === "boolean" ? ["eq","ne","is_null","is_not_null"] : rootOps;
-    if (JSON.stringify(field.operators) !== JSON.stringify(expected)) throw new CanonicalWireError(path,"unsupported operator inventory");
+    if (!Array.isArray(field.operators) || (field.operators.includes("on") && field.type !== "date") || new Set(field.operators).size !== field.operators.length || JSON.stringify(field.operators.filter(op => op !== "on")) !== JSON.stringify(expected)) throw new CanonicalWireError(path,"unsupported operator inventory");
   }
 }
 export function assertNestedDetailFeatures(value, discovered) {
@@ -771,7 +796,7 @@ export function assertNestedDetailQuery(query,features,options={}) {
   if(Object.hasOwn(query,"filters")) {
     const filters=array(query.filters,"nested.filters");if(filters.length>20)throw new CanonicalWireError("nested.filters","filter bound");
     filters.forEach((f,i)=>{const nullOp=["is_null","is_not_null"].includes(f?.op);exactKeys(f,nullOp?["field","op"]:["field","op","value"],`nested.filters.${i}`);const field=byPath.get(f.field);if(!field||!field.operators.includes(f.op))throw new CanonicalWireError("nested.filters","unpublished field/operator");
-      if(!nullOp){if(typeof f.value==="number"){if(!["integer","decimal"].includes(field.type)||!Number.isSafeInteger(f.value))throw new CanonicalWireError("nested.filters","unsafe/nonnumeric integer");const token=options.numberTokens?.get(`/query/filters/${i}/value`);if(token!==undefined&&!/^-?(?:0|[1-9]\d*)$/.test(token))throw new CanonicalWireError("nested.filters","noninteger numeric token");}else assertNestedDetailScalar(f.value,field,`nested.filters.${i}.value`,{author:true});}});
+      if(f.op==="on")assertPeriodOn(f.value,field.type,`nested.filters.${i}.value`);else if(!nullOp){if(typeof f.value==="number"){if(!["integer","decimal"].includes(field.type)||!Number.isSafeInteger(f.value))throw new CanonicalWireError("nested.filters","unsafe/nonnumeric integer");const token=options.numberTokens?.get(`/query/filters/${i}/value`);if(token!==undefined&&!/^-?(?:0|[1-9]\d*)$/.test(token))throw new CanonicalWireError("nested.filters","noninteger numeric token");}else assertNestedDetailScalar(f.value,field,`nested.filters.${i}.value`,{author:true});}});
   }
   if(Object.hasOwn(query,"order_by")) {const orders=array(query.order_by,"nested.order_by"),seen=new Set();if(orders.length>10)throw new CanonicalWireError("nested.order_by","order bound");orders.forEach(o=>{exactKeys(o,["field","direction"],"nested.order");if(!byPath.has(o.field)||seen.has(o.field)||!["asc","desc"].includes(o.direction))throw new CanonicalWireError("nested.order","invalid/duplicate root order");seen.add(o.field);});}
   for(const [key,min,max] of [["limit",1,25],["offset",0,100000]])if(Object.hasOwn(query,key)){integer(query[key],`nested.query.${key}`,min);if(query[key]>max)throw new CanonicalWireError(key,"page bound");const token=options.numberTokens?.get(`/query/${key}`);if(token!==undefined&&!/^(?:0|[1-9]\d*)$/.test(token))throw new CanonicalWireError(key,"noninteger page token");}
@@ -827,7 +852,7 @@ export const explorerExportMediaTypes = Object.freeze({csv: "text/csv", tsv: "te
 export const explorerFieldTypes = Object.freeze(["integer", "decimal", "string", "boolean", "date", "naive_datetime", "utc_datetime"]);
 export const explorerGroupFormats = Object.freeze(["day", "day_hour", "week", "month", "quarter", "year", "month_of_year", "day_of_month", "day_of_week", "hour"]);
 export const explorerAggregates = Object.freeze(["count", "count_distinct", "sum", "avg", "min", "max", "true_count", "false_count", "true_percentage", "bucket_count"]);
-const explorerOperators = ["eq", "ne", "gt", "gte", "lt", "lte", "between", "in", "not_in", "is_null", "not_null", "starts_with", "starts_with_ci", "text_contains", "text_contains_ci", "ends_with", "ends_with_ci", "date_shortcut"];
+const explorerOperators = ["eq", "ne", "gt", "gte", "lt", "lte", "between", "in", "not_in", "is_null", "not_null", "starts_with", "starts_with_ci", "text_contains", "text_contains_ci", "ends_with", "ends_with_ci", "date_shortcut", "on"];
 const explorerBucketKinds = ["numeric", "year", "elapsed_days", "relative_days"];
 const explorerSupportFlags = ["detail", "aggregate", "graph", "rollup", "grid", "nested", "recursive_filters", "group_formats", "buckets", "boolean_aggregates", "count_exact", "text_ops", "date_shortcuts"];
 const explorerLimitNames = ["max_limit", "max_offset", "max_select", "max_filters", "max_filter_depth", "max_filter_values", "max_orders", "max_group_by", "max_aggregates", "max_groups", "max_result_cells", "max_buckets", "max_export_rows"];
@@ -882,6 +907,7 @@ export function assertExplorerFeatures(value, context = {}) {
     oneOf(field.encoding, ["json", "string", "decimal-string"], `${path}.encoding`);
     for (const key of ["nullable", "selectable", "sortable", "filterable", "groupable"]) bool(field[key], `${path}.${key}`);
     stringArray(field.operators, `${path}.operators`, explorerOperators);
+    if (field.operators.includes("on") && !periodTypes.has(field.type)) throw new CanonicalWireError(path, "on requires a temporal field");
     stringArray(field.aggregates, `${path}.aggregates`, explorerAggregates);
     stringArray(field.group_formats, `${path}.group_formats`, explorerGroupFormats);
     stringArray(field.buckets, `${path}.buckets`, explorerBucketKinds);
@@ -917,6 +943,7 @@ export function buildExplorerRequest(features, query, requestId) {
   if (query.count !== undefined) oneOf(query.count, ["none", "exact"], "query.count");
   for (const key of ["rollup", "complete"]) if (query[key] !== undefined) bool(query[key], `query.${key}`);
   if (query.timezone !== undefined) assertTimezone(query.timezone);
+  validatePeriodOnFilters(query.filters, features.fields);
   if (!jsonScalar(query)) throw new CanonicalWireError("query", "must contain finite JSON values");
   const result = {format: "selecto.explorer-query", format_version: 1, domain: {fingerprint: features.domain.fingerprint}, features: {revision: features.revision}, query};
   if (requestId !== undefined) { assertUnicode(nonEmptyString(requestId, "request_id"), "request_id", 128); if (requestId.length > 128) throw new CanonicalWireError("request_id", "too long"); result.request_id = requestId; }

@@ -161,3 +161,18 @@ test("joined raw paths get SPA-style display words without changing field identi
   assert.equal(explorerFieldLabel({id: "supplier.region_name", path: "supplier.region_name", label: "supplier.region_name"}), "Supplier Region Name");
   assert.equal(explorerFieldLabel({path: "supplier.region_name", label: "Delivery region"}), "Delivery region");
 });
+
+test('plain Explorer discovers period operators only for temporal fields and translates each precision', async()=>{
+  const {toExplorerDescriptor}=await import('../dist/index.js');
+  const m=structuredClone(metadata('alpha',['eq','on']));m.fields.push({id:'source.pickup',path:'pickup',label:'Pickup',type:'datetime',encoding:'string',nullable:true});
+  let descriptor=toExplorerDescriptor(m);
+  assert.ok(descriptor.fields.find(f=>f.id==='source.pickup').filterOperators.includes('on'));
+  assert.ok(!descriptor.fields[0].filterOperators.includes('on'));
+  for(const value of ['2026','2026-01','2026-01-15','2026-01-15T10','2026-01-15T10:30']) {
+    const r=request({filters:{conjunction:'and',items:[{id:'f',field:'source.pickup',operator:'on',value}]}});
+    assert.deepEqual(toCanonicalQuery(r,m).filters,[{field:'pickup',op:'on',value}]);
+  }
+  const invalid=request({filters:{conjunction:'and',items:[{id:'f',field:'source.pickup',operator:'on',value:'2026-13'}]}});
+  assert.throws(()=>toCanonicalQuery(invalid,m),/valid calendar period/);
+  m.query.operators=['eq'];descriptor=toExplorerDescriptor(m);assert.ok(!descriptor.fields.at(-1).filterOperators.includes('on'));assert.throws(()=>toCanonicalQuery(invalid,m),/not available|not supported/);
+});

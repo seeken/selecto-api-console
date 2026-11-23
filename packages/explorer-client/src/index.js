@@ -2,7 +2,7 @@ import * as canonical from "@selecto/canonical-client";
 
 // Comparison/null operators are remote_query.v1 base; range/list operators are
 // translated only when the publication's metadata advertises them.
-const operatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", is_null: "is_null", is_not_null: "is_not_null", between: "between", in: "in", not_in: "not_in"};
+const operatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", is_null: "is_null", is_not_null: "is_not_null", on: "on", between: "between", in: "in", not_in: "not_in"};
 const reverseOperators = Object.fromEntries(Object.entries(operatorMap).map(([key, value]) => [value, key]));
 const {record, nonEmptyString, integer, keys, safePath, CanonicalWireError} = canonical;
 
@@ -129,7 +129,7 @@ export function toExplorerDescriptor(metadata) {
     id: metadata.domain.id, name: metadata.label, source: metadata.label,
     capabilities: ["detail"], protocolFeatures: metadata.links?.api_console ? ["api_console"] : [],
     fields: metadata.fields.map((field) => ({id: field.id, label: explorerFieldLabel(field), ...(field.description ? {metadata: {description: field.description}} : {}), type: field.type === "string" ? "text" : field.type === "binary" ? "text" : field.type, encoding: field.encoding, selectable: true, sortable: true, groupable: false, aggregatable: false,
-      filterOperators: metadata.query.operators.map((op) => reverseOperators[op]).filter(Boolean)})),
+      filterOperators: metadata.query.operators.filter(op => op !== "on" || ["date","datetime","naive_datetime","utc_datetime","epoch_datetime"].includes(field.type)).map((op) => reverseOperators[op]).filter(Boolean)})),
     views: [{id: "detail", kind: "detail", label: "Detail"}],
     defaults: {selected: metadata.default_select.slice(), orderBy: [], groupBy: [], aggregates: [], rollup: true, preventDenormalization: true},
     release: {schema: "selecto.domain-publication/v1", id: metadata.domain.publication, version: metadata.domain.fingerprint, fingerprint: metadata.domain.fingerprint, status: "published"},
@@ -158,7 +158,7 @@ export function unsupportedExplorerFeatures(metadata) {
   list.push({id: "fields.joined", label: "Joined fields", reason: "explorer metadata v1 publishes root fields only"});
   if (!supports.nested) list.push({id: "fields.collections", label: "Nested collection columns", reason: richer});
   list.push({id: "columns.occurrences", label: "Repeated columns", reason: richer});
-  for (const [spa, op] of [["between", "between"], ["in", "in"], ["not_in", "not_in"], ["contains", "text_contains"], ["contains_ci", "text_contains_ci"], ["starts_with", "starts_with"], ["starts_with_ci", "starts_with_ci"], ["ends_with", "ends_with"], ["ends_with_ci", "ends_with_ci"], ["date_shortcut", "date_shortcut"]]) {
+  for (const [spa, op] of [["on", "on"], ["between", "between"], ["in", "in"], ["not_in", "not_in"], ["contains", "text_contains"], ["contains_ci", "text_contains_ci"], ["starts_with", "starts_with"], ["starts_with_ci", "starts_with_ci"], ["ends_with", "ends_with"], ["ends_with_ci", "ends_with_ci"], ["date_shortcut", "date_shortcut"]]) {
     if (!operators.has(op) || !operatorMap[spa]) list.push({id: `operator.${spa}`, label: `Filter operator ${spa.replaceAll("_", " ")}`, reason: "not advertised by this publication"});
   }
   list.push({id: "page.total_rows", label: "Total row count", reason: "no implicit count; paging uses has_more"});
@@ -219,7 +219,9 @@ export function toCanonicalQuery(request, metadata) {
     if (!op || !metadata.query.operators.includes(op)) refuse(`${path}.operator`, "operator not supported by this profile");
     if (filter.valueTo !== undefined && op !== "between") refuse(`${path}.valueTo`, "only between carries an end value", "invalid_query");
     const result = {field: field(filter.field, `${path}.field`).path, op};
-    if (op === "between") {
+    if (op === "on") {
+      result.value = canonical.assertPeriodOn(filter.value, field(filter.field, `${path}.field`).type, `${path}.value`);
+    } else if (op === "between") {
       if (!Object.hasOwn(filter, "value") || !Object.hasOwn(filter, "valueTo")) refuse(path, "between requires value and valueTo", "invalid_query");
       result.value = filter.value; result.end = filter.valueTo;
     } else if (op === "in" || op === "not_in") {
@@ -402,7 +404,7 @@ export const detailProfile = Object.freeze({
 
 // ---- remote_query.explorer.v1 strategy (harness docs/remote_query_explorer.md 6.6) ----
 
-const explorerOperatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", between: "between", in: "in", not_in: "not_in", contains: "text_contains", contains_ci: "text_contains_ci", starts_with: "starts_with", starts_with_ci: "starts_with_ci", ends_with: "ends_with", ends_with_ci: "ends_with_ci", date_shortcut: "date_shortcut", is_null: "is_null", is_not_null: "not_null"};
+const explorerOperatorMap = {equals: "eq", not_equals: "ne", greater_than: "gt", greater_than_or_equal: "gte", less_than: "lt", less_than_or_equal: "lte", on: "on", between: "between", in: "in", not_in: "not_in", contains: "text_contains", contains_ci: "text_contains_ci", starts_with: "starts_with", starts_with_ci: "starts_with_ci", ends_with: "ends_with", ends_with_ci: "ends_with_ci", date_shortcut: "date_shortcut", is_null: "is_null", is_not_null: "not_null"};
 const explorerReverseOperators = Object.fromEntries(Object.entries(explorerOperatorMap).map(([spa, op]) => [op, spa]));
 const explorerFunctionLabel = {count: "Count", count_distinct: "Distinct count", sum: "Sum", avg: "Average", min: "Min", max: "Max", true_count: "True count", false_count: "False count", true_percentage: "True percentage"};
 const explorerGroupFormatIds = new Set(["day", "day_hour", "week", "month", "quarter", "year", "month_of_year", "day_of_month", "day_of_week", "hour"]);
@@ -635,7 +637,9 @@ function planExplorerV1(request, features, options) {
     if (!op || !target.operators.includes(op)) refuse(`${path}.operator`, `operator ${item.operator} is not available for ${explorerFieldLabel(target)}`);
     if (item.valueTo !== undefined && item.valueTo !== null && item.valueTo !== "" && op !== "between") refuse(`${path}.valueTo`, "only between carries an end value", "invalid_query");
     const leaf = {field: target.path, op};
-    if (op === "between") {
+    if (op === "on") {
+      leaf.value = canonical.assertPeriodOn(item.value, target.type, `${path}.value`);
+    } else if (op === "between") {
       leaf.value = explorerFilterValue(item.value, target, `${path}.value`);
       leaf.end = explorerFilterValue(item.valueTo, target, `${path}.valueTo`);
     } else if (op === "in" || op === "not_in") {
@@ -1183,7 +1187,7 @@ function nestedIntentShape(intent) {
   intent.select.forEach(slot=>{if(Array.isArray(slot)){children++;if(!slot.length||slot.length>20||new Set(slot).size!==slot.length)refuse("nested.intent.select","child selection bound/duplicate","invalid_query");slot.forEach(id=>nestedID(id,"nested.intent.child"));}else{nestedID(slot,"nested.intent.select");if(rootIDs.has(slot))refuse("nested.intent.select","duplicate root ID","invalid_query");rootIDs.add(slot);}});
   if(children!==1||!rootIDs.size||rootIDs.size>20)refuse("nested.intent.select","one collection and root selection required","invalid_query");
   if(!Array.isArray(intent.filters)||intent.filters.length>20)refuse("nested.intent.filters","filter bound","invalid_query");const filterIDs=new Set();
-  intent.filters.forEach(f=>{const nullOp=["is_null","is_not_null"].includes(f?.op);requiredKeys(f,nullOp?["id","field","op"]:["id","field","op","value"],"nested.intent.filter");nestedID(f.id,"nested.intent.filter.id",128);if(/[\u0000-\u001f\u007f]/.test(f.id)||filterIDs.has(f.id))refuse("nested.intent.filter.id","control/duplicate filter ID","invalid_query");filterIDs.add(f.id);nestedID(f.field,"nested.intent.filter.field");if(!["eq","ne","gt","gte","lt","lte","is_null","is_not_null"].includes(f.op))refuse("nested.intent.filter.op","unknown operator");if(!nullOp){if(typeof f.value!=="string"&&typeof f.value!=="boolean")refuse("nested.intent.filter.value","typed text/boolean required","invalid_query");if(typeof f.value==="string")canonical.assertUnicode(f.value,"nested.intent.filter.value",16384);}});
+  intent.filters.forEach(f=>{const nullOp=["is_null","is_not_null"].includes(f?.op);requiredKeys(f,nullOp?["id","field","op"]:["id","field","op","value"],"nested.intent.filter");nestedID(f.id,"nested.intent.filter.id",128);if(/[\u0000-\u001f\u007f]/.test(f.id)||filterIDs.has(f.id))refuse("nested.intent.filter.id","control/duplicate filter ID","invalid_query");filterIDs.add(f.id);nestedID(f.field,"nested.intent.filter.field");if(!["eq","ne","gt","gte","lt","lte","is_null","is_not_null","on"].includes(f.op))refuse("nested.intent.filter.op","unknown operator");if(!nullOp){if(typeof f.value!=="string"&&typeof f.value!=="boolean")refuse("nested.intent.filter.value","typed text/boolean required","invalid_query");if(typeof f.value==="string")canonical.assertUnicode(f.value,"nested.intent.filter.value",16384);}});
   if(!Array.isArray(intent.order_by)||intent.order_by.length>10)refuse("nested.intent.order_by","order bound","invalid_query");const seen=new Set();intent.order_by.forEach(o=>{requiredKeys(o,["field","direction"],"nested.intent.order");nestedID(o.field,"nested.intent.order.field");if(seen.has(o.field)||!["asc","desc"].includes(o.direction))refuse("nested.intent.order","duplicate/direction","invalid_query");seen.add(o.field);});
   integer(intent.limit,"nested.intent.limit",1);integer(intent.offset,"nested.intent.offset");if(intent.limit>25||intent.offset>100000)refuse("nested.intent.page","page bound","invalid_query");if(!["arrays","objects"].includes(intent.row_format))refuse("nested.intent.row_format","unknown format","invalid_query");requiredKeys(intent.presentation,["timezone","locale"],"nested.intent.presentation");if(intent.presentation.timezone!=="UTC"||intent.presentation.locale!=="en-US")refuse("nested.intent.presentation","first browser presentation is UTC/en-US");return intent;
 }
@@ -1205,11 +1209,11 @@ function validateNestedDetailIntent(intent,context) {
   if(intent.collection_id!==collection.id)nestedRefuse("nested.intent.collection_id","unpublished collection","invalid_field","unpublished-field-id");
   const field=(id,map)=>{const f=map.get(id);if(!f)nestedRefuse("nested.intent.field","unpublished opaque ID","invalid_field","unpublished-field-id");return f;};
   intent.select.forEach(s=>Array.isArray(s)?s.forEach(id=>field(id,children)):field(s,roots));
-  intent.order_by.forEach(o=>field(o.field,roots));intent.filters.forEach(f=>{const descriptor=field(f.field,roots);if(!descriptor.operators.includes(f.op))refuse("nested.intent.filter.op","unavailable operator");if(Object.hasOwn(f,"value"))canonical.assertNestedDetailScalar(f.value,descriptor,"nested.intent.filter.value",{author:true});});return intent;
+  intent.order_by.forEach(o=>field(o.field,roots));intent.filters.forEach(f=>{const descriptor=field(f.field,roots);if(!descriptor.operators.includes(f.op))refuse("nested.intent.filter.op","unavailable operator");if(f.op==="on")canonical.assertPeriodOn(f.value,descriptor.type,"nested.intent.filter.value");else if(Object.hasOwn(f,"value"))canonical.assertNestedDetailScalar(f.value,descriptor,"nested.intent.filter.value",{author:true});});return intent;
 }
 export function toNestedDetailQuery(intent,context) {
   assertNestedDetailIntent(intent,context);const collection=context.features.collections[0],roots=new Map(context.features.root_fields.map(f=>[f.id,f])),children=new Map(collection.fields.map(f=>[f.id,f]));
-  const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};if (intent.as_of !== undefined) query.as_of = intent.as_of;canonical.assertNestedDetailQuery(query,context.features);return query;
+  const query={select:intent.select.map(s=>Array.isArray(s)?s.map(id=>children.get(id).path):roots.get(s).path),filters:intent.filters.map(f=>({field:roots.get(f.field).path,op:f.op,...(Object.hasOwn(f,"value")?{value:f.op === "on" ? canonical.assertPeriodOn(f.value,roots.get(f.field).type) : f.value}:{})})),order_by:intent.order_by.map(o=>({field:roots.get(o.field).path,direction:o.direction})),limit:intent.limit,offset:intent.offset,row_format:intent.row_format,timezone:intent.presentation.timezone};if (intent.as_of !== undefined) query.as_of = intent.as_of;canonical.assertNestedDetailQuery(query,context.features);return query;
 }
 export function parseNestedDetailState(raw,context) {
   try {

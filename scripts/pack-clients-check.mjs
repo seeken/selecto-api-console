@@ -25,8 +25,12 @@ try {
         if (typeof surface[name] !== 'function') throw new Error('Missing installed export: ' + name);
       }
     }
-    requireFunctions(canonical, ['createCanonicalClient','assertRootPredicateFeatures','parseCanonicalRequestText','buildRootPredicateRequest','assertRootPredicateResult','assertNestedDetailFeatures','nestedDetailContext','encodeNestedDetailContext','assertNestedDetailScalar','assertNestedDetailQuery','buildNestedDetailRequest','parseNestedDetailRequestText','assertNestedDetailResult','markNestedDetailRefusal','nestedDetailRefusal']);
+    requireFunctions(canonical, ['assertPeriodOn','createCanonicalClient','assertRootPredicateFeatures','parseCanonicalRequestText','buildRootPredicateRequest','assertRootPredicateResult','assertNestedDetailFeatures','nestedDetailContext','encodeNestedDetailContext','assertNestedDetailScalar','assertNestedDetailQuery','buildNestedDetailRequest','parseNestedDetailRequestText','assertNestedDetailResult','markNestedDetailRefusal','nestedDetailRefusal']);
     requireFunctions(explorer, ['createExplorerClient','assertRootPredicateIntent','toRootPredicateQuery','parseRootPredicateState','encodeRootPredicateState','decodeRootPredicateState','validateRootPredicateFeaturesAndMap','flatSnapshotToRequest','nestedDetailBinding','createNestedDetailIntent','assertNestedDetailIntent','toNestedDetailQuery','parseNestedDetailState','encodeNestedDetailState','decodeNestedDetailState','nestedDetailConsoleHref','toNestedDetailExplorerResult']);
+    if (canonical.assertPeriodOn('2026-01', 'date') !== '2026-01') throw new Error('Installed calendar period validation failed');
+    let refused = false;
+    try { canonical.assertPeriodOn('2026-13', 'date'); } catch { refused = true; }
+    if (!refused) throw new Error('Installed calendar period validation admitted an invalid month');
     requireFunctions(canonical.createCanonicalClient(), ['nestedDetailFeatures','queryNestedDetail','queryNestedDetailText']);
     requireFunctions(explorer.createExplorerClient(), ['getNestedDetailContext','executeNestedDetailIntent']);
   `;

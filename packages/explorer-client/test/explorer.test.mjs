@@ -271,3 +271,14 @@ test("advertised case-insensitive text operators are preserved in controls and i
   }
   function spaRequest(operator) { return spa("detail", {}, {conjunction: "and", items: [{id: "f", field: "source.name", operator, value: "aurora"}]}); }
 });
+
+test('Explorer v1 period discovery and translation preserve calendar values at detail and aggregate grain',()=>{
+  const document=structuredClone(features());const due=document.fields.find(f=>f.id==='due_on');due.operators.splice(1,0,'on');
+  const descriptor=toExplorerV1Descriptor(document);assert.ok(descriptor.fields.find(f=>f.id==='source.due_on').filterOperators.includes('on'));
+  const baseRequest={schema:'selecto.spa.query-request/v1',domainId:'items',view:'detail',state:{selected:['source.id'],orderBy:[],groupBy:[],aggregates:[],rollup:false,preventDenormalization:true,fieldConfigs:{},groupConfigs:{}},filters:{conjunction:'and',items:[{id:'f',field:'source.due_on',operator:'on',value:'2026-01'}]},page:{number:1,size:10}};
+  assert.deepEqual(planExplorerV1Query(baseRequest,document).query.filters,[{field:'due_on',op:'on',value:'2026-01'}]);
+  const aggregate=structuredClone(baseRequest);aggregate.view='aggregate';aggregate.state.groupBy=['source.due_on'];aggregate.state.aggregates=[{field:'source.amount',function:'sum',alias:'total'}];
+  assert.deepEqual(planExplorerV1Query(aggregate,document).query.filters,[{field:'due_on',op:'on',value:'2026-01'}]);
+  for(const value of ['2026-13','2026-01-15T10']) {const r=structuredClone(baseRequest);r.filters.items[0].value=value;assert.throws(()=>planExplorerV1Query(r,document),/valid calendar period/);}
+  due.operators=due.operators.filter(op=>op!=='on');assert.ok(!toExplorerV1Descriptor(document).fields.find(f=>f.id==='source.due_on').filterOperators.includes('on'));assert.throws(()=>planExplorerV1Query(baseRequest,document),/not available/);
+});

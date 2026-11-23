@@ -36,6 +36,18 @@ resolves its half-open date boundaries when it executes the query (Selecto Perl
 uses the current clock by default, so the query time zone decides when a day
 begins).
 
+When OpenAPI's `SelectoFilter` operator enum publishes `on`, temporal fields
+also offer **on (period)** immediately after **equals**. Precision defaults to
+Day: Year uses four digits, Month and Day use native calendar inputs, Hour uses
+a date and hour selector, and Minute uses a native datetime input. `date` fields
+offer Year, Month and Day only. New `epoch_datetime` filters start on a Day
+period; **equals** continues to take epoch seconds. The console sends calendar
+text such as `2026-01` or `2026-01-15T10:30`; the server applies the half-open
+period in the query's time zone. Imported requests retain their precision across
+form edits, drafts, URLs and curl previews; invalid periods block execution.
+Aggregate and nested parent filters also offer it when their published field
+operators include `on`. Hosts without `on` retain their previous operator list.
+
 When the request's OpenAPI schema publishes `as_of`, an optional **As of**
 control beside the filters offers a native date picker. **Add time** reveals a
 time picker with seconds and the browser's UTC offset for the selected date
