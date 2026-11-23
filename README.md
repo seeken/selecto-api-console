@@ -37,9 +37,15 @@ uses the current clock by default, so the query time zone decides when a day
 begins).
 
 When the request's OpenAPI schema publishes `as_of`, an optional **As of**
-control beside the filters accepts an ISO date or full timestamp (including
-fractional seconds and an optional `Z` or `+HH:MM`/`-HH:MM` offset). **Today**
-clears it and restores the real clock. Impossible dates, times and offsets
+control beside the filters offers a native date picker. **Add time** reveals a
+time picker with seconds and the browser's UTC offset for the selected date
+and time; choose UTC (`Z`) or an explicit `+HH:MM`/`-HH:MM` offset instead if
+needed. **Remove time** returns to a date-only value. Quick picks use the real
+browser calendar: Yesterday and the last day of the previous week (Sunday),
+month, quarter or year. A readable summary shows the chosen date and time.
+Imported fractional seconds and legacy timestamps without an offset stay
+verbatim in a labelled text field with an explanatory note. **Today**
+clears the value and restores the real clock. Impossible dates, times and offsets
 are refused before Run. The value survives request import, form edits, query
 URLs, profile drafts and nested private state, and appears in the cURL body.
 Bare queries send top-level `as_of`; versioned envelopes send `query.as_of`.

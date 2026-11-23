@@ -10,12 +10,21 @@ function openapi(envelope=false) {
 }
 class Node {
   constructor(tag='div') {this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.value='';this.hidden=false;this.textContent='';this.classList={add(){},remove(){}};}
-  append(...nodes){this.children.push(...nodes);} replaceChildren(...nodes){this.children=[...nodes];}
+  append(...nodes){for(const node of nodes){node.parentElement=this;this.children.push(node);}} replaceChildren(...nodes){this.children=[];this.append(...nodes);}
   setAttribute(key,value){this[key]=value;}
+  matches(selector){
+    const match=/^\[data-([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
+    if(!match)return false;
+    const key=match[1].replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase());
+    return Object.hasOwn(this.dataset,key)&&(match[2]===undefined||this.dataset[key]===match[2]);
+  }
+  closest(selector){return this.matches(selector)?this:this.parentElement?.closest(selector)||null;}
+  querySelector(selector){for(const child of this.children){if(child.matches(selector))return child;const found=child.querySelector(selector);if(found)return found;}return null;}
+  focus(){globalThis.document.activeElement=this;}
 }
-function instance(remote=false) {
-  const nodes = Object.fromEntries(['request','run','edited','query-path','response-as-of','empty-response','response-json','result-head','result-body','page-info'].map(key=>[`[data-sac-${key}]`,new Node()]));
-  const x = new api.APIConsole({dataset:{apiBase:'/api/items'},querySelector:selector=>nodes[selector]});
+function instance(remote=false, options={}) {
+  const nodes = Object.fromEntries(['request','run','run-label','cancel-query','edited','query-path','curl','response-status','response-as-of','empty-response','response-json','result-head','result-body','page-info'].map(key=>[`[data-sac-${key}]`,new Node()]));
+  const x = new api.APIConsole({dataset:{apiBase:'/api/items'},querySelector:selector=>nodes[selector]},options);
   x.nodes=nodes;x.openapi=openapi(remote);x.domain={source:{fields:['id','due'],columns:{id:{type:'integer'},due:{type:'date'}}}};
   x.fields=api.collectFields(x.domain);x.fieldMap=new Map(x.fields.map(f=>[f.path,f]));x.filterFields=x.fields;x.filterFieldMap=x.fieldMap;
   x.state.selectedFields=[{id:'1',field:'id'}];x.remoteMode=remote;x.manifest={domain:{fingerprint:'fp'}};
@@ -23,6 +32,9 @@ function instance(remote=false) {
   return x;
 }
 function withDOM(fn) {const previous=globalThis.document;globalThis.document={createElement:tag=>new Node(tag)};try{return fn();}finally{globalThis.document=previous;}}
+const part=(slot,name)=>slot.querySelector(`[data-sac-as-of-part="${name}"]`);
+function edit(x,slot,name,value,event='onInput'){const target=part(slot,name);target.value=value;x[event]({target});return target;}
+function click(x,slot,selector){x.onClick({target:slot.querySelector(selector)});}
 
 test('As of adds and clears the bare and remote v1 query member beside last_7_days',()=>{
   for(const remote of [false,true]) {
@@ -44,7 +56,8 @@ test('pasted As of populates the chooser, URL request and retained draft, then s
 
 test('schema discovery follows local refs and allOf; hidden controls neither assume a global schema nor show on v2',()=>withDOM(()=>{
   const x=instance(true),slot=new Node();x.renderAsOf(slot,'flat');assert.equal(slot.hidden,false);
-  assert.equal(slot.children[0].children[0].children[0].value,'');assert.equal(slot.children[0].children[1].textContent,'Today');
+  assert.equal(part(slot,'date').value,'');assert.equal(part(slot,'date').type,'date');
+  assert.equal(slot.querySelector('[data-sac-as-of-clear]').textContent,'Today');
   x.openapi={components:openapi().components,paths:{}};x.renderAsOf(slot,'flat');assert.equal(slot.hidden,true);assert.equal(slot.children.length,0);
   assert.equal(x.supportsAsOf('root'),false);
 }));
@@ -72,12 +85,18 @@ function aggregate() {
   const x=instance();x.aggregateFeatures={domain:{fingerprint:'fp'},revision:'rev',fields:[],limits:{},supports:{aggregate:true}};
   x.aggregateQueryPath='/api/aggregate';x.openapi.paths[x.aggregateQueryPath]=x.openapi.paths[x.queryPath];x.aggregateState=x.newAggregateState();x.queryProfile='aggregate';return x;
 }
-test('aggregate As of follows its route schema, imports and survives another builder edit',()=>{
+test('aggregate As of follows its route schema, imports and survives another builder edit',()=>withDOM(()=>{
   const x=aggregate();x.aggregateState.asOf='2026-01-15';const payload=x.buildAggregateRequest().request;
   assert.equal(payload.query.as_of,'2026-01-15');x.aggregateState=x.newAggregateState();x.loadPayloadIntoChooser(payload);
   assert.equal(x.aggregateState.asOf,'2026-01-15');x.aggregateState.aggregates[0].alias='n';assert.equal(x.buildAggregateRequest().request.query.as_of,'2026-01-15');
+  const slot=new Node();x.renderAsOf(slot,'aggregate');edit(x,slot,'date','2026-10-31');
+  assert.equal(x.buildAggregateRequest().request.query.as_of,'2026-10-31');
+  click(x,slot,'[data-sac-as-of-toggle]');edit(x,slot,'zone','utc','onChange');
+  assert.equal(x.buildAggregateRequest().request.query.as_of,'2026-10-31T00:00:00Z');
+  click(x,slot,'[data-sac-as-of-clear]');assert.equal(Object.hasOwn(x.buildAggregateRequest().request.query,'as_of'),false);
+  x.aggregateState.asOf='2026-01-15';
   delete x.openapi.paths[x.aggregateQueryPath];assert.equal(x.supportsAsOf('aggregate'),false);assert.match(x.buildAggregateRequest().errors.join(' '),/does not publish/);
-});
+}));
 
 test('nested As of survives query import, edits, URL state and private state codecs, and admits metadata echo',async()=>{
   const f=(await import('../packages/canonical-client/test/nested-fixture.mjs')).fixture(),x=instance(true);
@@ -88,6 +107,12 @@ test('nested As of survives query import, edits, URL state and private state cod
   const encoded=e.encodeNestedDetailState(x.nestedState),decoded=e.decodeNestedDetailState(encoded);
   assert.equal(decoded.intent.as_of,payload.query.as_of);assert.equal(e.parseNestedDetailState(JSON.stringify(decoded),x.nestedDetailContext).intent.as_of,payload.query.as_of);
   f.result.meta.as_of=payload.query.as_of;assert.equal(c.assertNestedDetailResult(f.result,{features:f.features,context:f.context,query:payload.query}),f.result);
+  withDOM(()=>{
+    const slot=new Node();x.renderAsOf(slot,'nested');edit(x,slot,'time','13:45');
+    assert.equal(x.buildPayload().query.as_of,'2026-01-15T13:45:00Z');
+    click(x,slot,'[data-sac-as-of-toggle]');assert.equal(x.buildPayload().query.as_of,'2026-01-15');
+    click(x,slot,'[data-sac-as-of-clear]');assert.equal(Object.hasOwn(x.buildPayload().query,'as_of'),false);
+  });
 });
 
 test('response clock reads only the success envelope meta.as_of and clears on another result',()=>withDOM(()=>{
@@ -97,14 +122,100 @@ test('response clock reads only the success envelope meta.as_of and clears on an
 }));
 
 
-test('input events update the generated cURL body and Today clears the control',()=>{
+test('input events update the generated cURL body and Today clears the control',()=>withDOM(()=>{
   const x=instance(),previous=globalThis.window;globalThis.window={location:{origin:'https://example.test'}};
   try {
-    x.onInput({target:{matches:selector=>selector==='[data-sac-as-of]',dataset:{sacAsOf:'flat'},value:'2026-01-15T12:00:00-07:00'}});
+    x.state.asOf='2026-01-15T12:00:00-07:00';const slot=new Node();x.renderAsOf(slot,'flat');
+    edit(x,slot,'time','12:00:00');
     const request=x.nodes['[data-sac-request]'].value;
     assert.match(x.curlCommand(x.queryPath,request),/"as_of": "2026-01-15T12:00:00-07:00"/);
-    const input={value:x.state.asOf},button={dataset:{sacAsOfClear:'flat'},parentElement:{querySelector:()=>input}};
-    x.onClick({target:{closest:selector=>selector==='[data-sac-as-of-clear]'?button:null}});
-    assert.equal(input.value,'');assert.equal(x.state.asOf,'');assert.equal(Object.hasOwn(JSON.parse(x.nodes['[data-sac-request]'].value),'as_of'),false);
+    click(x,slot,'[data-sac-as-of-clear]');
+    assert.equal(part(slot,'date').value,'');assert.equal(part(slot,'time'),null);
+    assert.equal(x.state.asOf,'');assert.equal(Object.hasOwn(JSON.parse(x.nodes['[data-sac-request]'].value),'as_of'),false);
+    assert.equal(globalThis.document.activeElement,part(slot,'date'));
   } finally {globalThis.window=previous;}
-});
+}));
+
+test('date picker, optional seconds, explicit offset, UTC and removing time keep both request contracts',()=>withDOM(()=>{
+  for(const remote of [false,true]) {
+    const x=instance(remote),slot=new Node();x.renderAsOf(slot,'flat');
+    const query=()=>{const payload=x.buildPayload();return remote?payload.query:payload;};
+    edit(x,slot,'date','2026-10-31');assert.equal(query().as_of,'2026-10-31');
+    assert.equal(slot.querySelector('[data-sac-as-of-summary]').textContent,'As of Sat 31 Oct 2026');
+    click(x,slot,'[data-sac-as-of-toggle]');
+    assert.equal(part(slot,'time').type,'time');assert.equal(part(slot,'time').step,'1');
+    assert.equal(globalThis.document.activeElement,part(slot,'time'));assert.equal(part(slot,'offset').readOnly,true);
+    edit(x,slot,'time','17:00');edit(x,slot,'zone','custom','onChange');edit(x,slot,'offset','-07:00');
+    assert.equal(query().as_of,'2026-10-31T17:00:00-07:00');assert.equal(part(slot,'offset').readOnly,false);
+    assert.equal(slot.querySelector('[data-sac-as-of-summary]').textContent,'As of 31 Oct 2026, 17:00 −07:00');
+    edit(x,slot,'time','17:00:42');assert.equal(query().as_of,'2026-10-31T17:00:42-07:00');
+    edit(x,slot,'zone','utc','onChange');assert.equal(query().as_of,'2026-10-31T17:00:42Z');
+    assert.equal(part(slot,'offset').value,'Z');assert.equal(part(slot,'offset').readOnly,true);
+    click(x,slot,'[data-sac-as-of-toggle]');assert.equal(query().as_of,'2026-10-31');assert.equal(part(slot,'time'),null);
+    assert.equal(globalThis.document.activeElement,part(slot,'date'));
+  }
+}));
+
+test('quick picks use an injected browser calendar across quarter, year, leap and week boundaries',()=>withDOM(()=>{
+  const cases=[
+    [new Date(2026,10,23,0,5),['2026-11-22','2026-11-22','2026-10-31','2026-09-30','2025-12-31']],
+    [new Date(2026,3,1,23,55),['2026-03-31','2026-03-29','2026-03-31','2026-03-31','2025-12-31']],
+    [new Date(2026,0,1,0,5),['2025-12-31','2025-12-28','2025-12-31','2025-12-31','2025-12-31']],
+    [new Date(2024,2,3,12),['2024-03-02','2024-02-25','2024-02-29','2023-12-31','2023-12-31']],
+  ];
+  let now=cases[0][0];const x=instance(false,{now:()=>now}),slot=new Node();
+  for(const [date,expected] of cases) {
+    now=date;x.state.asOf='2000-01-01T12:00:00Z';x.renderAsOf(slot,'flat');
+    for(const [i,pick] of ['yesterday','week','month','quarter','year'].entries()) {
+      click(x,slot,`[data-sac-as-of-quick-pick="${pick}"]`);
+      assert.equal(x.buildPayload().as_of,expected[i],`${date.toString()}: ${pick}`);
+      assert.equal(part(slot,'time'),null);
+    }
+  }
+}));
+
+test('adding time without a date uses injected today, and browser offsets follow the selected date and time',()=>withDOM(()=>{
+  const previous=process.env.TZ;process.env.TZ='America/Denver';
+  try {
+    const x=instance(false,{now:()=>new Date(2026,0,15,17)}),slot=new Node();x.renderAsOf(slot,'flat');
+    click(x,slot,'[data-sac-as-of-toggle]');assert.equal(x.state.asOf,'2026-01-15T00:00:00-07:00');
+    edit(x,slot,'date','2026-07-15');assert.equal(x.state.asOf,'2026-07-15T00:00:00-06:00');
+    x.renderAsOf(slot,'flat');assert.equal(part(slot,'zone').value,'browser');
+    edit(x,slot,'date','2026-03-08');edit(x,slot,'time','01:30');assert.equal(x.state.asOf,'2026-03-08T01:30:00-07:00');
+    edit(x,slot,'time','03:30');assert.equal(x.state.asOf,'2026-03-08T03:30:00-06:00');
+    assert.equal(part(slot,'offset').value,'-06:00');
+    const date=part(slot,'date');date.focus();edit(x,slot,'date','');assert.equal(x.state.asOf,'');
+    assert.equal(part(slot,'date'),date);assert.equal(globalThis.document.activeElement,date);
+    edit(x,slot,'date','2026-07-15');assert.equal(x.state.asOf,'2026-07-15T03:30:00-06:00');
+  } finally {if(previous===undefined)delete process.env.TZ;else process.env.TZ=previous;}
+}));
+
+test('fractional imported values retain exact text through other form edits, drafts, URLs and the curl preview',()=>withDOM(()=>{
+  const previous=globalThis.window;globalThis.window={location:{origin:'https://example.test'}};
+  try {
+    for(const remote of [false,true]) {
+      const x=instance(remote),slot=new Node(),value='2026-01-15T10:30:00.123456+05:30';
+      const query={select:['id'],as_of:value};
+      const request=remote?{format:'selecto.remote-query',format_version:1,domain:{fingerprint:'fp'},query}:query;
+      x.loadPayloadIntoChooser(api.requestPayloadFromLocation({hash:`#request=${encodeURIComponent(JSON.stringify(request))}`}));
+      x.renderAsOf(slot,'flat');assert.equal(part(slot,'text').value,value);assert.equal(part(slot,'text').type,'text');
+      assert.match(slot.children[0].children.at(-1).textContent,/kept exactly as imported/);
+      x.updateCurl=api.APIConsole.prototype.updateCurl;
+      const limit=new Node('input');limit.dataset.sacLimit='';limit.value='25';x.onInput({target:limit});
+      x.renderAsOf(slot,'flat');x.retainProfileDraft();
+      assert.equal(part(slot,'text').value,value);assert.equal(x.profileDrafts.flat.state.asOf,value);
+      assert.equal(x.asOfValue(),value);assert.ok(x.nodes['[data-sac-curl]'].textContent.includes(`"as_of": "${value}"`));
+      assert.match(slot.querySelector('[data-sac-as-of-summary]').textContent,/10:30:00\.123456 \+05:30/);
+    }
+  } finally {globalThis.window=previous;}
+}));
+
+test('fallback edits and incomplete explicit offsets disable Run; time can be removed from an incomplete edit',()=>withDOM(()=>{
+  const x=instance(),slot=new Node();x.state.asOf='2026-01-15T10:30:00.123456+05:30';x.renderAsOf(slot,'flat');
+  edit(x,slot,'text','2026-02-30');assert.equal(x.nodes['[data-sac-run]'].disabled,true);assert.match(x.message,/valid ISO/);
+  edit(x,slot,'text','2026-01-15T10:30:00+05:30');assert.equal(x.nodes['[data-sac-run]'].disabled,false);
+  x.renderAsOf(slot,'flat');assert.equal(part(slot,'offset').value,'+05:30');
+  edit(x,slot,'offset','');assert.equal(x.nodes['[data-sac-run]'].disabled,true);
+  click(x,slot,'[data-sac-as-of-toggle]');assert.equal(x.state.asOf,'2026-01-15');assert.equal(x.nodes['[data-sac-run]'].disabled,false);
+  x.state.asOf='2026-01-15T10:30:00';x.renderAsOf(slot,'flat');assert.equal(part(slot,'text').value,x.state.asOf);
+}));
