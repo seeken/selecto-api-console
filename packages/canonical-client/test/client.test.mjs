@@ -10,6 +10,21 @@ const columns = [
   {id: "note", label: "Note", type: "string", encoding: "string", nullable: true},
   {id: "day", label: "Day", type: "date", encoding: "string", nullable: false},
 ];
+
+test("remote requests preserve string segment choices including explicit Off through transport", async () => {
+  const query = {select: ["id"], segment_choices: {pdf: "", annotation: "marked"}};
+  assert.deepEqual(buildRemoteRequest("fp", query).query, query);
+  let body;
+  const client = createCanonicalClient({fetch: async (_path, init) => {
+    body = JSON.parse(init.body);
+    return Response.json(result());
+  }});
+  await client.query(manifest, query);
+  assert.deepEqual(body.query.segment_choices, query.segment_choices);
+  for (const choices of [null, [], "pdf", {pdf: null}, {pdf: false}, {pdf: 1}, {pdf: []}, {pdf: {}}]) {
+    assert.throws(() => buildRemoteRequest("fp", {...query, segment_choices: choices}), /query.segment_choices/);
+  }
+});
 function result() { return {ok: true, data: {format: "selecto.remote-query-result", format_version: 1, domain: {fingerprint: "fp"}, columns, rows: [[1, "12.50", "9007199254740993", null, "2026-10-07"]], row_count: 1, row_format: "arrays", page: {limit: 2, offset: 0, has_more: false}}}; }
 
 test("discovers profile and sends exact fingerprint envelope with browser auth and signal", async () => {

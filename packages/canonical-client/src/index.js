@@ -310,7 +310,13 @@ export function assertExactResultNumbers(value, numberTokens) {
 
 export function buildRemoteRequest(fingerprint, query, requestId) {
   nonEmptyString(fingerprint, "domain.fingerprint");
-  keys(query, ["select", "projection", "view", "filters", "group_by", "segments", "parameters", "order_by", "ordering", "limit", "offset", "timezone", "row_format", "as_of"], "query");
+  keys(query, ["select", "projection", "view", "filters", "group_by", "segments", "segment_choices", "parameters", "order_by", "ordering", "limit", "offset", "timezone", "row_format", "as_of"], "query");
+  if (query.segment_choices !== undefined) {
+    record(query.segment_choices, "query.segment_choices");
+    for (const [group, choice] of Object.entries(query.segment_choices)) {
+      if (typeof choice !== "string") throw new CanonicalWireError(`query.segment_choices.${group}`, "must be a string (empty means Off)");
+    }
+  }
   if (["select", "projection", "view"].filter((key) => Object.hasOwn(query, key)).length !== 1) throw new CanonicalWireError("query", "exactly one authoring mode is required");
   if (query.select !== undefined) {
     const selected = array(query.select, "query.select");
