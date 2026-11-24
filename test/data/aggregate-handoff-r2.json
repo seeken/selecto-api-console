@@ -1,0 +1,41 @@
+{
+  "domain": {
+    "fingerprint": "sha256:8ec69eae5ae6fb031b9ff31d6e39c45bf2c470cf338f03f45e26932552a0bf54"
+  },
+  "features": {
+    "revision": "sha256:cd7a8386903191c8936a2b932b221a7d166fd4fceaf01e66556d3a7ad236f57d"
+  },
+  "format": "selecto.explorer-query",
+  "format_version": 1,
+  "query": {
+    "filters": [
+      {
+        "field": "id",
+        "op": "gte",
+        "value": 2
+      }
+    ],
+    "group_by": [
+      "region",
+      "channel"
+    ],
+    "limit": 25,
+    "offset": 0,
+    "rollup": true,
+    "row_format": "arrays",
+    "select": [
+      "region",
+      "channel",
+      {
+        "aggregate": "count",
+        "alias": "count"
+      },
+      {
+        "aggregate": "sum",
+        "alias": "total_amount",
+        "field": "amount",
+        "ignore_nulls": "auto"
+      }
+    ]
+  }
+}

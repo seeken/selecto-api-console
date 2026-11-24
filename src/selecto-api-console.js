@@ -3154,54 +3154,244 @@
       return this.nestedState;
     }
 
+    // Explorer's closed query contract; imported options without chooser controls
+    // live in the draft and are validated before being emitted again.
+    aggregateImportedOptions(query, state) {
+      const fail = () => { throw new Error("Unsupported aggregate chooser properties."); };
+      const supports = this.aggregateFeatures.supports || {};
+      const retained = {};
+      if (query.select?.length > (this.aggregateFeatures.limits?.max_select ?? Infinity)) fail();
+      const keys = ["row_format", "timezone", "count", "complete", "segments", "parameters", "export"];
+      for (const key of keys) if (Object.hasOwn(query, key)) retained[key] = structuredClone(query[key]);
+      if (Object.hasOwn(query, "row_format") && !["arrays", "objects"].includes(query.row_format)) fail();
+      if (Object.hasOwn(query, "timezone")) {
+        try { global.SelectoCanonicalClient.assertTimezone(query.timezone); } catch (_) { fail(); }
+      }
+      if (Object.hasOwn(query, "count") && (!["none", "exact"].includes(query.count) || query.count === "exact" && !supports.count_exact)) fail();
+      for (const key of ["rollup", "cube", "complete"]) if (Object.hasOwn(query, key)) {
+        if (typeof query[key] !== "boolean") fail();
+        if (query[key] === false) retained[key] = false;
+      }
+      if (query.complete === true && (!supports.grid || !state.groupBy.length || state.offset || ["rollup", "sets"].includes(state.grouping))) fail();
+      if (Object.hasOwn(query, "segments")) {
+        const published = this.aggregateFeatures.query_library?.segments;
+        if (!Array.isArray(query.segments) || query.segments.some(name => typeof name !== "string" || !name
+            || Array.isArray(published) && !published.some(segment => segment.name === name))) fail();
+      }
+      if (Object.hasOwn(query, "parameters") && !isPlainObject(query.parameters)) fail();
+      if (query.timezone && query.timezone !== "UTC" && supports.timezones === "utc") {
+        const converts = entry => isPlainObject(entry) && this.aggregateFeatures.fields.some(field => field.id === entry.field && field.type === "utc_datetime")
+          && (Object.hasOwn(entry, "format") || entry.buckets && entry.buckets.kind !== "numeric" || entry.op === "date_shortcut");
+        const nodes = [...(query.filters || [])];
+        while (nodes.length) { const node = nodes.shift(); if (converts(node)) fail(); if (Array.isArray(node.any || node.all)) nodes.push(...(node.any || node.all)); }
+        if ([...(query.select || []), ...(query.group_by || [])].some(converts)) fail();
+      }
+      if (Object.hasOwn(query, "export") && query.export !== null) {
+        const spec = query.export;
+        if (!isPlainObject(spec) || onlyKeys(spec, ["all_rows", "shape"]).length || spec.all_rows !== true
+            || Object.hasOwn(spec, "shape") && !["rows", "grid"].includes(spec.shape) || !supports.export?.length) fail();
+        if (spec.shape === "grid" && (state.groupBy.length !== 2 || state.aggregates.length !== 1
+            || state.aggregates[0].fn === "bucket_count" || state.grouping !== "none")) fail();
+      }
+      return retained;
+    }
+
+    aggregateImportedBuckets(spec, field, allowStep) {
+      const fail = () => { throw new Error("Unsupported aggregate selection."); };
+      if (!this.aggregateFeatures.supports.buckets || !isPlainObject(spec)
+          || !["numeric", "year", "elapsed_days", "relative_days"].includes(spec.kind)
+          || !(field.buckets || []).includes(spec.kind)
+          || !(spec.kind === "numeric" ? ["integer", "decimal"] : ["date", "naive_datetime", "utc_datetime"]).includes(field.type)) fail();
+      if (Object.hasOwn(spec, "step")) {
+        if (!allowStep || onlyKeys(spec, ["kind", "step"]).length || !["numeric", "year"].includes(spec.kind)
+            || !Number.isInteger(spec.step) || spec.step < 1 || spec.step > 1000000000) fail();
+      } else {
+        if (onlyKeys(spec, ["kind", "ranges"]).length || !Array.isArray(spec.ranges) || !spec.ranges.length
+            || spec.ranges.length > (this.aggregateFeatures.limits?.max_buckets ?? 20)) fail();
+        const labels = new Set();
+        spec.ranges.forEach(range => {
+          if (!isPlainObject(range) || onlyKeys(range, ["min", "max", "label"]).length
+              || range.min == null && range.max == null
+              || [range.min, range.max].some(value => value != null && (!Number.isSafeInteger(value) || String(Math.abs(value)).length > 15))
+              || range.min != null && range.max != null && range.min > range.max
+              || typeof range.label !== "string" || !range.label || [...range.label].length > 80
+              || /[\u0000-\u001f\u007f-\u009f]/.test(range.label) || range.label === "Other" || labels.has(range.label)) fail();
+          labels.add(range.label);
+        });
+      }
+    }
+
+    aggregateImportedSelection(item) {
+      const fail = () => { throw new Error("Unsupported aggregate selection."); };
+      if (!isPlainObject(item)) fail();
+      const fn = item.aggregate;
+      const allowed = ["aggregate", "field", "alias", ...(fn === "sum" ? ["ignore_nulls"] : []), ...(fn === "bucket_count" ? ["buckets"] : [])];
+      if (onlyKeys(item, allowed).length || ![...AGGREGATE_FUNCTIONS, "bucket_count"].includes(fn)
+          || typeof item.alias !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(item.alias)) fail();
+      const field = this.aggregateFeatures.fields.find(field => field.id === item.field);
+      if (Object.hasOwn(item, "field") && (!field || field.collection) || !Object.hasOwn(item, "field") && fn !== "count") fail();
+      if (fn === "bucket_count") this.aggregateImportedBuckets(item.buckets, field, false);
+      else if (field && !this.aggregateMeasureFields(fn).some(candidate => candidate.id === field.id)) fail();
+      if (["true_count", "false_count", "true_percentage"].includes(fn) && this.aggregateFeatures.supports.boolean_aggregates === false) fail();
+      if (Object.hasOwn(item, "ignore_nulls") && item.ignore_nulls !== "auto") fail();
+      const retained = Object.fromEntries(["ignore_nulls", "buckets"].filter(key => Object.hasOwn(item, key)).map(key => [key, structuredClone(item[key])]));
+      return {fn, field: item.field || "", alias: item.alias, ...(Object.keys(retained).length ? {retained} : {})};
+    }
+
+    aggregateImportedGroup(entry) {
+      if (typeof entry === "string") {
+        if (!this.aggregateGroupFields().some(field => field.id === entry)) throw new Error("Unsupported aggregate selection.");
+        return entry;
+      }
+      const fail = () => { throw new Error("Unsupported aggregate selection."); };
+      if (!isPlainObject(entry) || onlyKeys(entry, ["field", "alias", "format", "buckets"]).length
+          || typeof entry.alias !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(entry.alias)
+          || Object.hasOwn(entry, "format") === Object.hasOwn(entry, "buckets")) fail();
+      const field = this.aggregateGroupFields().find(field => field.id === entry.field);
+      if (!field) fail();
+      if (Object.hasOwn(entry, "format")) {
+        if (!this.aggregateFeatures.supports.group_formats || !(field.group_formats || []).includes(entry.format)) fail();
+      } else this.aggregateImportedBuckets(entry.buckets, field, true);
+      return entry.alias;
+    }
+
+    aggregateSelectedGroupFields() {
+      const configured = (this.aggregateState?.groupEntries || []).map(entry => {
+        const field = this.aggregateGroupFields().find(field => field.id === entry.field);
+        return {...field, id: entry.alias, label: `${field?.label || entry.field} (${entry.format || entry.buckets.kind})`, sortable: true};
+      });
+      return [...this.aggregateGroupFields().filter(field => !configured.some(group => group.id === field.id)), ...configured];
+    }
+
+    aggregateImportedFilter(node, depth = 0, leaves = {count: 0}) {
+      const fail = () => { throw new Error("Unsupported aggregate filter."); };
+      if (!isPlainObject(node)) fail();
+      if (Object.hasOwn(node, "any") || Object.hasOwn(node, "all")) {
+        const key = Object.hasOwn(node, "any") ? "any" : "all";
+        if (!this.aggregateFeatures.supports.recursive_filters || onlyKeys(node, [key]).length
+            || !Array.isArray(node[key]) || !node[key].length || depth >= (this.aggregateFeatures.limits?.max_filter_depth ?? 3)) fail();
+        node[key].forEach(child => this.aggregateImportedFilter(child, depth + 1, leaves));
+        return;
+      }
+      if (++leaves.count > (this.aggregateFeatures.limits?.max_filters ?? 20)) fail();
+      const field = this.queryFilterFields("aggregate").find(field => field.path === node.field);
+      if (!field) fail();
+      if (Object.hasOwn(node, "format")) {
+        if (onlyKeys(node, ["field", "format", "op", "value"]).length || !this.aggregateFeatures.supports.group_formats
+            || !(field.group_formats || []).includes(node.format) || !["eq", "is_null"].includes(node.op)
+            || (node.op === "eq" ? typeof node.value !== "string" : Object.hasOwn(node, "value"))) fail();
+        return;
+      }
+      if (onlyKeys(node, ["field", "op", "value", "end"]).length || !this.queryFilterOperators(field, "aggregate").includes(node.op)) fail();
+      if (["is_null", "not_null"].includes(node.op)) {
+        if (Object.hasOwn(node, "value") || Object.hasOwn(node, "end")) fail();
+      } else if (["in", "not_in"].includes(node.op)) {
+        if (!Array.isArray(node.value) || !node.value.length || node.value.length > (this.aggregateFeatures.limits?.max_filter_values ?? 100) || Object.hasOwn(node, "end")) fail();
+      } else if (node.op === "between") {
+        if (!Object.hasOwn(node, "value") || !Object.hasOwn(node, "end")) fail();
+      } else if (!Object.hasOwn(node, "value") || Object.hasOwn(node, "end")) fail();
+      if (node.op === "on") global.SelectoCanonicalClient.assertPeriodOn(node.value, field.type);
+      else if (node.op === "date_shortcut") { if (!(field.date_shortcuts || []).includes(node.value)) fail(); }
+      else if (!["is_null", "not_null"].includes(node.op)) {
+        const values = ["in", "not_in"].includes(node.op) ? node.value : node.op === "between" ? [node.value, node.end] : [node.value];
+        values.forEach(value => {
+          if (value === null || typeof value === "object" || value === undefined) fail();
+          if (field.type === "integer" && (!Number.isSafeInteger(value) || String(Math.abs(value)).length > 15)) fail();
+          else if (field.type === "decimal" && !(typeof value === "number" && Number.isFinite(value) || typeof value === "string" && /^-?[0-9]{1,30}(\.[0-9]{1,30})?$/.test(value))) fail();
+          else if (field.type === "boolean" && typeof value !== "boolean") fail();
+          else if (!["integer", "decimal", "boolean", "epoch_datetime"].includes(field.type) && typeof value !== "string") fail();
+          if (["date", "naive_datetime", "utc_datetime"].includes(field.type)) {
+            if (field.type === "date" && !/^\d{4}-\d{2}-\d{2}$/.test(value)
+                || field.type === "naive_datetime" && !/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{1,9})?$/.test(value)
+                || field.type === "utc_datetime" && !/T.*(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) fail();
+            try { global.SelectoCanonicalClient.assertAsOf(value.replace(" ", "T")); } catch (_) { fail(); }
+          }
+        });
+      }
+    }
+
+    aggregateEquivalentQuery(query) {
+      const normalized = structuredClone(query);
+      // Only contract-defined defaults are comparable with their omission.
+      // The host's default limit is not published, so never infer one here.
+      const defaults = {offset: 0, row_format: "arrays", timezone: "UTC", count: "none", rollup: false, cube: false, complete: false,
+        filters: [], order_by: [], segments: [], parameters: {}};
+      for (const [key, value] of Object.entries(defaults)) if (JSON.stringify(normalized[key]) === JSON.stringify(value)) delete normalized[key];
+      if (Array.isArray(normalized.order_by)) normalized.order_by.forEach(order => { if (order.direction === "asc") delete order.direction; });
+      const sort = value => Array.isArray(value) ? value.map(sort) : isPlainObject(value)
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sort(value[key])])) : value;
+      return JSON.stringify(sort(normalized));
+    }
+
     loadAggregatePayload(payload) {
       const features = this.aggregateFeatures;
       if (!features || payload.format_version !== 1 || payload.domain?.fingerprint !== features.domain.fingerprint
           || payload.features?.revision !== features.revision) throw new Error("The aggregate request does not match the published features.");
-      if (onlyKeys(payload, ["format", "format_version", "domain", "features", "query"]).length
+      if (onlyKeys(payload, ["format", "format_version", "domain", "features", "query", "request_id"]).length
           || onlyKeys(payload.domain, ["fingerprint"]).length || onlyKeys(payload.features, ["revision"]).length) throw new Error("Unsupported aggregate envelope properties.");
       const query = payload.query;
-      if (!isPlainObject(query) || onlyKeys(query, ["select", "group_by", "rollup", "cube", "grouping_sets", "limit", "offset", "as_of", "filters", "order_by"]).length) throw new Error("Unsupported aggregate chooser properties.");
+      if (!isPlainObject(query) || onlyKeys(query, ["select", "group_by", "rollup", "cube", "grouping_sets", "limit", "offset", "as_of", "filters", "order_by", "row_format", "timezone", "count", "complete", "segments", "parameters", "export"]).length) throw new Error("Unsupported aggregate chooser properties.");
       this.validateQueryContext(query, "aggregate");
       const state = this.newAggregateState();
       if (query.filters !== undefined) {
         if (!Array.isArray(query.filters)) throw new Error("filters must be an array.");
         state.filtersPresent = true;
-        const fields = new Map(this.queryFilterFields("aggregate").map(f=>[f.path,f]));
-        state.filters = query.filters.map((f,i) => {
-          const field = fields.get(f?.field);
-          if (!isPlainObject(f) || onlyKeys(f,["field","op","value","end"]).length || !field || !this.queryFilterOperators(field,"aggregate").includes(f.op)) throw new Error("Unsupported aggregate filter.");
-          if (f.op === "on") global.SelectoCanonicalClient.assertPeriodOn(f.value, field.type);
-          return {id:`aggregate-${i}`,field:f.field,op:f.op,value:["in","not_in"].includes(f.op) && Array.isArray(f.value) ? f.value.join(", ") : f.value,end:f.end};
+        const leaves = {count: 0};
+        state.filters = query.filters.map((f, i) => {
+          this.aggregateImportedFilter(f, 0, leaves);
+          if (f.any || f.all || f.format) return {id:`aggregate-${i}`, retained:structuredClone(f)};
+          return {id:`aggregate-${i}`,field:f.field,op:f.op,value:["in","not_in"].includes(f.op) ? f.value.join(", ") : f.value,end:f.end,
+            imported: {wire:structuredClone(f), value:["in","not_in"].includes(f.op) ? f.value.join(", ") : f.value, end:f.end, op:f.op}};
         });
       }
       if (query.order_by !== undefined) {
         if (!Array.isArray(query.order_by) || query.order_by.some(order => !isPlainObject(order) || onlyKeys(order, ["field", "direction"]).length)) throw new Error("Unsupported aggregate ordering.");
-        state.orders = query.order_by.map((order, i) => ({id: `aggregate-order-${i}`, ...order}));
+        state.orders = query.order_by.map((order, i) => ({id: `aggregate-order-${i}`, direction:"asc", ...order}));
         state.ordersPresent = true;
       }
-      state.groupBy = query.group_by || [];
-      if (!Array.isArray(state.groupBy) || !Array.isArray(query.select)) throw new Error("Aggregate selection and groups must be arrays.");
-      if (query.select.slice(0, state.groupBy.length).some((item, index) => item !== state.groupBy[index])) throw new Error("Group columns must lead the aggregate selection.");
-      state.aggregates = query.select.slice(state.groupBy.length).map(item => {
-        if (!isPlainObject(item) || onlyKeys(item, ["aggregate", "field", "alias"]).length || !this.aggregateFunctions().includes(item.aggregate)) throw new Error("Unsupported aggregate selection.");
-        return {fn: item.aggregate, field: item.field || "", alias: item.alias};
+      if (query.group_by !== undefined && (!Array.isArray(query.group_by) || !query.group_by.length)) throw new Error("Aggregate selection and groups must be arrays.");
+      state.groupBy = (query.group_by || []).map(entry => this.aggregateImportedGroup(entry));
+      state.groupEntries = (query.group_by || []).filter(isPlainObject).map(entry => structuredClone(entry));
+      state.groupSelections = [];
+      if (!Array.isArray(query.select)) throw new Error("Aggregate selection and groups must be arrays.");
+      state.selectionLayout = [];
+      state.aggregates = [];
+      query.select.forEach(item => {
+        if (isPlainObject(item) && Object.hasOwn(item, "aggregate")) {
+          state.aggregates.push(this.aggregateImportedSelection(item)); state.selectionLayout.push("measure");
+        } else {
+          const id = typeof item === "string" ? item : isPlainObject(item) && !onlyKeys(item, ["group"]).length ? item.group
+            : isPlainObject(item) && !onlyKeys(item, ["field"]).length ? item.field : null;
+          const validGroup = isPlainObject(item) && Object.hasOwn(item, "group")
+            ? state.groupEntries.some(entry => entry.alias === id) : (query.group_by || []).includes(id);
+          if (!validGroup || !state.groupBy.includes(id) || state.groupSelections.some(entry => entry.id === id)) throw new Error("Unsupported aggregate selection.");
+          state.groupSelections.push({id, selection:structuredClone(item)}); state.selectionLayout.push("group");
+        }
       });
-      if (["rollup", "cube", "grouping_sets"].filter(key => Object.hasOwn(query, key)).length > 1) throw new Error("Choose one subtotal mode.");
+      if (state.groupSelections.length !== state.groupBy.length) throw new Error("Unsupported aggregate selection.");
+      state.selectGroupOrder = state.groupSelections.map(entry => entry.id);
+      if ([query.rollup === true, query.cube === true, Object.hasOwn(query, "grouping_sets")].filter(Boolean).length > 1) throw new Error("Choose one subtotal mode.");
       state.grouping = query.rollup === true ? "rollup" : query.cube === true ? "cube" : query.grouping_sets ? "sets" : "none";
       if (state.grouping !== "none" && !this.aggregateGroupingModes().some(mode => mode.value === state.grouping)) throw new Error("Subtotal mode is not published.");
       if (query.grouping_sets) {
         if (!Array.isArray(query.grouping_sets) || query.grouping_sets.some(set => !Array.isArray(set) || set.some(i => !Number.isInteger(i) || i < 0 || i >= state.groupBy.length))) throw new Error("Invalid grouping sets.");
-        state.sets = query.grouping_sets.map(set => set.join(","));
+        state.sets = query.grouping_sets.map(set => set.slice().sort((a, b) => a - b).join(","));
+        if (query.grouping_sets.some(set => new Set(set).size !== set.length) || new Set(state.sets.map(set => set.split(",").sort().join(","))).size !== state.sets.length) throw new Error("Invalid grouping sets.");
+        state.importedSets = {wire:structuredClone(query.grouping_sets), keys:state.sets.slice(), groups:state.groupBy.slice()};
       }
       state.limit = query.limit ?? state.limit; state.offset = query.offset ?? 0; state.asOf = query.as_of || "";
+      for (const key of ["limit", "offset"]) if (Object.hasOwn(query, key) && (!Number.isSafeInteger(query[key]) || query[key] < 0)) throw new Error("Unsupported aggregate chooser properties.");
+      state.importedPage = {limit:Object.hasOwn(query, "limit"), initialLimit:state.limit, offset:Object.hasOwn(query, "offset")};
+      state.retainedQuery = this.aggregateImportedOptions(query, state);
+      if (Object.hasOwn(payload, "request_id")) {
+        if (typeof payload.request_id !== "string" || !payload.request_id || [...payload.request_id].length > 128) throw new Error("Unsupported aggregate envelope properties.");
+        state.requestId = payload.request_id;
+      }
       const previous = this.aggregateState;
       this.aggregateState = state;
       const model = this.buildAggregateRequest();
-      // Compare every member, allowing property order but never dropping intent.
-      const normalize = value => Array.isArray(value) ? value.map(normalize) : isPlainObject(value)
-        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, normalize(value[key])])) : value;
-      if (model.errors.length || JSON.stringify(normalize(model.request.query)) !== JSON.stringify(normalize(query))) {
+      // Retained settings participate in the complete intent comparison.
+      if (model.errors.length || this.aggregateEquivalentQuery(model.request.query) !== this.aggregateEquivalentQuery(query)) {
         this.aggregateState = previous;
         throw new Error(model.errors.join(" ") || "The aggregate chooser cannot retain the complete request.");
       }
@@ -5222,42 +5412,60 @@
       const state = this.aggregateState, features = this.aggregateFeatures, limits = features.limits || {};
       const errors = [], cardErrors = {data: [], constrain: [], page: []};
       const invalid = (card, message) => { errors.push(message); cardErrors[card].push(message); };
-      const groupable = new Map(this.aggregateGroupFields().map((field) => [field.id, field]));
+      const groupable = new Map(this.aggregateSelectedGroupFields().map((field) => [field.id, field]));
       const groups = state.groupBy.filter((id) => groupable.has(id));
       if (new Set(groups).size !== groups.length) invalid("data", "A field can be grouped only once.");
       if (limits.max_group_by && groups.length > limits.max_group_by) invalid("data", `At most ${limits.max_group_by} groups are allowed.`);
       const aliases = new Set(groups);
-      const select = groups.slice();
+      const selectedGroups = state.selectGroupOrder ? [...state.selectGroupOrder.filter(id => groups.includes(id)), ...groups.filter(id => !state.selectGroupOrder.includes(id))] : groups;
+      const groupSelect = selectedGroups.map(id => state.groupSelections?.find(entry => entry.id === id)?.selection || id);
+      const select = groupSelect.slice();
       state.aggregates.forEach((aggregate, index) => {
         const label = `Aggregate ${index + 1}`;
         const alias = String(aggregate.alias || "").trim();
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) invalid("data", `${label} needs a name of letters, digits and underscores.`);
-        else if (aliases.has(alias)) invalid("data", `${label} repeats the name ${alias}.`);
-        aliases.add(alias);
-        if (!this.aggregateFunctions().includes(aggregate.fn)) invalid("data", `${label} function is not published.`);
+        const columnIds = aggregate.fn === "bucket_count" ? (aggregate.retained?.buckets?.ranges || []).map((_, i) => `${alias}__bucket_${i + 1}`) : [alias];
+        columnIds.forEach(id => {if (aliases.has(id)) invalid("data", `${label} repeats the name ${id}.`); aliases.add(id);});
+        if (!this.aggregateFunctions().includes(aggregate.fn) && !(aggregate.fn === "bucket_count" && aggregate.retained?.buckets)) invalid("data", `${label} function is not published.`);
         if (aggregate.fn !== "count" && !aggregate.field) invalid("data", `${label} needs a field.`);
-        if (aggregate.field && !this.aggregateMeasureFields(aggregate.fn).some((field) => field.id === aggregate.field)) {
+        if (aggregate.field && aggregate.fn !== "bucket_count" && !this.aggregateMeasureFields(aggregate.fn).some((field) => field.id === aggregate.field)) {
           invalid("data", `${label}: ${aggregate.fn} is not offered for ${aggregate.field}.`);
         }
-        select.push({aggregate: aggregate.fn, ...(aggregate.field ? {field: aggregate.field} : {}), alias});
+        const selection = {aggregate: aggregate.fn, ...(aggregate.field ? {field: aggregate.field} : {}), alias, ...structuredClone(aggregate.retained || {})};
+        if (aggregate.retained) {try { this.aggregateImportedSelection(selection); } catch (error) { invalid("data", error.message); }}
+        select.push(selection);
       });
-      if (!state.aggregates.length) invalid("data", "Add at least one aggregate.");
+      if (!state.aggregates.length && !groups.length) invalid("data", "Add at least one aggregate.");
       if (limits.max_aggregates && state.aggregates.length > limits.max_aggregates) invalid("data", `At most ${limits.max_aggregates} aggregates are allowed.`);
-      const query = {select};
+      const query = {...structuredClone(state.retainedQuery || {}), select};
+      if (state.selectionLayout) {
+        const measures = select.slice(groups.length), groupColumns = groupSelect.slice();
+        query.select = state.selectionLayout.map(kind => kind === "group" ? groupColumns.shift() : measures.shift()).filter(item => item !== undefined);
+        query.select.push(...groupColumns, ...measures);
+      }
       if (state.filters?.length || state.filtersPresent) {
         const fields = new Map(this.queryFilterFields("aggregate").map(f => [f.path, f]));
         query.filters = state.filters.map(filter => {
+          if (filter.retained) return structuredClone(filter.retained);
+          if (filter.imported && filter.op === filter.imported.op && filter.value === filter.imported.value && filter.end === filter.imported.end) return structuredClone(filter.imported.wire);
           const field = fields.get(filter.field);
           if (!field || !this.queryFilterOperators(field, "aggregate").includes(filter.op)) {invalid("constrain", `Filter unavailable for ${filter.field}.`); return {field:filter.field,op:filter.op};}
           const leaf = {field:filter.field, op:filter.op};
           if (!["is_null", "not_null"].includes(filter.op)) leaf.value = ["in", "not_in"].includes(filter.op) ? String(filter.value).split(",").map(v=>v.trim()).filter(Boolean) : field.type === "boolean" ? String(filter.value) === "true" : filter.value;
           if (filter.op === "between") leaf.end = filter.end;
+          if (filter.imported) {
+            if (field.type === "integer") for (const key of ["value", "end"]) {
+              const number = value => typeof value === "string" && /^-?[0-9]+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : value;
+              if (Object.hasOwn(leaf, key)) leaf[key] = Array.isArray(leaf[key]) ? leaf[key].map(number) : number(leaf[key]);
+            }
+            try { this.aggregateImportedFilter(leaf); } catch (error) { invalid("constrain", error.message); }
+          }
           if (filter.op === "on") {try {leaf.value = global.SelectoCanonicalClient.assertPeriodOn(filter.value, field.type);} catch (error) {invalid("constrain", error.message);}}
           return leaf;
         });
       }
       try { this.applyAsOf(query, state.asOf, "aggregate"); } catch (error) { invalid("constrain", error.message); }
-      if (groups.length) query.group_by = groups;
+      if (groups.length) query.group_by = groups.map(id => state.groupEntries?.find(entry => entry.alias === id) || id);
       if (!this.aggregateGroupingModes().some(mode => mode.value === state.grouping)) invalid("page", "Subtotal mode is not published.");
       if (state.grouping !== "none") {
         if (!groups.length) invalid("page", "Subtotals need at least one group.");
@@ -5268,7 +5476,9 @@
           const used = new Set(sets.flat());
           if (!sets.length) invalid("page", "Choose at least one grouping set.");
           else if (used.size !== groups.length) invalid("page", "Every group must appear in a chosen grouping set.");
-          query.grouping_sets = sets;
+          const imported = state.importedSets;
+          query.grouping_sets = imported && JSON.stringify(imported.keys) === JSON.stringify(state.sets)
+            && JSON.stringify(imported.groups) === JSON.stringify(groups) ? structuredClone(imported.wire) : sets;
         }
       }
       const orders = state.orders || [];
@@ -5280,11 +5490,17 @@
         query.order_by = orders.map(({field, direction}) => ({field, direction}));
       }
       const limit = Number(state.limit), offset = Number(state.offset);
-      if (!Number.isInteger(limit) || limit < 1 || (limits.max_limit && limit > limits.max_limit)) invalid("page", `Limit must be 1 to ${limits.max_limit || "the host maximum"}.`);
+      if (!Number.isInteger(limit) || limit < (state.importedPage ? 0 : 1) || (limits.max_limit && limit > limits.max_limit)) invalid("page", `Limit must be 1 to ${limits.max_limit || "the host maximum"}.`);
       if (!Number.isInteger(offset) || offset < 0 || (limits.max_offset !== undefined && offset > limits.max_offset)) invalid("page", "Offset is out of range.");
-      if (groups.length) { query.limit = limit; if (offset) query.offset = offset; }
+      if (groups.length || state.importedPage) {
+        if (!state.importedPage || state.importedPage.limit || limit !== state.importedPage.initialLimit) query.limit = limit;
+        if (offset) query.offset = offset;
+      }
+      if (state.retainedQuery) {
+        try { this.aggregateImportedOptions(query, state); } catch (error) { invalid("page", error.message); }
+      }
       return {errors, cardErrors, request: {format: "selecto.explorer-query", format_version: 1,
-        domain: {fingerprint: features.domain.fingerprint}, features: {revision: features.revision}, query}};
+        domain: {fingerprint: features.domain.fingerprint}, features: {revision: features.revision}, ...(state.requestId !== undefined ? {request_id:state.requestId} : {}), query}};
     }
 
     syncAggregateRequest() {
@@ -5333,8 +5549,9 @@
     aggregateSortFields() {
       if (!this.aggregateState.groupBy.length) return [];
       return [
-        ...this.aggregateGroupFields().filter(f => f.sortable && this.aggregateState.groupBy.includes(f.id)).map(f => ({...f, path: f.id})),
-        ...this.aggregateState.aggregates.filter(a => a.alias).map(a => ({path: a.alias, label: a.alias})),
+        ...this.aggregateSelectedGroupFields().filter(f => f.sortable && this.aggregateState.groupBy.includes(f.id)).map(f => ({...f, path: f.id})),
+        ...this.aggregateState.aggregates.filter(a => a.alias).flatMap(a => a.fn === "bucket_count"
+          ? (a.retained?.buckets?.ranges || []).map((range, i) => ({path:`${a.alias}__bucket_${i + 1}`, label:`${a.alias}: ${range.label}`})) : [{path: a.alias, label: a.alias}]),
       ];
     }
 
@@ -5364,19 +5581,22 @@
       const input = (label, name, value, type, index) => {
         const wrapper = element("label", "", label), node = element("input", "");
         node.type = type; node.value = String(value); node.setAttribute("aria-label", label);
+        if (name === "limit" && state.importedPage && !state.importedPage.limit) {node.value = ""; node.placeholder = "Host default";}
         node.dataset.sacAggregateControl = name; if (index !== undefined) node.dataset.index = String(index);
-        if (type === "number") {node.min = name === "limit" ? "1" : "0"; const max = this.aggregateFeatures.limits?.[`max_${name}`]; if (max !== undefined) node.max = String(max);}
+        if (type === "number") {node.min = name === "limit" && !state.importedPage ? "1" : "0"; const max = this.aggregateFeatures.limits?.[`max_${name}`]; if (max !== undefined) node.max = String(max);}
         wrapper.append(node); return wrapper;
       };
-      const labelOf = new Map(this.aggregateGroupFields().map(field => [field.id, field.label]));
+      const labelOf = new Map(this.aggregateSelectedGroupFields().map(field => [field.id, field.label]));
       for (const kind of ["group", "measure"]) {
         const container = this.root.querySelector(`[data-sac-${kind}-chips]`); container.replaceChildren();
         const items = kind === "group" ? state.groupBy : state.aggregates;
         if (!items.length) container.append(element("p", "sac-muted", kind === "group" ? "No groups; measures summarise all rows." : "Choose at least one measure."));
         items.forEach((item, index) => {
-          const field = kind === "group" ? this.aggregateGroupFields().find(f => f.id === item) || {id:item,label:item} : {path:item.field || "rows",label:this.aggregateMeasureLabel(item),type:item.fn};
+          const field = kind === "group" ? this.aggregateSelectedGroupFields().find(f => f.id === item) || {id:item,label:item} : {path:item.field || "rows",label:this.aggregateMeasureLabel(item),type:item.fn};
           const {row, copy, actions} = this.selectedFieldChip(field);
           row.dataset.aggregateChip = kind;
+          if (kind === "measure" && item.retained?.ignore_nulls) copy.append(element("small", "sac-field-config-summary", `Nulls: ${item.retained.ignore_nulls}`));
+          if (kind === "measure" && item.retained?.buckets) copy.append(element("small", "sac-field-config-summary", `Buckets: ${item.retained.buckets.kind} (kept in JSON)`));
           if (kind === "measure") copy.append(input(`Name for ${field.label}`, "aggregate-alias", item.alias, "text", index));
           for (const [action, text, label] of [["up", "↑", "Move up"], ["down", "↓", "Move down"], ["remove", "×", "Remove"]]) {
             const node = button(text, `${kind === "group" ? "group" : "aggregate"}-${action}`, index, `${label} ${field.label}`);
@@ -5386,13 +5606,34 @@
           container.append(row);
         });
       }
+      let settings = target.querySelector("[data-sac-aggregate-kept-settings]");
+      if (!settings) { settings = element("p", "sac-help"); settings.dataset.sacAggregateKeptSettings = ""; target.append(settings); }
+      const keptData = [];
+      if (state.retainedQuery?.row_format) keptData.push(`Row shape: ${state.retainedQuery.row_format}`);
+      if (state.requestId !== undefined) keptData.push(`Request ID: ${state.requestId}`);
+      settings.textContent = keptData.length ? `${keptData.join(" · ")} (kept from imported JSON).` : "";
+      settings.hidden = !settings.textContent;
       this.renderAvailableFields("group", this.aggregateGroupFields());
       this.renderAggregateMeasureList();
-      this.renderFilters(this.root.querySelector("[data-sac-filters]"), state.filters || [], "aggregate");
+      const filters = this.root.querySelector("[data-sac-filters]");
+      this.renderFilters(filters, (state.filters || []).filter(filter => !filter.retained), "aggregate");
+      (state.filters || []).filter(filter => filter.retained).forEach(filter => {
+        const row = element("article", "sac-filter-row"); row.dataset.filterId = filter.id; row.dataset.filterProfile = "aggregate";
+        const remove = element("button", "sac-icon-button", "×"); remove.type = "button"; remove.dataset.sacRemoveFilter = filter.id;
+        remove.setAttribute("aria-label", "Remove imported filter");
+        row.append(element("p", "sac-help", "Imported filter settings kept in request JSON."), remove); filters.append(row);
+      });
+      if (state.retainedQuery?.segments?.length) filters.append(element("p", "sac-help", `Segments: ${state.retainedQuery.segments.join(", ")} (kept from imported JSON).`));
+      if (state.retainedQuery?.parameters && Object.keys(state.retainedQuery.parameters).length) filters.append(element("p", "sac-help", "Imported parameters kept in request JSON."));
       this.renderAsOf(this.root.querySelector("[data-sac-as-of-slot]"), "aggregate");
       this.renderFilterFieldList();
       const page = this.root.querySelector("[data-sac-aggregate-page]"); page.replaceChildren();
       page.append(selector("Subtotal rows", "grouping", this.aggregateGroupingModes(), state.grouping));
+      for (const [key, label] of [["timezone", "Timezone"], ["count", "Count mode"], ["complete", "Complete grid"]]) {
+        if (Object.hasOwn(state.retainedQuery || {}, key)) page.append(element("p", "sac-help", `${label}: ${state.retainedQuery[key]} (kept from imported JSON).`));
+      }
+      if (Object.hasOwn(state.retainedQuery || {}, "export")) page.append(element("p", "sac-help", state.retainedQuery.export
+        ? `Export: all rows, ${state.retainedQuery.export.shape || "rows"} shape (kept from imported JSON).` : "Export: none (kept from imported JSON)."));
       if (state.grouping === "sets" && state.groupBy.length) {
         const list = element("div", "sac-segment-options");
         aggregateSetChoices(state.groupBy.length).forEach(set => {
@@ -5454,11 +5695,20 @@
         if (name === "aggregate-alias") {
           const previous = this.aggregateState.aggregates[index].alias;
           this.aggregateState.aggregates[index].alias = target.value;
-          (this.aggregateState.orders || []).forEach(order => {if (order.field === previous) order.field = target.value;});
+          (this.aggregateState.orders || []).forEach(order => {
+            if (order.field === previous) order.field = target.value;
+            else if (this.aggregateState.aggregates[index].fn === "bucket_count" && order.field.startsWith(`${previous}__bucket_`)) order.field = target.value + order.field.slice(previous.length);
+          });
           const orders = this.root.querySelector("[data-sac-aggregate-orders]");
           if (orders) this.renderOrders(orders, this.aggregateState.orders, this.aggregateSortFields(), false);
         }
-        else this.aggregateState[name] = target.value === "" ? "" : Number(target.value);
+        else {
+          this.aggregateState[name] = target.value === "" ? "" : Number(target.value);
+          if (name === "limit" && this.aggregateState.importedPage) {
+            this.aggregateState.importedPage.limit = target.value !== "";
+            if (!this.aggregateState.importedPage.limit) this.aggregateState.limit = this.aggregateState.importedPage.initialLimit;
+          }
+        }
         this.cancelQuery(); this.state.response = null; this.clearQueryResult();
         return this.syncAggregateRequest();
       }
@@ -5494,7 +5744,8 @@
       if (action === "aggregate-add") return this.addAggregateMeasure("count");
       const group = action.startsWith("group-"), items = group ? this.aggregateState.groupBy : this.aggregateState.aggregates;
       if (!items[index]) return;
-      const label = group ? this.aggregateGroupFields().find(f => f.id === items[index])?.label || items[index] : this.aggregateMeasureLabel(items[index]);
+      const labelId = group ? items[index] : null;
+      const label = group ? this.aggregateSelectedGroupFields().find(f => f.id === items[index])?.label || items[index] : this.aggregateMeasureLabel(items[index]);
       let position = index;
       this.aggregateChanged(state => {
         if (action.endsWith("-remove")) items.splice(index, 1);
@@ -5503,7 +5754,13 @@
           if (position < 0 || position >= items.length) {position = index; return;}
           items.splice(position, 0, items.splice(index, 1)[0]);
         }
-        if (group) {state.sets = []; if (!items.length) {state.grouping = "none"; state.orders = []; delete state.ordersPresent;}}
+        if (group) {
+          state.sets = []; delete state.selectGroupOrder;
+          if (action.endsWith("-remove")) {
+            state.groupEntries = state.groupEntries?.filter(entry => entry.alias !== labelId);
+            state.groupSelections = state.groupSelections?.filter(entry => entry.id !== labelId);
+          }
+          if (!items.length) {state.grouping = "none"; state.orders = []; delete state.ordersPresent;}}
         const sortable = new Set(this.aggregateSortFields().map(f => f.path));
         state.orders = (state.orders || []).filter(order => sortable.has(order.field));
       });
