@@ -788,8 +788,12 @@
   function usableAggregateFeatures(document) {
     return isPlainObject(document) && document.format === "selecto.explorer-features" && document.format_version === 1
       && document.profile === "remote_query.explorer.v1" && isPlainObject(document.domain)
-      && typeof document.domain.fingerprint === "string" && typeof document.revision === "string"
-      && Array.isArray(document.fields) && isPlainObject(document.supports) && document.supports.aggregate === true;
+      && typeof document.domain.fingerprint === "string" && document.domain.fingerprint.length > 0
+      && typeof document.revision === "string" && document.revision.length > 0
+      && Array.isArray(document.fields) && document.fields.every((field) => isPlainObject(field)
+        && typeof field.id === "string" && typeof field.path === "string"
+        && (field.aggregates === undefined || Array.isArray(field.aggregates) && field.aggregates.every((fn) => typeof fn === "string")))
+      && isPlainObject(document.supports) && document.supports.aggregate === true;
   }
 
   // Every combination of `count` group positions, most detailed first, ending with the grand total ([]).
@@ -1205,8 +1209,10 @@
                   <div class="sac-compact-actions"><span class="sac-edited" data-sac-edited hidden>Manually edited</span><span data-sac-post-editor-actions><button type="button" class="sac-text-button" data-sac-load-json>Load into chooser</button><button type="button" class="sac-text-button" data-sac-reset-json>Reset JSON</button></span><button type="button" class="sac-text-button" data-sac-copy-request>Copy</button></div>
                 </div>
                 <div class="sac-import-message" data-sac-import-message hidden></div>
-                ${this.remoteMode ? `<div class="sac-root-controls">
-                  <label>Query profile<select aria-label="Query profile" data-sac-root-mode><option value="flat">Flat Detail (v1)</option><option value="root" ${this.rootPredicateContext ? "" : "disabled"}>Recursive root predicates (v2)</option><option value="nested" ${this.nestedDetailContext ? "" : "disabled"}>Complete nested Detail (v1)</option><option value="aggregate" ${this.aggregateFeatures ? "" : "disabled"}>Aggregates (explorer v1)</option></select></label>
+                ${this.remoteMode || this.aggregateAdvertised ? `<div class="sac-root-controls">
+                  <label>Query profile<select aria-label="Query profile" data-sac-root-mode><option value="flat">${this.remoteMode ? "Flat Detail (v1)" : "Detail"}</option>${this.remoteMode ? `<option value="root" ${this.rootPredicateContext ? "" : "disabled"}>Recursive root predicates (v2)</option><option value="nested" ${this.nestedDetailContext ? "" : "disabled"}>Complete nested Detail (v1)</option>` : ""}<option value="aggregate" ${this.aggregateFeatures ? "" : "disabled"}>Aggregates (explorer v1)</option></select></label>
+                  <p data-sac-aggregate-availability hidden></p>
+                  ${this.remoteMode ? `
                   <p data-sac-root-availability>${this.rootPredicateContext ? "Recursive root predicates available; opt in explicitly." : "Recursive root predicates unavailable on this publication."}</p>
                   <p data-sac-nested-availability></p>
                   <details><summary>Root predicate state</summary><label>Root predicate state<textarea aria-label="Root predicate state" data-sac-root-state spellcheck="false"></textarea></label>
@@ -1216,7 +1222,7 @@
                   <details data-sac-nested-state-controls><summary>Nested Detail state</summary><label>Nested Detail state<textarea aria-label="Nested Detail state" data-sac-nested-state spellcheck="false"></textarea></label>
                     <button type="button" data-sac-nested-restore>Restore nested state</button><button type="button" data-sac-nested-link>Copy nested state link</button>
                     <button type="button" data-sac-nested-save>Save private nested state</button><button type="button" data-sac-nested-private>Restore private nested state</button>
-                  </details>
+                  </details>` : ""}
                 </div>` : ""}
                 <section class="sac-nested-builder" data-sac-nested-builder hidden></section>
                 <section class="sac-nested-builder sac-aggregate-builder" data-sac-aggregate-builder hidden></section>
@@ -1322,6 +1328,11 @@
         this.state.responseFormat,
       );
       this.bind();
+      const aggregateAvailability = this.root.querySelector("[data-sac-aggregate-availability]");
+      if (aggregateAvailability) {
+        aggregateAvailability.textContent = this.aggregateAvailabilityError || "";
+        aggregateAvailability.hidden = !this.aggregateAvailabilityError;
+      }
       const nestedAvailability = this.root.querySelector("[data-sac-nested-availability]");
       if (nestedAvailability) nestedAvailability.textContent = this.nestedDetailContext
         ? "Complete nested Detail available; opt in explicitly."
@@ -3176,6 +3187,11 @@
       this.rootMode = this.queryProfile === "root";
       const selector = this.root.querySelector("[data-sac-root-mode]"); if (selector) selector.value = this.queryProfile;
       const method = this.root.querySelector("[data-sac-query-method-badge]"); if (method && nested) method.textContent = "POST";
+      if (this.queryProfile === "aggregate") {
+        if (method) method.textContent = "POST";
+        const path = this.root.querySelector("[data-sac-query-path]"); if (path) path.textContent = this.aggregateQueryPath;
+        const editor = this.root.querySelector("[data-sac-request]"); if (editor) editor.readOnly = false;
+      }
       const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = this.queryProfile !== "flat";
       const panel = this.root.querySelector("[data-sac-nested-builder]"); if (panel) panel.hidden = !nested;
       const aggregate = this.root.querySelector("[data-sac-aggregate-builder]"); if (aggregate) aggregate.hidden = this.queryProfile !== "aggregate";
@@ -3210,7 +3226,7 @@
           this.state.rawDirty = saved.rawDirty;
           const edited = this.root.querySelector("[data-sac-edited]"); if (edited) edited.hidden = !saved.rawDirty;
         }
-        this.setImportMessage("Flat Detail draft restored.", "success");
+        this.setImportMessage(`${this.remoteMode ? "Flat Detail" : "Detail"} draft restored.`, "success");
         this.updateCurl(); return;
       }
       if (value === "root") {
@@ -5042,15 +5058,26 @@
       const routes = Array.isArray(this.manifest?.routes) ? this.manifest.routes : [];
       const features = routes.find((route) => route.operation_id === "getExplorerFeatures" && route.method === "GET");
       const query = routes.find((route) => route.operation_id === "queryExplorer" && route.method === "POST");
+      this.aggregateAdvertised = Boolean(features && query);
+      this.aggregateFeatures = null;
+      this.aggregateQueryPath = "";
+      this.aggregateAvailabilityError = "";
+      if (!this.aggregateAdvertised) return;
       const sameOrigin = (path) => typeof path === "string" && path.startsWith(`${this.base}/`) && !path.includes("//") && !path.includes("..");
-      if (!features || !query || !sameOrigin(features.path) || !sameOrigin(query.path)) return;
+      if (!sameOrigin(features.path) || !sameOrigin(query.path)) {
+        this.aggregateAvailabilityError = "Aggregates unavailable: invalid published routes.";
+        return;
+      }
       try {
         const document = await this.fetchJSON(features.path);
-        if (!usableAggregateFeatures(document)) return;
+        if (!usableAggregateFeatures(document)) {
+          this.aggregateAvailabilityError = "Aggregates unavailable: invalid or unsupported features.";
+          return;
+        }
         this.aggregateFeatures = document;
         this.aggregateQueryPath = query.path;
       } catch (_error) {
-        // The publication offers no aggregates to this caller; the profile stays disabled.
+        this.aggregateAvailabilityError = "Aggregates unavailable: features could not be fetched.";
       }
     }
 
@@ -5357,11 +5384,17 @@
       this.root.querySelector("[data-sac-run-label]").textContent = "Running…";
       this.setStatus("Running resource GET", "running");
       const started = performance.now();
+      this.queryController?.abort();
+      const sequence = this.querySequence = (this.querySequence || 0) + 1;
+      const controller = this.queryController = new AbortController();
+      const cancel = this.root.querySelector("[data-sac-cancel-query]");
+      if (cancel) cancel.hidden = false;
       try {
         const response = await fetch(model.path, {
           method: "GET",
           credentials: "same-origin",
           headers: {Accept: "application/json"},
+          signal: controller.signal,
         });
         const text = await response.text();
         let payload;
@@ -5370,6 +5403,7 @@
         } catch (_error) {
           payload = {ok: false, error: {code: "invalid_response", message: text || "Empty response", details: {}}};
         }
+        if (sequence !== this.querySequence) return;
         this.state.response = payload;
         this.renderResponse(payload);
         this.setStatus(
@@ -5377,13 +5411,16 @@
           response.ok ? "success" : "error",
         );
       } catch (error) {
+        if (sequence !== this.querySequence) return;
         this.state.response = {ok: false, error: {code: "network_error", message: error.message, details: {}}};
         this.renderResponse(this.state.response);
         this.setStatus("Network error", "error");
       } finally {
+        if (sequence !== this.querySequence) return;
         button.classList.remove("is-running");
         button.disabled = Boolean(this.buildResourceRequest().errors.length);
         this.root.querySelector("[data-sac-run-label]").textContent = "Run GET";
+        if (cancel) cancel.hidden = true;
       }
     }
 
@@ -5483,7 +5520,7 @@
       }
       let columns = data && Array.isArray(data.columns) ? data.columns : [];
       let rows = data && Array.isArray(data.rows) ? data.rows : [];
-      if (this.state.queryMethod === "get" && payload && payload.ok && isPlainObject(data)) {
+      if (this.queryProfile === "flat" && this.state.queryMethod === "get" && payload && payload.ok && isPlainObject(data)) {
         columns = Object.keys(data);
         rows = [data];
       }
