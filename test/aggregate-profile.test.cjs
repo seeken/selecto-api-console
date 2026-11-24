@@ -106,9 +106,10 @@ test("non-remote aggregate publication offers Detail and sends a grouped rollup 
     [["flat", "Detail"], ["aggregate", "Aggregates (explorer v1)"]]);
   assert.equal(x.node("root-state"), null); assert.equal(x.node("nested-state-controls"), null);
   await x.choose("aggregate");
-  assert.equal(x.node("aggregate-builder").hidden, false);
-  assert.match(x.node("aggregate-builder").textContent, /Group by/);
-  assert.equal(x.root.querySelector(".sac-builder").hidden, true);
+  assert.equal(x.node("aggregate-data").hidden, false);
+  assert.equal(x.node("aggregate-builder"), null);
+  assert.match(x.node("aggregate-data").textContent, /Group by/);
+  assert.equal(x.root.querySelector(".sac-builder").hidden, false);
   x.console.aggregateControl({dataset: {sacAggregateControl: "add-group"}, value: "status"});
   x.console.aggregateControl({dataset: {sacAggregateControl: "grouping"}, value: "rollup"});
   const request = JSON.parse(x.node("request").value);

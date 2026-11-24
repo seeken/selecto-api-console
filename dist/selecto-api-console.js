@@ -3152,8 +3152,8 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       this.fieldMap = new Map();
       this.filterFields = [];
       this.filterFieldMap = new Map();
-      this.availableGroupOpen = {field: new Map(), filter: new Map()};
-      this.availableSearch = {field: "", filter: ""};
+      this.availableGroupOpen = {field: new Map(), filter: new Map(), group: new Map(), measure: new Map()};
+      this.availableSearch = {field: "", filter: "", group: "", measure: ""};
       this.nextSelectedFieldId = 1;
       this.postQueryFieldState = null;
       this.resourceQueryFieldState = null;
@@ -3269,6 +3269,8 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         try {
           initialNested = nestedStateFromLocation(global.location);
           if (!initialNested) initialRequest = requestPayloadFromLocation(global.location);
+          const profile = new URLSearchParams(String(global.location.hash || "").replace(/^#/, "")).get("profile");
+          if (initialRequest && profile === "aggregate" && initialRequest.format !== "selecto.explorer-query") throw new Error("Aggregates links need an Explorer query envelope.");
           if (initialRequest && initialRequest.format !== "selecto.root-predicate-state") this.loadPayloadIntoChooser(initialRequest);
         } catch (error) {
           initialRequestError = error;
@@ -3432,7 +3434,8 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
           <div class="sac-query-layout">
             <aside class="sac-builder">
               <section class="sac-card">
-                <div class="sac-card-heading"><div><span class="sac-step">1</span><h2>Choose data</h2></div></div>
+                <div class="sac-card-heading"><div><span class="sac-step">1</span><h2 data-sac-data-heading>Choose data</h2></div></div>
+                <div data-sac-detail-data>
                 <fieldset class="sac-method-choice" data-sac-query-method-group hidden>
                   <legend class="sac-label">Request method</legend>
                   <label class="sac-method-option"><input type="radio" name="sac-query-method" value="post" data-sac-query-method> POST query</label>
@@ -3473,23 +3476,42 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
                   <select id="sac-view" data-sac-view></select>
                   <p class="sac-help" data-sac-view-help></p>
                 </div>
+                </div>
+                <div data-sac-aggregate-data hidden>
+                  <span class="sac-label">Group by</span>
+                  <div class="sac-selected-fields" data-sac-group-chips></div>
+                  <label class="sac-label" for="sac-group-search">Available fields</label>
+                  <input id="sac-group-search" type="search" placeholder="Search groupable fields" data-sac-group-search>
+                  <div class="sac-field-list" data-sac-group-list></div>
+                  <span class="sac-label">Measures</span>
+                  <div class="sac-selected-fields" data-sac-measure-chips></div>
+                  <label class="sac-label" for="sac-measure-search">Available measures</label>
+                  <input id="sac-measure-search" type="search" placeholder="Search fields and functions" data-sac-measure-search>
+                  <div class="sac-field-list" data-sac-measure-list></div>
+                  <p class="sac-import-message" data-kind="error" data-sac-aggregate-errors="data" role="status" aria-live="polite" hidden></p>
+                </div>
               </section>
               <section class="sac-card" data-sac-post-query-card>
                 <div class="sac-card-heading"><div><span class="sac-step">2</span><h2>Constrain</h2></div></div>
+                <div data-sac-detail-constraints>
                 <div data-sac-segment-list>
                   <span class="sac-label">Named segments</span>
                   <div class="sac-segment-options" data-sac-segments></div>
                 </div>
                 <div class="sac-segment-groups" data-sac-segment-groups></div>
                 <div class="sac-parameters" data-sac-parameters></div>
+                </div>
                 <div data-sac-as-of-slot></div>
                 <div class="sac-filter-list" data-sac-filters></div>
                 <label class="sac-label" for="sac-filter-search">Available filters</label>
                 <input id="sac-filter-search" type="search" placeholder="Search filter fields" data-sac-filter-search>
                 <div class="sac-field-list sac-filter-field-list" data-sac-filter-field-list></div>
+                <p class="sac-import-message" data-kind="error" data-sac-aggregate-errors="constrain" role="status" aria-live="polite" hidden></p>
               </section>
               <section class="sac-card" data-sac-post-query-card>
-                <div class="sac-card-heading"><div><span class="sac-step">3</span><h2>Order & page</h2></div><button type="button" class="sac-text-button" data-sac-add-order>+ Sort</button></div>
+                <div class="sac-card-heading"><div><span class="sac-step">3</span><h2 data-sac-page-heading>Order & page</h2></div><button type="button" class="sac-text-button" data-sac-add-order>+ Sort</button></div>
+                <div data-sac-aggregate-page hidden></div>
+                <div data-sac-detail-page>
                 <label class="sac-label" for="sac-ordering">Named ordering</label>
                 <select id="sac-ordering" data-sac-ordering></select>
                 <div class="sac-order-list" data-sac-orders></div>
@@ -3512,13 +3534,16 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
                 <label class="sac-label" for="sac-timezone">Use timezone</label>
                 <input id="sac-timezone" type="text" placeholder="America/New_York" data-sac-timezone>
                 <p class="sac-help">Applies an IANA timezone to UTC and epoch date/time fields and filters.</p>
+                </div>
+                <p class="sac-import-message" data-kind="error" data-sac-aggregate-errors="page" role="status" aria-live="polite" hidden></p>
               </section>
+              <span class="sac-sr-only" role="status" aria-live="polite" aria-atomic="true" data-sac-chooser-status></span>
             </aside>
             <section class="sac-execution">
               <section class="sac-request-card">
                 <div class="sac-card-heading">
                   <div><span class="sac-method" data-sac-query-method-badge>POST</span><code data-sac-query-path></code></div>
-                  <div class="sac-compact-actions"><span class="sac-edited" data-sac-edited hidden>Manually edited</span><span data-sac-post-editor-actions><button type="button" class="sac-text-button" data-sac-load-json>Load into chooser</button><button type="button" class="sac-text-button" data-sac-reset-json>Reset JSON</button></span><button type="button" class="sac-text-button" data-sac-copy-request>Copy</button></div>
+                  <div class="sac-compact-actions"><span class="sac-edited" data-sac-edited hidden>Manually edited</span><span data-sac-post-editor-actions><button type="button" class="sac-text-button" data-sac-load-json>Load into chooser</button><button type="button" class="sac-text-button" data-sac-reset-json>Reset JSON</button></span><button type="button" class="sac-text-button" data-sac-copy-link>Copy link</button><button type="button" class="sac-text-button" data-sac-copy-request>Copy</button></div>
                 </div>
                 <div class="sac-import-message" data-sac-import-message hidden></div>
                 ${this.remoteMode || this.aggregateAdvertised ? `<div class="sac-root-controls">
@@ -3537,7 +3562,6 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
                   </details>` : ""}
                 </div>` : ""}
                 <section class="sac-nested-builder" data-sac-nested-builder hidden></section>
-                <section class="sac-nested-builder sac-aggregate-builder" data-sac-aggregate-builder hidden></section>
                 <textarea class="sac-request-editor" spellcheck="false" aria-label="Query request" data-sac-request></textarea>
                 <div class="sac-run-row"><p>All fields and identifiers are validated against the published domain.</p><button type="button" class="sac-button" data-sac-cancel-query hidden>Cancel query</button><button type="button" class="sac-button sac-primary" data-sac-run><span data-sac-run-label>Run query</span></button></div>
               </section>
@@ -4416,6 +4440,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     }
 
     renderAll() {
+      if (this.queryProfile === "aggregate") { this.renderAggregateBuilder(); this.syncRequest(); return; }
       const resourceGet = this.state.queryMethod === "get" && Boolean(this.resourcePath);
       const mode = this.state.mode;
       this.root.querySelectorAll("[data-sac-query-method]").forEach((radio) => {
@@ -4527,17 +4552,11 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       this.state.selectedFields.forEach((selection, index) => {
         const path = selection.field;
         const field = this.fieldMap.get(path) || {path, label: path, type: "field"};
-        const row = element("div", "sac-selected-field");
-        markPicked(row, path);
+        const {row, copy, actions} = this.selectedFieldChip(field);
         row.dataset.field = path;
         row.dataset.selectionId = selection.id;
-        const handle = element("span", "sac-drag", "⋮⋮");
-        handle.setAttribute("aria-hidden", "true");
-        const copy = element("div", "sac-selected-copy");
-        copy.append(element("strong", "", field.label), element("code", "", fieldSignature(field)));
         const configured = [selection.alias && `as ${selection.alias}`, selection.format].filter(Boolean).join(" · ");
         if (configured) copy.append(element("small", "sac-field-config-summary", configured));
-        const actions = element("div", "sac-field-actions");
         const actionsAvailable = this.state.queryMethod === "get"
           ? [["up", "↑", "Move up"], ["down", "↓", "Move down"], ["remove", "×", "Remove"]]
           : [["configure", "Configure", "Configure"], ["up", "↑", "Move up"], ["down", "↓", "Move down"], ["remove", "×", "Remove"]];
@@ -4553,13 +4572,29 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
           if ((action === "up" && index === 0) || (action === "down" && index === this.state.selectedFields.length - 1)) button.disabled = true;
           actions.append(button);
         });
-        row.append(handle, copy, actions);
         if (this.state.configuredField === selection.id) {
           row.classList.add("is-configuring");
           row.append(this.fieldConfiguration(field, selection));
         }
         container.append(row);
       });
+    }
+
+    selectedFieldChip(field) {
+      const row = element("div", "sac-selected-field");
+      markPicked(row, field.path || field.id);
+      const handle = element("span", "sac-drag", "⋮⋮");
+      handle.setAttribute("aria-hidden", "true");
+      const copy = element("div", "sac-selected-copy");
+      copy.append(element("strong", "", field.label), element("code", "", fieldSignature(field)));
+      const actions = element("div", "sac-field-actions");
+      row.append(handle, copy, actions);
+      return {row, copy, actions};
+    }
+
+    announceChooser(message) {
+      const status = this.root.querySelector("[data-sac-chooser-status]");
+      if (status) status.textContent = message;
     }
 
     selectionSchema() {
@@ -4603,6 +4638,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     }
 
     renderFieldList() {
+      if (this.queryProfile === "aggregate") return this.renderAvailableFields("group", this.aggregateGroupFields());
       this.renderAvailableFields("field", this.fields.filter((field) =>
         !field.pickerHidden
           && (this.state.queryMethod !== "get" || !fieldTraversesMany(this.domain, field.path))
@@ -4610,11 +4646,13 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     }
 
     renderAvailableFields(kind, fields) {
-      const query = (this.root.querySelector(kind === "field" ? "[data-sac-field-search]" : "[data-sac-filter-search]").value || "").trim().toLowerCase();
-      const container = this.root.querySelector(kind === "field" ? "[data-sac-field-list]" : "[data-sac-filter-field-list]");
-      const selected = new Set(kind === "field"
+      const aggregate = this.queryProfile === "aggregate";
+      const search = kind;
+      const query = (this.root.querySelector(`[data-sac-${search}-search]`).value || "").trim().toLowerCase();
+      const container = this.root.querySelector(`[data-sac-${search === "filter" ? "filter-field" : search}-list]`);
+      const selected = new Set(kind === "group" ? this.aggregateState.groupBy : kind === "measure" ? [] : kind === "field"
         ? this.state.selectedFields.map((selection) => selection.field)
-        : this.state.filters.map((filter) => filter.field));
+        : (aggregate ? this.aggregateState.filters : this.state.filters).map((filter) => filter.field));
       if (!this.availableSearch[kind]) container.querySelectorAll("[data-sac-available-group]").forEach((group) => {
         this.availableGroupOpen[kind].set(group.dataset.sacAvailableGroup, group.open);
       });
@@ -4631,7 +4669,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       ordered.forEach(([key, group]) => {
         const headingMatches = query && `${group.label} ${key}`.toLowerCase().includes(query);
         const matches = group.fields.filter((field) => !query || headingMatches
-          || `${field.path} ${field.label} ${field.type}`.toLowerCase().includes(query));
+          || `${field.path} ${field.label} ${field.type} ${kind === "measure" ? (field.aggregates || []).map(fn => `${fn} ${AGGREGATE_LABELS[fn] || fn}`).join(" ") : ""}`.toLowerCase().includes(query));
         if (!matches.length) return;
         shown += matches.length;
         const details = element("details", "sac-available-group");
@@ -4639,13 +4677,26 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         details.open = query ? true : (this.availableGroupOpen[kind].get(key) ?? !key);
         details.append(element("summary", "", `${group.label} (${matches.length})`));
         matches.forEach((field) => {
+          if (kind === "measure") {
+            const row = element("div", "sac-available-field sac-measure-choice");
+            const copy = element("span", ""); copy.append(element("strong", "", field.label));
+            const functions = element("div", "sac-compact-actions");
+            (field.aggregates || []).forEach(fn => {
+              const add = element("button", "sac-text-button", field.id ? AGGREGATE_LABELS[fn] || fn : "Count rows");
+              add.type = "button"; add.dataset.sacAddMeasure = field.id; add.dataset.fn = fn;
+              add.setAttribute("aria-label", field.id ? `Add ${AGGREGATE_LABELS[fn] || fn} of ${field.label}` : "Add Count of rows");
+              functions.append(add);
+            });
+            row.append(copy, functions); details.append(row); return;
+          }
           const button = element("button", "sac-available-field");
           button.type = "button";
-          if (kind === "field") button.dataset.sacAddField = field.path;
+          if (kind === "group") { button.dataset.sacAddGroup = field.id; button.disabled = selected.has(field.id); }
+          else if (kind === "field") button.dataset.sacAddField = field.path;
           else button.dataset.sacAddFilter = field.path;
           if (selected.has(field.path)) {
             markPicked(button, field.path);
-            button.setAttribute("aria-label", `Add another ${field.label} ${kind === "field" ? "column" : "filter"}`);
+            button.setAttribute("aria-label", kind === "group" ? `${field.label} already grouped` : `Add another ${field.label} ${kind === "field" ? "column" : "filter"}`);
           }
           const copy = element("span");
           copy.append(element("strong", "", field.groupKey ? field.leafLabel || field.label : field.label));
@@ -4655,7 +4706,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         });
         container.append(details);
       });
-      if (!shown) container.append(element("p", "sac-muted", `No matching available ${kind === "field" ? "fields" : "filters"}.`));
+      if (!shown) container.append(element("p", "sac-muted", `No matching available ${kind === "measure" ? "measures" : kind === "filter" ? "filters" : "fields"}.`));
       this.availableSearch[kind] = query;
     }
 
@@ -4778,6 +4829,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     }
 
     renderFilterFieldList() {
+      if (this.queryProfile === "aggregate") return this.renderAvailableFields("filter", this.queryFilterFields("aggregate").filter(f => this.queryFilterOperators(f, "aggregate").length));
       this.renderAvailableFields("filter", this.filterFields.filter((field) =>
         !field.pickerHidden));
     }
@@ -4895,19 +4947,17 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       if (target.dataset.sacPeriodPart === "precision") wrapper.querySelector('[data-sac-period-part="value"]').focus();
     }
 
-    renderOrders() {
-      const container = this.root.querySelector("[data-sac-orders]");
+    renderOrders(container = this.root.querySelector("[data-sac-orders]"), orders = this.state.orders, fields = this.sortFields(), named = Boolean(this.state.ordering)) {
       container.replaceChildren();
-      const named = Boolean(this.state.ordering);
-      this.state.orders.forEach((order) => {
+      orders.forEach((order) => {
         const row = element("div", "sac-order-row");
         row.dataset.orderId = order.id;
         const field = element("select", "");
-        field.dataset.sacOrderField = "";
+        field.dataset.sacOrderField = ""; field.setAttribute("aria-label", "Sort field");
         field.disabled = named;
-        appendOptions(field, this.sortFields().map((item) => ({value: item.path, label: `${item.label} — ${item.path}`})), order.field);
+        appendOptions(field, fields.map((item) => ({value: item.path, label: `${item.label} — ${item.path}`})), order.field);
         const direction = element("select", "");
-        direction.dataset.sacOrderDirection = "";
+        direction.dataset.sacOrderDirection = ""; direction.setAttribute("aria-label", "Sort direction");
         direction.disabled = named;
         appendOptions(direction, [{value: "asc", label: "Ascending"}, {value: "desc", label: "Descending"}], order.direction);
         const remove = element("button", "sac-icon-button", "×");
@@ -4919,7 +4969,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         container.append(row);
       });
       if (named) container.append(element("p", "sac-help", "The named ordering replaces custom sort fields."));
-      else if (!this.state.orders.length) container.append(element("p", "sac-muted", "No explicit ordering."));
+      else if (!orders.length) container.append(element("p", "sac-muted", "No explicit ordering."));
     }
 
     // Fields that can be sorted on: the API refuses sortable: false.
@@ -5423,7 +5473,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       if (onlyKeys(payload, ["format", "format_version", "domain", "features", "query"]).length
           || onlyKeys(payload.domain, ["fingerprint"]).length || onlyKeys(payload.features, ["revision"]).length) throw new Error("Unsupported aggregate envelope properties.");
       const query = payload.query;
-      if (!isPlainObject(query) || onlyKeys(query, ["select", "group_by", "rollup", "cube", "grouping_sets", "limit", "offset", "as_of", "filters"]).length) throw new Error("Unsupported aggregate chooser properties.");
+      if (!isPlainObject(query) || onlyKeys(query, ["select", "group_by", "rollup", "cube", "grouping_sets", "limit", "offset", "as_of", "filters", "order_by"]).length) throw new Error("Unsupported aggregate chooser properties.");
       this.validateQueryContext(query, "aggregate");
       const state = this.newAggregateState();
       if (query.filters !== undefined) {
@@ -5436,6 +5486,11 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
           if (f.op === "on") global.SelectoCanonicalClient.assertPeriodOn(f.value, field.type);
           return {id:`aggregate-${i}`,field:f.field,op:f.op,value:["in","not_in"].includes(f.op) && Array.isArray(f.value) ? f.value.join(", ") : f.value,end:f.end};
         });
+      }
+      if (query.order_by !== undefined) {
+        if (!Array.isArray(query.order_by) || query.order_by.some(order => !isPlainObject(order) || onlyKeys(order, ["field", "direction"]).length)) throw new Error("Unsupported aggregate ordering.");
+        state.orders = query.order_by.map((order, i) => ({id: `aggregate-order-${i}`, ...order}));
+        state.ordersPresent = true;
       }
       state.groupBy = query.group_by || [];
       if (!Array.isArray(state.groupBy) || !Array.isArray(query.select)) throw new Error("Aggregate selection and groups must be arrays.");
@@ -5504,10 +5559,25 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         const path = this.root.querySelector("[data-sac-query-path]"); if (path) path.textContent = this.aggregateQueryPath;
         const editor = this.root.querySelector("[data-sac-request]"); if (editor) editor.readOnly = false;
       }
-      const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = this.queryProfile !== "flat";
+      const builder = this.root.querySelector(".sac-builder"); if (builder) builder.hidden = !["flat", "aggregate"].includes(this.queryProfile);
       const panel = this.root.querySelector("[data-sac-nested-builder]"); if (panel) panel.hidden = !nested;
-      const aggregate = this.root.querySelector("[data-sac-aggregate-builder]"); if (aggregate) aggregate.hidden = this.queryProfile !== "aggregate";
+      const aggregate = this.queryProfile === "aggregate";
+      for (const name of ["data", "constraints", "page"]) {
+        const detail = this.root.querySelector(`[data-sac-detail-${name}]`); if (detail) detail.hidden = aggregate;
+      }
+      for (const name of ["data", "page"]) {
+        const slot = this.root.querySelector(`[data-sac-aggregate-${name}]`); if (slot) slot.hidden = !aggregate;
+      }
+      const dataHeading = this.root.querySelector("[data-sac-data-heading]"); if (dataHeading) dataHeading.textContent = aggregate ? "Group & measure" : "Choose data";
+      const pageHeading = this.root.querySelector("[data-sac-page-heading]"); if (pageHeading) pageHeading.textContent = aggregate ? "Subtotals & page" : "Order & page";
+      if (!aggregate) {
+        for (const card of ["data", "constrain", "page"]) {
+          const error = this.root.querySelector(`[data-sac-aggregate-errors="${card}"]`); if (error) error.hidden = true;
+        }
+        const sort = this.root.querySelector("[data-sac-add-order]"); if (sort) {sort.hidden = false; sort.disabled = false;}
+      }
       const actions = this.root.querySelector("[data-sac-post-editor-actions]"); if (actions) actions.hidden = this.queryProfile === "root";
+      const link = this.root.querySelector("[data-sac-copy-link]"); if (link) link.hidden = !["flat", "aggregate"].includes(this.queryProfile);
       if (nested) this.renderNestedBuilder();
     }
 
@@ -5859,6 +5929,19 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
           this.setImportMessage("Root state URL copied.","success");
         }
       } catch (error) {this.setImportMessage(`Root state blocked: ${error.message}`,"error");}
+    }
+
+    async copyRequestLink(source) {
+      try {
+        const editor = this.root.querySelector("[data-sac-request]");
+        const payload = global.SelectoCanonicalClient.parseStrictJSON(editor.value, {maxBytes:65536});
+        if (!["flat", "aggregate"].includes(this.queryProfile)) return;
+        const url = new URL(global.location.href);
+        const slots = new URLSearchParams();
+        slots.set("request", JSON.stringify(payload)); slots.set("profile", this.queryProfile);
+        url.hash = slots.toString();
+        await this.copy(url.href, source);
+      } catch (error) { this.setImportMessage(`Cannot copy request link: ${error.message}`, "error"); }
     }
 
     loadRequestIntoChooser() {
@@ -6761,6 +6844,10 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     }
 
     onClick(event) {
+      const addGroup = event.target.closest("[data-sac-add-group]");
+      if (addGroup) return this.aggregateControl({dataset:{sacAggregateControl:"add-group"}, value:addGroup.dataset.sacAddGroup});
+      const addMeasure = event.target.closest("[data-sac-add-measure]");
+      if (addMeasure) return this.addAggregateMeasure(addMeasure.dataset.fn, addMeasure.dataset.sacAddMeasure);
       const aggregateAction = event.target.closest("[data-sac-aggregate-action]");
       if (aggregateAction) return this.aggregateAction(aggregateAction);
       const nestedAction = event.target.closest("[data-sac-nested-action]");
@@ -6785,6 +6872,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       if (fieldAction) return this.moveField(fieldAction.closest("[data-selection-id]").dataset.selectionId, fieldAction.dataset.sacFieldAction);
       const addFilter = event.target.closest("[data-sac-add-filter]");
       if (addFilter) {
+        if (this.queryProfile === "aggregate") return this.aggregateControl({dataset:{sacAggregateControl:"add-filter"}, value:addFilter.dataset.sacAddFilter});
         const initialField = this.filterFieldMap.get(addFilter.dataset.sacAddFilter);
         if (!initialField) return;
         this.state.filters.push({
@@ -6805,6 +6893,14 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         return;
       }
       if (event.target.closest("[data-sac-add-order]")) {
+        if (this.queryProfile === "aggregate") {
+          if (this.aggregateState.grouping !== "none") return;
+          const fields = this.aggregateSortFields(); if (!fields.length) return;
+          return this.aggregateChanged(state => {
+            while (state.orders.some(order => order.id === `aggregate-order-${this.nextOrderId}`)) this.nextOrderId++;
+            state.orders.push({id:`aggregate-order-${this.nextOrderId++}`,field:fields[0].path,direction:"asc"});
+          });
+        }
         const sortable = this.sortFields();
         if (!sortable.length || this.state.ordering) return;
         this.state.orders.push({id: String(this.nextOrderId++), field: sortable[0].path, direction: "asc"});
@@ -6813,6 +6909,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       }
       const removeOrder = event.target.closest("[data-sac-remove-order]");
       if (removeOrder) {
+        if (this.queryProfile === "aggregate") return this.aggregateChanged(state => {state.orders = state.orders.filter(order => order.id !== removeOrder.dataset.sacRemoveOrder);});
         this.state.orders = this.state.orders.filter((order) => order.id !== removeOrder.dataset.sacRemoveOrder);
         this.changed();
         return;
@@ -6872,6 +6969,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       if (event.target.closest("[data-sac-copy-action]")) return this.copy(this.root.querySelector("[data-sac-action-request]").value, event.target);
       if (event.target.closest("[data-sac-copy-write-curl]")) return this.copy(this.root.querySelector("[data-sac-write-curl]").textContent, event.target);
       if (event.target.closest("[data-sac-copy-action-curl]")) return this.copy(this.root.querySelector("[data-sac-action-curl]").textContent, event.target);
+      if (event.target.closest("[data-sac-copy-link]")) return this.copyRequestLink(event.target);
       if (event.target.closest("[data-sac-copy-request]")) return this.copy(this.root.querySelector("[data-sac-request]").value, event.target);
       if (event.target.closest("[data-sac-copy-response]")) return this.copy(this.root.querySelector("[data-sac-response-json]").textContent, event.target);
       if (event.target.closest("[data-sac-copy-curl]")) return this.copy(this.root.querySelector("[data-sac-curl]").textContent, event.target);
@@ -6882,6 +6980,13 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     onChange(event) {
       const target = event.target;
       if (target.matches("[data-sac-period-part]")) return this.editPeriod(target);
+      if (this.queryProfile === "aggregate" && (target.matches("[data-sac-order-field]") || target.matches("[data-sac-order-direction]"))) {
+        const id = target.closest("[data-order-id]").dataset.orderId;
+        return this.aggregateChanged(state => {
+          const order = state.orders.find(order => order.id === id);
+          if (order) order[target.matches("[data-sac-order-field]") ? "field" : "direction"] = target.value;
+        });
+      }
       if (target.closest?.("[data-filter-id]")?.dataset.filterProfile === "aggregate") return this.aggregateFilterEdit(target);
       if (target.matches("[data-sac-as-of]")) return this.editAsOf(target);
       if (target.matches("[data-sac-aggregate-control]")) return this.aggregateControl(target);
@@ -7102,6 +7207,8 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         this.setMutationImportMessage("action", "", "");
         return this.syncActionRequest();
       }
+      if (target.matches("[data-sac-group-search]")) return this.renderAvailableFields("group", this.aggregateGroupFields());
+      if (target.matches("[data-sac-measure-search]")) return this.renderAggregateMeasureList();
       if (target.matches("[data-sac-field-search]")) return this.renderFieldList();
       if (target.matches("[data-sac-filter-search]")) return this.renderFilterFieldList();
       if (target.matches("[data-sac-response-filename]")) {
@@ -7132,7 +7239,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
         this.nestedInitialError = null;
         this.state.rawDirty = true;
-        if (this.queryProfile === "nested" && !this.nestedBlocked) this.root.querySelector("[data-sac-run]").disabled = false;
+        if (this.queryProfile === "aggregate" || this.queryProfile === "nested" && !this.nestedBlocked) this.root.querySelector("[data-sac-run]").disabled = false;
         this.root.querySelector("[data-sac-edited]").hidden = false;
         this.setImportMessage("", "");
         this.updateCurl();
@@ -7396,7 +7503,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     newAggregateState() {
       const limits = this.aggregateFeatures.limits || {};
       return {filters: [], groupBy: [], aggregates: [{fn: "count", field: "", alias: "count"}], grouping: "none", sets: [],
-        limit: Math.min(100, limits.max_limit || 100), offset: 0};
+        limit: Math.min(100, limits.max_limit || 100), offset: 0, orders: []};
     }
 
     aggregateGroupFields() {
@@ -7425,59 +7532,70 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     // The explorer-query envelope for the current aggregate draft, or the reasons it cannot be sent.
     buildAggregateRequest() {
       const state = this.aggregateState, features = this.aggregateFeatures, limits = features.limits || {};
-      const errors = [];
+      const errors = [], cardErrors = {data: [], constrain: [], page: []};
+      const invalid = (card, message) => { errors.push(message); cardErrors[card].push(message); };
       const groupable = new Map(this.aggregateGroupFields().map((field) => [field.id, field]));
       const groups = state.groupBy.filter((id) => groupable.has(id));
-      if (new Set(groups).size !== groups.length) errors.push("A field can be grouped only once.");
-      if (limits.max_group_by && groups.length > limits.max_group_by) errors.push(`At most ${limits.max_group_by} groups are allowed.`);
+      if (new Set(groups).size !== groups.length) invalid("data", "A field can be grouped only once.");
+      if (limits.max_group_by && groups.length > limits.max_group_by) invalid("data", `At most ${limits.max_group_by} groups are allowed.`);
       const aliases = new Set(groups);
       const select = groups.slice();
       state.aggregates.forEach((aggregate, index) => {
         const label = `Aggregate ${index + 1}`;
         const alias = String(aggregate.alias || "").trim();
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) errors.push(`${label} needs a name of letters, digits and underscores.`);
-        else if (aliases.has(alias)) errors.push(`${label} repeats the name ${alias}.`);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) invalid("data", `${label} needs a name of letters, digits and underscores.`);
+        else if (aliases.has(alias)) invalid("data", `${label} repeats the name ${alias}.`);
         aliases.add(alias);
-        if (aggregate.fn !== "count" && !aggregate.field) errors.push(`${label} needs a field.`);
+        if (!this.aggregateFunctions().includes(aggregate.fn)) invalid("data", `${label} function is not published.`);
+        if (aggregate.fn !== "count" && !aggregate.field) invalid("data", `${label} needs a field.`);
         if (aggregate.field && !this.aggregateMeasureFields(aggregate.fn).some((field) => field.id === aggregate.field)) {
-          errors.push(`${label}: ${aggregate.fn} is not offered for ${aggregate.field}.`);
+          invalid("data", `${label}: ${aggregate.fn} is not offered for ${aggregate.field}.`);
         }
         select.push({aggregate: aggregate.fn, ...(aggregate.field ? {field: aggregate.field} : {}), alias});
       });
-      if (!state.aggregates.length) errors.push("Add at least one aggregate.");
-      if (limits.max_aggregates && state.aggregates.length > limits.max_aggregates) errors.push(`At most ${limits.max_aggregates} aggregates are allowed.`);
+      if (!state.aggregates.length) invalid("data", "Add at least one aggregate.");
+      if (limits.max_aggregates && state.aggregates.length > limits.max_aggregates) invalid("data", `At most ${limits.max_aggregates} aggregates are allowed.`);
       const query = {select};
       if (state.filters?.length || state.filtersPresent) {
         const fields = new Map(this.queryFilterFields("aggregate").map(f => [f.path, f]));
         query.filters = state.filters.map(filter => {
           const field = fields.get(filter.field);
-          if (!field || !this.queryFilterOperators(field, "aggregate").includes(filter.op)) {errors.push(`Filter unavailable for ${filter.field}.`); return {field:filter.field,op:filter.op};}
+          if (!field || !this.queryFilterOperators(field, "aggregate").includes(filter.op)) {invalid("constrain", `Filter unavailable for ${filter.field}.`); return {field:filter.field,op:filter.op};}
           const leaf = {field:filter.field, op:filter.op};
           if (!["is_null", "not_null"].includes(filter.op)) leaf.value = ["in", "not_in"].includes(filter.op) ? String(filter.value).split(",").map(v=>v.trim()).filter(Boolean) : field.type === "boolean" ? String(filter.value) === "true" : filter.value;
           if (filter.op === "between") leaf.end = filter.end;
-          if (filter.op === "on") {try {leaf.value = global.SelectoCanonicalClient.assertPeriodOn(filter.value, field.type);} catch (error) {errors.push(error.message);}}
+          if (filter.op === "on") {try {leaf.value = global.SelectoCanonicalClient.assertPeriodOn(filter.value, field.type);} catch (error) {invalid("constrain", error.message);}}
           return leaf;
         });
       }
-      try { this.applyAsOf(query, state.asOf, "aggregate"); } catch (error) { errors.push(error.message); }
+      try { this.applyAsOf(query, state.asOf, "aggregate"); } catch (error) { invalid("constrain", error.message); }
       if (groups.length) query.group_by = groups;
+      if (!this.aggregateGroupingModes().some(mode => mode.value === state.grouping)) invalid("page", "Subtotal mode is not published.");
       if (state.grouping !== "none") {
-        if (!groups.length) errors.push("Subtotals need at least one group.");
+        if (!groups.length) invalid("page", "Subtotals need at least one group.");
         else if (state.grouping === "rollup") query.rollup = true;
         else if (state.grouping === "cube") query.cube = true;
         else {
           const sets = aggregateSetChoices(groups.length).filter((set) => state.sets.includes(set.join(",")));
           const used = new Set(sets.flat());
-          if (!sets.length) errors.push("Choose at least one grouping set.");
-          else if (used.size !== groups.length) errors.push("Every group must appear in a chosen grouping set.");
+          if (!sets.length) invalid("page", "Choose at least one grouping set.");
+          else if (used.size !== groups.length) invalid("page", "Every group must appear in a chosen grouping set.");
           query.grouping_sets = sets;
         }
       }
+      const orders = state.orders || [];
+      if (orders.length || state.ordersPresent) {
+        const sortable = new Set(this.aggregateSortFields().map(field => field.path));
+        if (orders.length && (!groups.length || state.grouping !== "none")) invalid("page", "Sorting requires groups and no subtotals.");
+        if (limits.max_orders !== undefined && orders.length > limits.max_orders) invalid("page", `At most ${limits.max_orders} sort rows are allowed.`);
+        orders.forEach(order => { if (!sortable.has(order.field) || !["asc", "desc"].includes(order.direction)) invalid("page", "Choose an available sort field and direction."); });
+        query.order_by = orders.map(({field, direction}) => ({field, direction}));
+      }
       const limit = Number(state.limit), offset = Number(state.offset);
-      if (!Number.isInteger(limit) || limit < 1 || (limits.max_limit && limit > limits.max_limit)) errors.push(`Limit must be 1 to ${limits.max_limit || "the host maximum"}.`);
-      if (!Number.isInteger(offset) || offset < 0 || (limits.max_offset !== undefined && offset > limits.max_offset)) errors.push("Offset is out of range.");
+      if (!Number.isInteger(limit) || limit < 1 || (limits.max_limit && limit > limits.max_limit)) invalid("page", `Limit must be 1 to ${limits.max_limit || "the host maximum"}.`);
+      if (!Number.isInteger(offset) || offset < 0 || (limits.max_offset !== undefined && offset > limits.max_offset)) invalid("page", "Offset is out of range.");
       if (groups.length) { query.limit = limit; if (offset) query.offset = offset; }
-      return {errors, request: {format: "selecto.explorer-query", format_version: 1,
+      return {errors, cardErrors, request: {format: "selecto.explorer-query", format_version: 1,
         domain: {fingerprint: features.domain.fingerprint}, features: {revision: features.revision}, query}};
     }
 
@@ -7488,87 +7606,153 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       this.state.rawDirty = false;
       const edited = this.root.querySelector("[data-sac-edited]"); if (edited) edited.hidden = true;
       const run = this.root.querySelector("[data-sac-run]"); if (run) run.disabled = model.errors.length > 0;
-      this.setImportMessage(model.errors.join(" "), model.errors.length ? "error" : "");
+      this.renderAggregateErrors(model);
+      this.setImportMessage("", "");
       this.updateCurl();
       return model;
     }
 
     aggregateChanged(mutator) {
+      const active = global.document?.activeElement;
+      const attributes = active ? {...active.dataset} : null;
+      const filterId = active?.closest?.("[data-filter-id]")?.dataset.filterId;
+      const orderId = active?.closest?.("[data-order-id]")?.dataset.orderId;
       mutator(this.aggregateState);
       this.cancelQuery(); this.state.response = null; this.clearQueryResult();
       this.renderAggregateBuilder();
       this.syncAggregateRequest();
+      if (attributes) {
+        const key = Object.keys(attributes).find(key => key.startsWith("sac"));
+        const attr = key?.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
+        const replacement = attr && [...this.root.querySelectorAll(`[data-${attr}]`)].find(node =>
+          Object.entries(attributes).every(([key, value]) => node.dataset[key] === value)
+          && (!filterId || node.closest("[data-filter-id]")?.dataset.filterId === filterId)
+          && (!orderId || node.closest("[data-order-id]")?.dataset.orderId === orderId));
+        if (replacement && !replacement.disabled) replacement.focus?.();
+        else if (key === "sacAddGroup") this.root.querySelector("[data-sac-group-search]")?.focus?.();
+        else if (key === "sacRemoveFilter") this.root.querySelector("[data-sac-filter-search]")?.focus?.();
+        else if (key === "sacRemoveOrder") this.root.querySelector("[data-sac-add-order]")?.focus?.();
+      }
+    }
+
+    renderAggregateErrors(model = this.buildAggregateRequest()) {
+      for (const [card, errors] of Object.entries(model.cardErrors)) {
+        const target = this.root.querySelector(`[data-sac-aggregate-errors="${card}"]`);
+        if (target) { target.textContent = errors.join(" "); target.hidden = !errors.length; }
+      }
+    }
+
+    aggregateSortFields() {
+      if (!this.aggregateState.groupBy.length) return [];
+      return [
+        ...this.aggregateGroupFields().filter(f => f.sortable && this.aggregateState.groupBy.includes(f.id)).map(f => ({...f, path: f.id})),
+        ...this.aggregateState.aggregates.filter(a => a.alias).map(a => ({path: a.alias, label: a.alias})),
+      ];
+    }
+
+    aggregateMeasureLabel(aggregate) {
+      const field = this.aggregateFeatures.fields.find(f => f.id === aggregate.field);
+      const label = aggregate.fn === "avg" ? "Average" : AGGREGATE_LABELS[aggregate.fn] || humanize(aggregate.fn);
+      return `${label} of ${field?.label || aggregate.field || "rows"}`;
     }
 
     renderAggregateBuilder() {
-      const target = this.root.querySelector("[data-sac-aggregate-builder]");
+      const target = this.root.querySelector("[data-sac-aggregate-data]");
       if (!target || !this.aggregateFeatures || !this.aggregateState) return;
-      target.replaceChildren();
       const state = this.aggregateState;
-      const button = (text, action, index) => {
+      this.root.querySelectorAll("[data-sac-post-query-card]").forEach(card => {card.hidden = false;});
+      this.root.querySelector("[data-sac-run-label]").textContent = "Run query";
+      const button = (text, action, index, label) => {
         const node = element("button", "sac-text-button", text); node.type = "button";
         node.dataset.sacAggregateAction = action; if (index !== undefined) node.dataset.index = String(index);
+        if (label) node.setAttribute("aria-label", label);
         return node;
       };
-      const selector = (label, name, values, selected, index) => {
+      const selector = (label, name, values, selected) => {
         const wrapper = element("label", "", label), select = element("select", "");
         select.setAttribute("aria-label", label); select.dataset.sacAggregateControl = name;
-        if (index !== undefined) select.dataset.index = String(index);
         appendOptions(select, values, selected); wrapper.append(select); return wrapper;
       };
       const input = (label, name, value, type, index) => {
         const wrapper = element("label", "", label), node = element("input", "");
         node.type = type; node.value = String(value); node.setAttribute("aria-label", label);
         node.dataset.sacAggregateControl = name; if (index !== undefined) node.dataset.index = String(index);
+        if (type === "number") {node.min = name === "limit" ? "1" : "0"; const max = this.aggregateFeatures.limits?.[`max_${name}`]; if (max !== undefined) node.max = String(max);}
         wrapper.append(node); return wrapper;
       };
-      target.append(element("h2", "", "Aggregates"), element("p", "sac-help", "Group rows and summarise them. Subtotals come from the database, one grouped query for each combination."));
-      const clock = element("div", ""); this.renderAsOf(clock, "aggregate"); target.append(clock);
-      target.append(element("h3", "", "Filters (AND)"), selector("Add filter", "add-filter",
-        [{value:"",label:"Choose a field"}, ...this.queryFilterFields("aggregate").filter(f=>this.queryFilterOperators(f,"aggregate").length).map(f=>({value:f.path,label:f.label}))], ""));
-      const filterList = element("div", "sac-filter-list");
-      this.renderFilters(filterList, state.filters || [], "aggregate"); target.append(filterList);
-      const groupFields = this.aggregateGroupFields();
-      const labelOf = new Map(groupFields.map((field) => [field.id, field.label]));
-      target.append(element("h3", "", "Group by"), selector("Add group", "add-group",
-        [{value: "", label: "Choose a field"}, ...groupFields.filter((field) => !state.groupBy.includes(field.id)).map((field) => ({value: field.id, label: field.label}))], ""));
-      const groups = element("ol", "sac-nested-selected");
-      state.groupBy.forEach((id, index) => {
-        const row = element("li", "", labelOf.get(id) || id);
-        row.append(button("Up", "group-up", index), button("Down", "group-down", index), button("Remove", "group-remove", index));
-        groups.append(row);
-      });
-      target.append(groups);
-      target.append(element("h3", "", "Aggregates"), button("Add aggregate", "aggregate-add"));
-      const functions = this.aggregateFunctions().map((fn) => ({value: fn, label: AGGREGATE_LABELS[fn] || fn}));
-      state.aggregates.forEach((aggregate, index) => {
-        const row = element("div", "sac-nested-filter");
-        const fields = this.aggregateMeasureFields(aggregate.fn).map((field) => ({value: field.id, label: field.label}));
-        row.append(selector("Function", "aggregate-fn", functions, aggregate.fn, index),
-          selector("Field", "aggregate-field", [{value: "", label: aggregate.fn === "count" ? "All rows" : "Choose a field"}, ...fields], aggregate.field, index),
-          input("Name", "aggregate-alias", aggregate.alias, "text", index), button("Remove", "aggregate-remove", index));
-        target.append(row);
-      });
-      target.append(element("h3", "", "Subtotals"), selector("Subtotal rows", "grouping", this.aggregateGroupingModes(), state.grouping));
+      const labelOf = new Map(this.aggregateGroupFields().map(field => [field.id, field.label]));
+      for (const kind of ["group", "measure"]) {
+        const container = this.root.querySelector(`[data-sac-${kind}-chips]`); container.replaceChildren();
+        const items = kind === "group" ? state.groupBy : state.aggregates;
+        if (!items.length) container.append(element("p", "sac-muted", kind === "group" ? "No groups; measures summarise all rows." : "Choose at least one measure."));
+        items.forEach((item, index) => {
+          const field = kind === "group" ? this.aggregateGroupFields().find(f => f.id === item) || {id:item,label:item} : {path:item.field || "rows",label:this.aggregateMeasureLabel(item),type:item.fn};
+          const {row, copy, actions} = this.selectedFieldChip(field);
+          row.dataset.aggregateChip = kind;
+          if (kind === "measure") copy.append(input(`Name for ${field.label}`, "aggregate-alias", item.alias, "text", index));
+          for (const [action, text, label] of [["up", "↑", "Move up"], ["down", "↓", "Move down"], ["remove", "×", "Remove"]]) {
+            const node = button(text, `${kind === "group" ? "group" : "aggregate"}-${action}`, index, `${label} ${field.label}`);
+            node.disabled = action === "up" && index === 0 || action === "down" && index === items.length - 1;
+            actions.append(node);
+          }
+          container.append(row);
+        });
+      }
+      this.renderAvailableFields("group", this.aggregateGroupFields());
+      this.renderAggregateMeasureList();
+      this.renderFilters(this.root.querySelector("[data-sac-filters]"), state.filters || [], "aggregate");
+      this.renderAsOf(this.root.querySelector("[data-sac-as-of-slot]"), "aggregate");
+      this.renderFilterFieldList();
+      const page = this.root.querySelector("[data-sac-aggregate-page]"); page.replaceChildren();
+      page.append(selector("Subtotal rows", "grouping", this.aggregateGroupingModes(), state.grouping));
       if (state.grouping === "sets" && state.groupBy.length) {
-        const list = element("div", "sac-aggregate-sets");
-        aggregateSetChoices(state.groupBy.length).forEach((set) => {
+        const list = element("div", "sac-segment-options");
+        aggregateSetChoices(state.groupBy.length).forEach(set => {
           const key = set.join(","), wrapper = element("label", "sac-check"), box = element("input", "");
           box.type = "checkbox"; box.checked = state.sets.includes(key);
           box.dataset.sacAggregateControl = "set"; box.dataset.set = key;
-          wrapper.append(box, element("span", "", set.length ? set.map((position) => labelOf.get(state.groupBy[position]) || state.groupBy[position]).join(" + ") : "Grand total"));
+          wrapper.append(box, element("span", "", set.length ? set.map(position => labelOf.get(state.groupBy[position]) || state.groupBy[position]).join(" + ") : "Grand total"));
           list.append(wrapper);
         });
-        target.append(list);
+        page.append(list);
       }
+      const addSort = this.root.querySelector("[data-sac-add-order]");
+      addSort.hidden = !state.groupBy.length || state.grouping !== "none";
+      addSort.disabled = !this.aggregateSortFields().length;
+      const orders = element("div", "sac-order-list"); orders.dataset.sacAggregateOrders = "";
+      this.renderOrders(orders, state.orders || [], this.aggregateSortFields(), false);
+      if (state.grouping === "none") page.append(orders);
+      else page.append(element("p", "sac-help", "Subtotal rows use the published group order; custom sorting is unavailable."));
       const paging = element("div", "sac-inline-controls");
       paging.append(input("Limit", "limit", state.limit, "number"), input("Offset", "offset", state.offset, "number"));
-      target.append(paging);
+      page.append(paging);
+      this.renderAggregateErrors();
+    }
+
+    renderAggregateMeasureList() {
+      this.renderAvailableFields("measure", [{id:"",path:"rows",label:"Count of rows",type:"rows",aggregates:["count"]},
+        ...this.aggregateFeatures.fields.filter(f => this.aggregateFunctions().some(fn => this.aggregateMeasureFields(fn).includes(f)))
+          .map(f => ({...f, aggregates:f.aggregates.filter(fn => this.aggregateFunctions().includes(fn))}))]);
+    }
+
+    addAggregateMeasure(fn, field = "") {
+      if (!this.aggregateFunctions().includes(fn) || (!field && fn !== "count")
+          || field && !this.aggregateMeasureFields(fn).some(f => f.id === field)) return false;
+      const taken = new Set([...this.aggregateState.groupBy, ...this.aggregateState.aggregates.map(a => String(a.alias).trim())]);
+      const base = `${fn}${field ? `_${field}` : ""}`.replace(/[^A-Za-z0-9_]/g, "_");
+      let alias = base, number = 2;
+      while (taken.has(alias)) alias = `${base}_${number++}`;
+      this.aggregateChanged(state => {state.aggregates.push({fn, field, alias});});
+      this.announceChooser(`Added ${this.aggregateMeasureLabel({fn, field})}.`);
+      return true;
     }
 
     aggregateFilterEdit(target) {
       const filter = this.filterFor(target);
-      if (target.matches("[data-sac-filter-op]")) {filter.op=target.value; filter.value=target.value === "date_shortcut" ? "this_week" : ""; filter.end=""; this.periodPrecisions.delete(filter); this.renderAggregateBuilder();}
+      if (target.matches("[data-sac-filter-op]")) return this.aggregateChanged(() => {
+        filter.op = target.value; filter.value = target.value === "date_shortcut" ? "this_week" : "";
+        filter.end = ""; this.periodPrecisions.delete(filter);
+      });
       else if (target.matches("[data-sac-filter-value]")) filter.value = target.value;
       else if (target.matches("[data-sac-filter-end]")) filter.end = target.value;
       else return;
@@ -7579,47 +7763,66 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       const name = target.dataset.sacAggregateControl, index = Number(target.dataset.index);
       if (name === "aggregate-alias" || name === "limit" || name === "offset") {
         // Typing must not rebuild the control being typed into.
-        if (name === "aggregate-alias") this.aggregateState.aggregates[index].alias = target.value;
+        if (name === "aggregate-alias") {
+          const previous = this.aggregateState.aggregates[index].alias;
+          this.aggregateState.aggregates[index].alias = target.value;
+          (this.aggregateState.orders || []).forEach(order => {if (order.field === previous) order.field = target.value;});
+          const orders = this.root.querySelector("[data-sac-aggregate-orders]");
+          if (orders) this.renderOrders(orders, this.aggregateState.orders, this.aggregateSortFields(), false);
+        }
         else this.aggregateState[name] = target.value === "" ? "" : Number(target.value);
         this.cancelQuery(); this.state.response = null; this.clearQueryResult();
         return this.syncAggregateRequest();
       }
+      if (name === "add-group" && (!this.aggregateGroupFields().some(f => f.id === target.value) || this.aggregateState.groupBy.includes(target.value))) return;
+      if (name === "add-filter" && !this.queryFilterFields("aggregate").some(f => f.path === target.value && this.queryFilterOperators(f, "aggregate").length)) return;
       this.aggregateChanged((state) => {
         if (name === "add-filter" && target.value) {
-          const field = this.queryFilterFields("aggregate").find(f=>f.path === target.value), ops = this.queryFilterOperators(field,"aggregate");
+          const field = this.queryFilterFields("aggregate").find(f=>f.path === target.value); if (!field) return;
+          const ops = this.queryFilterOperators(field,"aggregate"); if (!ops.length) return;
           const op = field.type === "epoch_datetime" && ops.includes("on") ? "on" : ops.includes("eq") ? "eq" : ops[0];
           while (state.filters.some(f=>f.id === `aggregate-${this.nextFilterId}`)) this.nextFilterId++;
           state.filters.push({id:`aggregate-${this.nextFilterId++}`,field:field.path,op,value:field.type === "boolean" ? "true" : "",end:""});
         }
-        else if (name === "add-group" && target.value) { state.groupBy.push(target.value); state.sets = []; }
-        else if (name === "aggregate-fn") {
-          const aggregate = state.aggregates[index]; aggregate.fn = target.value;
-          if (!this.aggregateMeasureFields(aggregate.fn).some((field) => field.id === aggregate.field)) aggregate.field = "";
+        else if (name === "add-group" && target.value) {
+          state.groupBy.push(target.value); state.sets = [];
         }
-        else if (name === "aggregate-field") state.aggregates[index].field = target.value;
-        else if (name === "grouping") { state.grouping = target.value; if (target.value !== "sets") state.sets = []; }
+        else if (name === "grouping") {
+          if (!this.aggregateGroupingModes().some(mode => mode.value === target.value)) return;
+          state.grouping = target.value; if (target.value !== "sets") state.sets = [];
+          if (target.value !== "none") {state.orders = []; delete state.ordersPresent;}
+        }
         else if (name === "set") {
           const key = target.dataset.set;
           state.sets = target.checked ? [...new Set([...state.sets, key])] : state.sets.filter((set) => set !== key);
         }
       });
+      if (name === "add-group") this.announceChooser(`Added group ${this.aggregateGroupFields().find(f => f.id === target.value)?.label || target.value}.`);
+      if (name === "add-filter") this.announceChooser(`Added ${this.queryFilterFields("aggregate").find(f => f.path === target.value)?.label || target.value} filter.`);
     }
 
     aggregateAction(target) {
       const action = target.dataset.sacAggregateAction, index = Number(target.dataset.index);
-      this.aggregateChanged((state) => {
-        const move = (to) => { if (to >= 0 && to < state.groupBy.length) { const [id] = state.groupBy.splice(index, 1); state.groupBy.splice(to, 0, id); state.sets = []; } };
-        if (action === "group-up") move(index - 1);
-        else if (action === "group-down") move(index + 1);
-        else if (action === "group-remove") { state.groupBy.splice(index, 1); state.sets = []; if (!state.groupBy.length) state.grouping = "none"; }
-        else if (action === "aggregate-add") {
-          const taken = new Set(state.aggregates.map((aggregate) => aggregate.alias));
-          let alias = "count", number = 2;
-          while (taken.has(alias)) alias = `count_${number++}`;
-          state.aggregates.push({fn: "count", field: "", alias});
+      if (action === "aggregate-add") return this.addAggregateMeasure("count");
+      const group = action.startsWith("group-"), items = group ? this.aggregateState.groupBy : this.aggregateState.aggregates;
+      if (!items[index]) return;
+      const label = group ? this.aggregateGroupFields().find(f => f.id === items[index])?.label || items[index] : this.aggregateMeasureLabel(items[index]);
+      let position = index;
+      this.aggregateChanged(state => {
+        if (action.endsWith("-remove")) items.splice(index, 1);
+        else {
+          position = action.endsWith("-up") ? index - 1 : index + 1;
+          if (position < 0 || position >= items.length) {position = index; return;}
+          items.splice(position, 0, items.splice(index, 1)[0]);
         }
-        else if (action === "aggregate-remove") state.aggregates.splice(index, 1);
+        if (group) {state.sets = []; if (!items.length) {state.grouping = "none"; state.orders = []; delete state.ordersPresent;}}
+        const sortable = new Set(this.aggregateSortFields().map(f => f.path));
+        state.orders = (state.orders || []).filter(order => sortable.has(order.field));
       });
+      this.announceChooser(`${action.endsWith("-remove") ? "Removed" : "Moved"} ${label}${action.endsWith("-remove") ? "" : ` to position ${position + 1}`}.`);
+      const nodes = this.root.querySelectorAll(`[data-sac-aggregate-action="${group ? "group" : "aggregate"}-remove"]`);
+      const focus = nodes[Math.min(position, nodes.length - 1)] || this.root.querySelector(`[data-sac-${group ? "group" : "measure"}-search]`);
+      focus?.focus?.();
     }
 
     async runAggregate() {
@@ -7628,7 +7831,11 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       try {
         request = JSON.parse(editor.value);
         this.validateQueryContext(request, "aggregate");
-        if (!this.state.rawDirty) this.applyAsOf({}, this.aggregateState.asOf, "aggregate");
+        if (!this.state.rawDirty) {
+          const model = this.buildAggregateRequest(); this.renderAggregateErrors(model);
+          if (model.errors.length) throw new Error(model.errors.join(" "));
+          this.applyAsOf({}, this.aggregateState.asOf, "aggregate");
+        }
       } catch (error) {
         this.setStatus("Invalid request JSON", "error", error);
         this.showLocalError(error.message, error);
@@ -7875,16 +8082,18 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     // A query page: which rows it holds and, from the API's has_more, whether more follow.
     pageInfo(payload) {
       const data = payload && payload.ok && payload.data;
-      if (this.state.queryMethod === "get" || !isPlainObject(data)) return null;
+      if ((this.queryProfile === "flat" && this.state.queryMethod === "get") || !isPlainObject(data)) return null;
       const canonical = data.format === "selecto.remote-query-result";
-      const page = canonical ? data.page : data;
+      const aggregate = this.queryProfile === "aggregate";
+      const page = (canonical || aggregate && isPlainObject(data.page)) ? data.page : data;
       if (!isPlainObject(page) || typeof page.has_more !== "boolean") return null;
       if (canonical && (data.format_version !== 1 || this.state.rawDirty || this.rootMode || this.queryProfile !== "flat" ||
           !Number.isInteger(page.offset) || page.offset < 0 || !Number.isInteger(page.limit) || page.limit < 1 ||
           !Number.isInteger(data.row_count) || data.row_count < 0 || data.row_count > page.limit ||
           !Array.isArray(data.rows) || data.row_count !== data.rows.length)) return null;
-      const offset = Number.isInteger(page.offset) ? page.offset : Number.parseInt(this.state.offset, 10) || 0;
-      const limit = Number.isInteger(page.limit) ? page.limit : Number.parseInt(this.state.limit, 10) || 0;
+      const draft = aggregate ? this.aggregateState : this.state;
+      const offset = Number.isInteger(page.offset) ? page.offset : Number.parseInt(draft.offset, 10) || 0;
+      const limit = Number.isInteger(page.limit) ? page.limit : Number.parseInt(draft.limit, 10) || 0;
       const returned = canonical ? data.row_count : Number.isInteger(data.returned) ? data.returned : (Array.isArray(data.rows) ? data.rows.length : 0);
       const text = returned
         ? `Rows ${offset + 1}–${offset + returned}${page.has_more ? "; more rows follow" : "; no more rows"}`
@@ -7901,7 +8110,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       if (!info) return;
       container.querySelector("[data-sac-page-text]").textContent = info.text;
       // Paging changes the chooser's offset, so it is not offered for manually edited JSON.
-      const editable = !this.state.rawDirty && !this.rootMode && this.queryProfile === "flat" && info.limit > 0;
+      const editable = !this.state.rawDirty && !this.rootMode && ["flat", "aggregate"].includes(this.queryProfile) && info.limit > 0 && (this.queryProfile !== "aggregate" || this.aggregateState.groupBy.length > 0);
       container.querySelector("[data-sac-next-page]").hidden = !(editable && info.hasMore);
       container.querySelector("[data-sac-previous-page]").hidden = !(editable && info.offset > 0);
     }
@@ -7909,7 +8118,15 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
     // Runs the next or previous page of the query just run.
     goToPage(direction) {
       const info = this.page;
-      if (!info || this.state.rawDirty || this.rootMode || this.queryProfile !== "flat" || !info.limit) return;
+      if (!info || this.state.rawDirty || this.rootMode || !["flat", "aggregate"].includes(this.queryProfile) || !info.limit) return;
+      if (this.queryProfile === "aggregate") {
+        if (!this.aggregateState.groupBy.length || direction === "next" && !info.hasMore) return;
+        const offset = direction === "next" ? info.offset + info.limit : Math.max(0, info.offset - info.limit);
+        const max = this.aggregateFeatures.limits?.max_offset;
+        if (max !== undefined && offset > max) return;
+        this.aggregateChanged(state => {state.limit = info.limit; state.offset = offset;});
+        return this.run();
+      }
       this.state.limit = info.limit;
       this.state.offset = direction === "next" ? info.offset + info.limit : Math.max(0, info.offset - info.limit);
       this.changed();

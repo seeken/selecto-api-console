@@ -1,0 +1,38 @@
+{
+  "format": "selecto.explorer-query",
+  "format_version": 1,
+  "domain": {
+    "fingerprint": "fp"
+  },
+  "features": {
+    "revision": "rev"
+  },
+  "query": {
+    "select": [
+      "category",
+      "status",
+      {
+        "aggregate": "count",
+        "alias": "count"
+      },
+      {
+        "aggregate": "sum",
+        "field": "price",
+        "alias": "total_price"
+      }
+    ],
+    "filters": [
+      {
+        "field": "status",
+        "op": "eq",
+        "value": "open"
+      }
+    ],
+    "group_by": [
+      "category",
+      "status"
+    ],
+    "rollup": true,
+    "limit": 100
+  }
+}
