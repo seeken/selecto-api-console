@@ -3,8 +3,8 @@
   "version": "0.6.0",
   "assets": {
     "native.css": {
-      "bytes": 30313,
-      "sha256": "a3ccc620665ba9fe9f6ebeaa70ed0b553b042997bd336642b99a983ff5286c6c"
+      "bytes": 30319,
+      "sha256": "9d683741a17a3d54fd2d4a4217afa423797ed24c4f14f0050cc965a779d4e5d6"
     },
     "demo-theme.js": {
       "bytes": 5039,
@@ -19,8 +19,8 @@
       "sha256": "1e0c8eca79f5ddbf6933eba6c2af51cc3c33b721fe65798783e2f741c1e190df"
     },
     "perl.css": {
-      "bytes": 73242,
-      "sha256": "c1bc0b0e3e9737d1fa5552d807cd0dde0749b9aabd1727feb56b2682d06f4392"
+      "bytes": 73260,
+      "sha256": "8246d170ae2d59551d2122edd3db3d347b0e1d301c69b4bd9c22b9dfb0f59893"
     },
     "vendor/htmx.min.js": {
       "bytes": 36716,

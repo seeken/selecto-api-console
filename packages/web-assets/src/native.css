@@ -291,7 +291,7 @@ select, input { border: 1px solid var(--line-strong); border-radius: 8px; backgr
 .action-dialog > footer button.primary.danger { border-color: var(--danger); background: var(--danger); color: #240705; }
 
 .selecto-object-link { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: .18em; }
-.selecto-vin-suffix { margin-left: .08em; font-variant-numeric: tabular-nums; }
+.selecto-reference-suffix { margin-left: .08em; font-variant-numeric: tabular-nums; }
 #blazor-error-ui { display: none; position: fixed; z-index: 1000; bottom: 0; left: 0; right: 0; padding: 12px 20px; background: #5d2119; color: white; }
 #blazor-error-ui .dismiss { float: right; }
 @keyframes spin { to { transform: rotate(360deg); } }

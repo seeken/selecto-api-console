@@ -169,6 +169,14 @@ their tenant brand into `--sac-accent`, `--sac-teal`, and
 `--sac-on-accent`; the console keeps all application and menu integration
 outside this backend-neutral package.
 
+A host may set `--sac-page-sticky-top` on the document root or console container
+to offset the sticky tabs below its own header. The default offset is `0px`.
+For example, a host with a fixed 64px header can add this rule to its stylesheet:
+
+```css
+[data-selecto-api-console] { --sac-page-sticky-top: 64px; }
+```
+
 A host can add its own links to the console header with `data-links`, a JSON
 array of `{"label": "...", "href": "..."}`. Only absolute same-origin paths
 are shown, for example
@@ -273,3 +281,14 @@ nested share payload from the current URL. The 64KiB encoded
 state bound applies to persistence; execution retains the selected HTTP 1MiB
 request bound. These consumer checks do not certify a native API or rendered
 browser cohort.
+
+## Fixture domain guard
+
+Examples and fixtures use the invented orders domain. `npm test` checks
+repository text and file paths against `test/data/denylist.sha256`, including
+new files before staging. Diagnostics contain file locations and token hashes.
+The plaintext list stays outside the repository. To regenerate the hashes:
+
+```sh
+SELECTO_DENYLIST_FILE=/path/to/external/names.txt node scripts/denylist-hashes.mjs > test/data/denylist.sha256
+```

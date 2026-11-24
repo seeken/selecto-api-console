@@ -10,9 +10,9 @@ test("exports a reusable importer surface", () => {
 });
 
 test("mapping targets use source and action groups without changing file-column mapping", () => {
-  const domain = {name: "Quote", joins: {bill_to: {name: "Bill To"}}};
-  assert.equal(importer.targetGroupLabel(domain, "id"), "Quote");
-  assert.equal(importer.targetGroupLabel(domain, "bill_to.co_name"), "Bill To");
+  const domain = {name: "Orders", joins: {bill_to: {name: "Bill To"}}};
+  assert.equal(importer.targetGroupLabel(domain, "id"), "Orders");
+  assert.equal(importer.targetGroupLabel(domain, "bill_to.party_name"), "Bill To");
   const source = fs.readFileSync(require.resolve("../dist/selecto-importer.js"), "utf8");
   assert.match(source, /document\.createElement\("optgroup"\)/);
   assert.match(source, /targetGroups, "Actions"/);
@@ -68,13 +68,13 @@ test("offers only file-mapped key sets as persistent radio choices", () => {
 test("one file column can feed multiple governed destinations", () => {
   const surface = new importer.Importer({dataset: {}});
   surface.domain = {
-    name: "Shipment",
+    name: "Orders",
     source: {columns: {}},
     actions: {},
     imports: {
       fields: {
-        pickup_date: {sources: ["column"], header_aliases: ["Imported date"]},
-        delivery_date: {sources: ["column"], header_aliases: ["Imported date"]},
+        received_on: {sources: ["column"], header_aliases: ["Imported date"]},
+        delivered_on: {sources: ["column"], header_aliases: ["Imported date"]},
       },
       actions: {},
       key_sets: [],
@@ -82,16 +82,16 @@ test("one file column can feed multiple governed destinations", () => {
   };
   surface.upload = {inspection: {columns: [{id: "c1", header: "Imported date"}]}};
   surface.autoMap();
-  assert.equal(surface.mappings.get("pickup_date").column_id, "c1");
-  assert.equal(surface.mappings.get("delivery_date").column_id, "c1");
+  assert.equal(surface.mappings.get("received_on").column_id, "c1");
+  assert.equal(surface.mappings.get("delivered_on").column_id, "c1");
 
   surface.renderMapping = () => {};
   surface.columnChanged({
-    dataset: {saiColumn: "c1", saiCurrentTarget: "pickup_date"},
+    dataset: {saiColumn: "c1", saiCurrentTarget: "received_on"},
     value: "",
   });
-  assert.equal(surface.mappings.get("pickup_date").kind, "omit");
-  assert.deepEqual(surface.mappings.get("delivery_date"),
+  assert.equal(surface.mappings.get("received_on").kind, "omit");
+  assert.deepEqual(surface.mappings.get("delivered_on"),
     {kind: "column", column_id: "c1"},
     "removing one destination preserves another destination using the same column");
 
