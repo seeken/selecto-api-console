@@ -1,0 +1,483 @@
+{
+  "domain": {
+    "name": "Orders",
+    "plural": "Orders",
+    "singular": "order",
+    "domain_fingerprint": "fp",
+    "source": {
+      "primary_key": "id",
+      "fields": [
+        "status",
+        "price"
+      ],
+      "columns": {
+        "status": {
+          "type": "string",
+          "label": "Status"
+        },
+        "price": {
+          "type": "decimal",
+          "label": "Price"
+        }
+      },
+      "associations": {
+        "customer": {
+          "queryable": "customer",
+          "cardinality": "one"
+        },
+        "account": {
+          "queryable": "account",
+          "cardinality": "one"
+        },
+        "product": {
+          "queryable": "product",
+          "cardinality": "one"
+        },
+        "notes": {
+          "queryable": "notes",
+          "cardinality": "many"
+        }
+      }
+    },
+    "joins": {
+      "customer": {
+        "name": "Customer profile"
+      },
+      "account": {
+        "name": "Account record"
+      },
+      "product": {
+        "name": "Product record"
+      },
+      "notes": {
+        "name": "Order notes"
+      }
+    },
+    "schemas": {
+      "customer": {
+        "fields": [
+          "name",
+          "score"
+        ],
+        "columns": {
+          "name": {
+            "type": "string",
+            "label": "Name"
+          },
+          "score": {
+            "type": "decimal",
+            "label": "Score"
+          }
+        }
+      },
+      "account": {
+        "fields": [
+          "name",
+          "score"
+        ],
+        "columns": {
+          "name": {
+            "type": "string",
+            "label": "Name"
+          },
+          "score": {
+            "type": "decimal",
+            "label": "Score"
+          }
+        }
+      },
+      "product": {
+        "fields": [
+          "name",
+          "score"
+        ],
+        "columns": {
+          "name": {
+            "type": "string",
+            "label": "Name"
+          },
+          "score": {
+            "type": "decimal",
+            "label": "Score"
+          }
+        }
+      },
+      "notes": {
+        "fields": [
+          "name",
+          "score"
+        ],
+        "columns": {
+          "name": {
+            "type": "string",
+            "label": "Name"
+          },
+          "score": {
+            "type": "decimal",
+            "label": "Score"
+          }
+        }
+      }
+    }
+  },
+  "features": {
+    "format": "selecto.explorer-features",
+    "format_version": 1,
+    "profile": "remote_query.explorer.v1",
+    "domain": {
+      "id": "orders",
+      "fingerprint": "fp"
+    },
+    "revision": "sections-rev",
+    "fields": [
+      {
+        "id": "status",
+        "path": "status",
+        "label": "Status",
+        "type": "string",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "count",
+          "min",
+          "max"
+        ]
+      },
+      {
+        "id": "price",
+        "path": "price",
+        "label": "Price",
+        "type": "decimal",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "sum",
+          "avg"
+        ]
+      },
+      {
+        "id": "customer.name",
+        "path": "customer.name",
+        "label": "Customer profile: Name",
+        "type": "string",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "count",
+          "min",
+          "max"
+        ]
+      },
+      {
+        "id": "customer.score",
+        "path": "customer.score",
+        "label": "customer.score",
+        "type": "decimal",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "sum",
+          "avg"
+        ]
+      },
+      {
+        "id": "account.name",
+        "path": "account.name",
+        "label": "Account record: Name",
+        "type": "string",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "count",
+          "min",
+          "max"
+        ]
+      },
+      {
+        "id": "account.score",
+        "path": "account.score",
+        "label": "account.score",
+        "type": "decimal",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "sum",
+          "avg"
+        ]
+      },
+      {
+        "id": "product.name",
+        "path": "product.name",
+        "label": "Product record: Name",
+        "type": "string",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "count",
+          "min",
+          "max"
+        ]
+      },
+      {
+        "id": "product.score",
+        "path": "product.score",
+        "label": "product.score",
+        "type": "decimal",
+        "groupable": true,
+        "sortable": true,
+        "filterable": true,
+        "operators": [
+          "eq",
+          "in",
+          "is_null"
+        ],
+        "aggregates": [
+          "sum",
+          "avg"
+        ]
+      }
+    ],
+    "limits": {
+      "max_limit": 100
+    },
+    "supports": {
+      "aggregate": true,
+      "retarget": true
+    },
+    "retargets": [
+      {
+        "path": "notes",
+        "label": "Notes",
+        "fields": [
+          {
+            "id": "status",
+            "path": "status",
+            "label": "Status",
+            "type": "string",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "count",
+              "min",
+              "max"
+            ]
+          },
+          {
+            "id": "price",
+            "path": "price",
+            "label": "Price",
+            "type": "decimal",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "sum",
+              "avg"
+            ]
+          },
+          {
+            "id": "customer.name",
+            "path": "customer.name",
+            "label": "Customer profile: Name",
+            "type": "string",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "count",
+              "min",
+              "max"
+            ]
+          },
+          {
+            "id": "customer.score",
+            "path": "customer.score",
+            "label": "customer.score",
+            "type": "decimal",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "sum",
+              "avg"
+            ]
+          },
+          {
+            "id": "account.name",
+            "path": "account.name",
+            "label": "Account record: Name",
+            "type": "string",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "count",
+              "min",
+              "max"
+            ]
+          },
+          {
+            "id": "account.score",
+            "path": "account.score",
+            "label": "account.score",
+            "type": "decimal",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "sum",
+              "avg"
+            ]
+          },
+          {
+            "id": "product.name",
+            "path": "product.name",
+            "label": "Product record: Name",
+            "type": "string",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "count",
+              "min",
+              "max"
+            ]
+          },
+          {
+            "id": "product.score",
+            "path": "product.score",
+            "label": "product.score",
+            "type": "decimal",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "sum",
+              "avg"
+            ]
+          },
+          {
+            "id": "notes.name",
+            "path": "notes.name",
+            "label": "Order notes: Name",
+            "type": "string",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "count",
+              "min",
+              "max"
+            ]
+          },
+          {
+            "id": "notes.score",
+            "path": "notes.score",
+            "label": "notes.score",
+            "type": "decimal",
+            "groupable": true,
+            "sortable": true,
+            "filterable": true,
+            "operators": [
+              "eq",
+              "in",
+              "is_null"
+            ],
+            "aggregates": [
+              "sum",
+              "avg"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

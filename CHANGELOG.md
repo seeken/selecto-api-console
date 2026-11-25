@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Section aggregate groups, measures, filters and sort choices by relationship using Detail's field helpers, including root-relative Rows of targets; style the Rows of label consistently.
+
 - Clarify the aggregate target selector as Rows of, with published record labels and help explaining which records filters apply to; keep request values unchanged.
 
 - Group Request method and Query profile in a first Request section, with consecutive visible step numbers and advanced state panels beside the JSON editor.

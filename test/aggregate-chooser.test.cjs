@@ -71,7 +71,7 @@ async function withDOM(fn) {
   try { await fn(); } finally { Object.assign(global, before); }
 }
 
-async function instance({routes = aggregateRoutes, remote = false, featureResponse = features(), hash = ""} = {}) {
+async function instance({routes = aggregateRoutes, remote = false, featureResponse = features(), domainDocument, hash = ""} = {}) {
   global.location.hash = hash;
   const root = new Node(); root.dataset.apiBase = "/api/orders";
   const console = new APIConsole(root);
@@ -91,7 +91,7 @@ async function instance({routes = aggregateRoutes, remote = false, featureRespon
     calls.push({path, init});
     if (init.method === "POST") return Response.json(result());
     if (path === "/api/orders/") return Response.json(manifest);
-    if (path === "/api/orders/domain") return Response.json(domain);
+    if (path === "/api/orders/domain") return Response.json(domainDocument || domain);
     if (path === "/api/orders/openapi.json") return Response.json(openapi);
     if (path === "/api/orders/group-features") {
       if (featureResponse instanceof Error) throw featureResponse;
@@ -116,6 +116,110 @@ function group(x, id) {click(x,`[data-sac-add-group="${id}"]`);}
 function measure(x, fn, field='') {const target=x.root.querySelectorAll('[data-sac-add-measure]').find(n=>n.dataset.fn===fn&&n.dataset.sacAddMeasure===field); assert.ok(target); target.focus();x.console.onClick({target});}
 const request = x => JSON.parse(x.node('request').value);
 function load(x, value) {x.node('request').value=JSON.stringify(value);x.console.onInput({target:x.node('request')});assert.equal(x.node('edited').hidden,false);assert.equal(x.console.loadRequestIntoChooser(),true);assert.equal(x.node('import-message').textContent,'Chooser updated from the request JSON.');assert.deepEqual(request(x),value);}
+
+const sectionsFixture = require('./data/aggregate-sections.json');
+const sectionsInstance = options => instance({domainDocument: sectionsFixture.domain, featureResponse: sectionsFixture.features, ...options});
+const sections = (x, kind) => x.node(kind === 'filter' ? 'filter-field-list' : `${kind}-list`).querySelectorAll('[data-sac-available-group]');
+const sectionKeys = (x, kind) => sections(x, kind).map(section => section.dataset.sacAvailableGroup);
+function searchSection(x, kind, value) {
+  const target = x.node(`${kind}-search`); target.value = value; x.console.onInput({target});
+}
+
+test('aggregate groups, measures and filters share Detail relationship sections and leaf labels', () => withDOM(async () => {
+  const x = await sectionsInstance();
+  const labels = sections(x, 'field').map(section => section.querySelector('summary').textContent.replace(/ \(\d+\)$/, ''));
+  await x.choose('aggregate');
+  for (const kind of ['group', 'measure', 'filter']) {
+    assert.deepEqual(sectionKeys(x, kind), ['', 'account', 'customer', 'product']);
+    assert.deepEqual(sections(x, kind).map(section => section.open), [true, false, false, false]);
+    assert.deepEqual(sections(x, kind).map(section => section.querySelector('summary').textContent.replace(/ \(\d+\)$/, '')),
+      labels.filter(label => label !== 'Order notes'));
+    const customer = sections(x, kind).find(section => section.dataset.sacAvailableGroup === 'customer');
+    assert.deepEqual(customer.querySelectorAll('strong').map(node => node.textContent), ['Name', 'Score']);
+  }
+  assert.equal(control(x, 'retarget').parentElement.className, 'sac-label');
+}));
+
+test('aggregate search opens matching sections and restores independent user open states', () => withDOM(async () => {
+  const x = await sectionsInstance(); await x.choose('aggregate');
+  for (const kind of ['group', 'measure', 'filter']) {
+    sections(x, kind).find(section => section.dataset.sacAvailableGroup === 'account').open = true;
+    searchSection(x, kind, 'Customer profile');
+    assert.deepEqual(sectionKeys(x, kind), ['customer']);
+    assert.equal(sections(x, kind)[0].open, true);
+    assert.deepEqual(sections(x, kind)[0].querySelectorAll('strong').map(node => node.textContent), ['Name', 'Score']);
+    searchSection(x, kind, 'product.score');
+    assert.deepEqual(sectionKeys(x, kind), ['product']);
+    assert.equal(sections(x, kind)[0].open, true);
+    assert.deepEqual(sections(x, kind)[0].querySelectorAll('strong').map(node => node.textContent), ['Score']);
+    searchSection(x, kind, '');
+    assert.deepEqual(sections(x, kind).map(section => section.open), [true, true, false, false]);
+  }
+  group(x, 'customer.name');
+  assert.deepEqual(sections(x, 'group').map(section => section.open), [true, true, false, false]);
+}));
+
+test('section choices preserve full ids in chips, exact requests and grouped aggregate sorting', () => withDOM(async () => {
+  const x = await sectionsInstance(); await x.choose('aggregate');
+  group(x, 'customer.name'); group(x, 'status');
+  assert.deepEqual(request(x), {
+    format: 'selecto.explorer-query', format_version: 1, domain: {fingerprint: 'fp'}, features: {revision: 'sections-rev'},
+    query: {select: ['customer.name', 'status', {aggregate: 'count', alias: 'count'}], group_by: ['customer.name', 'status'], limit: 100},
+  });
+  assert.match(x.node('group-chips').textContent, /customer.name/);
+  click(x, '[data-sac-add-order]');
+  const sort = x.node('aggregate-orders').querySelector('[data-sac-order-field]');
+  assert.deepEqual(sort.children.map(node => node.label), ['Orders', 'Customer profile']);
+  assert.deepEqual(sort.children.flatMap(node => node.children.map(option => option.value)), ['status', 'count', 'customer.name']);
+  sort.value = 'customer.name'; x.console.onChange({target: sort});
+  assert.deepEqual(request(x).query.order_by, [{field: 'customer.name', direction: 'asc'}]);
+}));
+
+test('Rows of sections retain original root context for target and to-one fields and filters', () => withDOM(async () => {
+  const x = await sectionsInstance(); await x.choose('aggregate'); edit(x, 'retarget', 'notes');
+  for (const kind of ['group', 'measure']) {
+    assert.deepEqual(sectionKeys(x, kind), ['', 'account', 'customer', 'notes', 'product']);
+    assert.deepEqual(sections(x, kind).map(section => section.open), [true, false, false, false, false]);
+  }
+  assert.deepEqual(sectionKeys(x, 'filter'), ['', 'account', 'customer', 'product']);
+  searchSection(x, 'group', 'Order notes');
+  assert.deepEqual(sectionKeys(x, 'group'), ['notes']);
+  assert.equal(sections(x, 'group')[0].open, true);
+  group(x, 'notes.name');
+  assert.deepEqual(request(x).query, {select: ['notes.name', {aggregate: 'count', alias: 'count'}], group_by: ['notes.name'], limit: 100, retarget: 'notes'});
+  assert.equal(x.console.aggregateSortFields()[0].groupKey, 'notes');
+}));
+
+test('missing domain metadata falls back to humanized paths without inventing capabilities', () => withDOM(async () => {
+  const featureResponse = structuredClone(sectionsFixture.features);
+  featureResponse.fields.push(field('extra_detail.record_title', 'string', {label: 'extra_detail.record_title'}));
+  const x = await sectionsInstance({featureResponse}); await x.choose('aggregate');
+  const extra = sections(x, 'group').find(section => section.dataset.sacAvailableGroup === 'extra_detail');
+  assert.equal(extra.querySelector('summary').textContent, 'Extra Detail (1)');
+  assert.equal(extra.querySelector('strong').textContent, 'Record Title');
+  group(x, 'extra_detail.record_title');
+  assert.deepEqual(request(x).query.group_by, ['extra_detail.record_title']);
+}));
+
+test('Detail and remote-only profiles retain their sections, sort options and request drafts', () => withDOM(async () => {
+  for (const remote of [false, true]) {
+    const x = await sectionsInstance({remote, ...(remote ? {routes: []} : {})});
+    const before = request(x), keys = sectionKeys(x, 'field');
+    assert.deepEqual(keys, ['', 'account', 'customer', 'notes', 'product']);
+    x.console.state.orders = [{id: 'sort-one', field: 'customer.name', direction: 'asc'}];
+    x.console.renderOrders();
+    assert.equal(x.node('orders').querySelectorAll('optgroup').length, 0);
+    if (remote) {
+      assert.equal(x.console.aggregateFeatures, null);
+      assert.equal(x.calls.some(call => call.path.endsWith('group-features')), false);
+    } else {
+      x.console.state.orders = []; x.console.syncRequest(true);
+      await x.choose('aggregate'); group(x, 'customer.name'); await x.choose('flat');
+      assert.deepEqual(request(x), before);
+      assert.deepEqual(sectionKeys(x, 'field'), keys);
+    }
+  }
+}));
 
 test('Aggregates occupies the three existing left cards and restores Detail controls and drafts',()=>withDOM(async()=>{
   const x=await instance();const aside=x.root.querySelector('.sac-builder');

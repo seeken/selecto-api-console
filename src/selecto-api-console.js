@@ -389,6 +389,28 @@
     }).join(" · ");
   }
 
+  function fieldSection(path, leafLabel, joins) {
+    const prefix = path.split(".").slice(0, -1).join(".");
+    const groupKey = prefix.split(".")[0];
+    return {
+      leafLabel,
+      relation: prefix || "Root",
+      groupKey,
+      groupLabel: groupKey ? relationshipLabel(groupKey, joins) : "",
+    };
+  }
+
+  function fieldGroups(fields, rootLabel) {
+    const groups = new Map();
+    fields.forEach((field) => {
+      const key = field.groupKey || "";
+      if (!groups.has(key)) groups.set(key, {label: field.groupLabel || rootLabel, fields: []});
+      groups.get(key).fields.push(field);
+    });
+    return [...groups].sort(([a, left], [b, right]) =>
+      !a ? -1 : !b ? 1 : left.label.localeCompare(right.label));
+  }
+
   function pickTone(path) {
     let hash = 2166136261;
     for (const character of String(path || "")) {
@@ -419,11 +441,8 @@
         path,
         name,
         label: prefix ? `${relationshipLabel(prefix, joins)}: ${fieldLabel}` : fieldLabel,
-        leafLabel: fieldLabel,
+        ...fieldSection(path, fieldLabel, joins),
         type: String(column.type || "string").toLowerCase(),
-        relation: prefix || "Root",
-        groupKey: prefix ? prefix.split(".")[0] : "",
-        groupLabel: prefix ? relationshipLabel(prefix.split(".")[0], joins) : "",
         filterable: fieldRoleAllowed(column, "filter"),
         sortable: fieldRoleAllowed(column, "sort"),
       });
@@ -2352,19 +2371,12 @@
         this.availableGroupOpen[kind].set(group.dataset.sacAvailableGroup, group.open);
       });
       container.replaceChildren();
-      const groups = new Map();
-      fields.forEach((field) => {
-        const key = field.groupKey || "";
-        if (!groups.has(key)) groups.set(key, {label: field.groupLabel || this.domain.name || "Main record", fields: []});
-        groups.get(key).fields.push(field);
-      });
-      const ordered = [...groups].sort(([a, left], [b, right]) =>
-        !a ? -1 : !b ? 1 : left.label.localeCompare(right.label));
+      const ordered = fieldGroups(fields, this.domain.name || "Main record");
       let shown = 0;
       ordered.forEach(([key, group]) => {
         const headingMatches = query && `${group.label} ${key}`.toLowerCase().includes(query);
         const matches = group.fields.filter((field) => !query || headingMatches
-          || `${field.path} ${field.label} ${field.type} ${kind === "measure" ? (field.aggregates || []).map(fn => `${fn} ${AGGREGATE_LABELS[fn] || fn}`).join(" ") : ""}`.toLowerCase().includes(query));
+          || `${field.path} ${field.label} ${field.leafLabel || ""} ${field.type} ${kind === "measure" ? (field.aggregates || []).map(fn => `${fn} ${AGGREGATE_LABELS[fn] || fn}`).join(" ") : ""}`.toLowerCase().includes(query));
         if (!matches.length) return;
         shown += matches.length;
         const details = element("details", "sac-available-group");
@@ -2374,7 +2386,7 @@
         matches.forEach((field) => {
           if (kind === "measure") {
             const row = element("div", "sac-available-field sac-measure-choice");
-            const copy = element("span", ""); copy.append(element("strong", "", field.label));
+            const copy = element("span", ""); copy.append(element("strong", "", field.leafLabel || field.label));
             const functions = element("div", "sac-compact-actions");
             (field.aggregates || []).forEach(fn => {
               const add = element("button", "sac-text-button", field.id ? AGGREGATE_LABELS[fn] || fn : "Count rows");
@@ -2650,7 +2662,15 @@
         const field = element("select", "");
         field.dataset.sacOrderField = ""; field.setAttribute("aria-label", "Sort field");
         field.disabled = named;
-        appendOptions(field, fields.map((item) => ({value: item.path, label: `${item.label} — ${item.path}`})), order.field);
+        if (this.queryProfile === "aggregate") {
+          fieldGroups(fields, this.domain.name || "Main record").forEach(([, group]) => {
+            const options = element("optgroup", ""); options.label = group.label;
+            group.fields.forEach(item => options.append(new Option(`${item.leafLabel || item.label} — ${item.path}`, item.path, false, item.path === order.field)));
+            field.append(options);
+          });
+        } else {
+          appendOptions(field, fields.map((item) => ({value: item.path, label: `${item.label} — ${item.path}`})), order.field);
+        }
         const direction = element("select", "");
         direction.dataset.sacOrderDirection = ""; direction.setAttribute("aria-label", "Sort direction");
         direction.disabled = named;
@@ -3268,7 +3288,9 @@
     aggregateSelectedGroupFields() {
       const configured = (this.aggregateState?.groupEntries || []).map(entry => {
         const field = this.aggregateGroupFields().find(field => field.id === entry.field);
-        return {...field, id: entry.alias, label: `${field?.label || entry.field} (${entry.format || entry.buckets.kind})`, sortable: true};
+        const format = entry.format || entry.buckets.kind;
+        return {...field, id: entry.alias, label: `${field?.label || entry.field} (${format})`,
+          leafLabel: `${field?.leafLabel || field?.label || entry.field} (${format})`, sortable: true};
       });
       return [...this.aggregateGroupFields().filter(field => !configured.some(group => group.id === field.id)), ...configured];
     }
@@ -5411,7 +5433,23 @@
           this.aggregateAvailabilityError = "Aggregates unavailable: invalid or unsupported features.";
           return;
         }
-        this.aggregateFeatures = document;
+        // Decorate once so every aggregate chooser uses the same field objects.
+        const detailFields = new Map(collectFields(this.domain).map(field => [field.path, field]));
+        const joins = this.domain?.joins || {};
+        const decorate = (field) => {
+          const parts = field.id.split("."), prefix = parts.slice(0, -1).join(".");
+          const fallback = detailFields.get(field.id)?.leafLabel || humanize(parts.at(-1));
+          let leafLabel = field.label || fallback;
+          if (leafLabel === field.id) leafLabel = fallback;
+          else if (prefix) {
+            for (const start of [`${relationshipLabel(prefix, joins)}: `, `${humanize(prefix)}: `, `${prefix}.`]) {
+              if (leafLabel.startsWith(start)) { leafLabel = leafLabel.slice(start.length); break; }
+            }
+          }
+          return {...field, ...fieldSection(field.id, leafLabel, joins)};
+        };
+        this.aggregateFeatures = {...document, fields: document.fields.map(decorate)};
+        this.aggregateFeatures.retargets = this.aggregateTargets().map(target => ({...target, fields: target.fields.map(decorate)}));
         this.aggregateQueryPath = query.path;
       } catch (_error) {
         this.aggregateAvailabilityError = "Aggregates unavailable: features could not be fetched.";
@@ -5876,8 +5914,9 @@
           const rows = this.aggregateRowsLabels();
           const control = selector("Rows of", "retarget", [{value:"",label:rows.option},
             ...this.aggregateTargets().map(target => ({value:target.path,label:this.aggregateRowsLabels(target).option}))], state.retarget || "");
+          control.className = "sac-label";
           const help = element("small", "sac-help", `Which records each row counts. Filters still apply to ${rows.label}.`);
-          control.append(help); targetSlot.append(control);
+          targetSlot.append(control, help);
         }
       }
       const labelOf = new Map(this.aggregateSelectedGroupFields().map(field => [field.id, field.label]));
