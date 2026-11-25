@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show Query profile before Request method in the Request section, since choosing Aggregates or another POST-only profile hides the method choice.
+
 - Section aggregate groups, measures, filters and sort choices by relationship using Detail's field helpers, including root-relative Rows of targets; style the Rows of label consistently.
 
 - Clarify the aggregate target selector as Rows of, with published record labels and help explaining which records filters apply to; keep request values unchanged.
