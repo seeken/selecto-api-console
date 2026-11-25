@@ -178,8 +178,12 @@ test('As of needs both features and its route OpenAPI, preserving the timestamp 
   delete x.console.openapi.paths['/api/orders/group-query'];assert.equal(x.console.supportsAsOf('aggregate'),false);
 }));
 
-test('Count by scopes groups and measures, preserves root filters and clears unavailable chips with an announcement',()=>withDOM(async()=>{
+test('Rows of scopes groups and measures, preserves root filters and clears unavailable chips with an announcement',()=>withDOM(async()=>{
   const x=await instance({hash:hashFor(handoff)});
+  const selector=x.root.querySelector('[data-sac-aggregate-control="retarget"]');
+  assert.equal(selector['aria-label'],'Rows of');
+  assert.deepEqual(selector.children.map(option=>[option.value,option.textContent]),[['','Orders'],['notes','Notes']]);
+  assert.equal(x.node('aggregate-target').querySelector('.sac-help').textContent,'Which records each row counts. Filters still apply to Orders.');
   control(x,'retarget','notes');
   assert.deepEqual(x.console.aggregateGroupFields().map(field=>field.id),['notes.kind','notes.stage','notes.weight']);
   assert.deepEqual(x.console.aggregateMeasureFields('sum').map(field=>field.id),['notes.weight']);
@@ -188,6 +192,7 @@ test('Count by scopes groups and measures, preserves root filters and clears una
   assert.deepEqual(x.console.aggregateState.groupBy,[]);assert.equal(x.console.aggregateState.aggregates.length,1);
   assert.deepEqual(exported(x).query.filters,handoff.query.filters);
   assert.match(x.node('chooser-status').textContent,/unavailable.*removed/);
+  assert.equal(x.node('chooser-status').textContent,'Rows of changed. Groups and measures unavailable for this target were removed. Filters still apply to Orders.');
   assert.equal(exported(x).query.retarget,'notes');
   x.console.aggregateControl({dataset:{sacAggregateControl:'add-group'},value:'notes.kind'});
   assert.equal(x.console.addAggregateMeasure('sum','notes.weight'),true);
@@ -195,6 +200,29 @@ test('Count by scopes groups and measures, preserves root filters and clears una
   assert.equal(x.console.aggregateState.aggregates.length,1);assert.equal('retarget' in exported(x).query,false);
   reject(x,withQuery({...memberQuery.retarget(),retarget:'unknown'}),/not published/);
   reject(x,withQuery({...memberQuery.retarget(),group_by:['region'],select:['region',{aggregate:'count',alias:'n'}]}),/Unsupported aggregate selection/);
+}));
+
+test('Rows of uses explicit record forms from features and domain, with safe label fallbacks',()=>withDOM(async()=>{
+  const x=await instance();await x.choose('aggregate');
+  const options=()=>x.root.querySelector('[data-sac-aggregate-control="retarget"]').children.map(option=>[option.value,option.textContent]);
+  Object.assign(x.console.domain,{name:'Mira records',plural:'Mira entries',singular:'Mira entry'});
+  Object.assign(x.console.aggregateFeatures.retargets[0],{plural:'Luma notes',singular:'Luma note'});
+  const before=clone(exported(x));x.console.renderAggregateBuilder();
+  assert.deepEqual(options(),[['','Mira entries (each Mira entry)'],['notes','Luma notes (each Luma note)']]);
+  assert.match(x.node('aggregate-target').querySelector('.sac-help').textContent,/Filters still apply to Mira entries\./);
+  assert.deepEqual(exported(x),before);
+  delete x.console.domain.plural;delete x.console.domain.singular;delete x.console.domain.name;
+  Object.assign(x.console.aggregateFeatures,{label:'Neri entries',singular:'Neri entry'});
+  delete x.console.aggregateFeatures.retargets[0].plural;delete x.console.aggregateFeatures.retargets[0].singular;
+  x.console.domain.source.associations={notes:{queryable:'notes'}};
+  x.console.domain.schemas={notes:{plural:'Vela notes',singular:'Vela note'}};
+  x.console.renderAggregateBuilder();
+  assert.deepEqual(options(),[['','Neri entries (each Neri entry)'],['notes','Vela notes (each Vela note)']]);
+  delete x.console.aggregateFeatures.label;delete x.console.aggregateFeatures.singular;
+  delete x.console.domain.schemas;delete x.console.aggregateFeatures.retargets[0].label;
+  x.console.renderAggregateBuilder();
+  assert.deepEqual(options(),[['',"This domain's records"],['notes','notes']]);
+  assert.equal(x.node('aggregate-target').querySelector('.sac-help').textContent,"Which records each row counts. Filters still apply to This domain's records.");
 }));
 
 test('pivot controls select typed chips and null, top-N and toggles; measure rename follows rank reference',()=>withDOM(async()=>{

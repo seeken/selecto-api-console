@@ -246,6 +246,10 @@ supports.
 
 - **Group by** takes fields in order; **Aggregates** take a function, a field
   where the function needs one, and a name.
+- **Rows of**, when published, chooses the domain's own records or an associated
+  collection to count and measure. Filters still apply to the domain's fields.
+  Options use published labels and add **(each record)** using the supplied
+  singular form when available; the request still uses `retarget`.
 - **Subtotal rows** is one of none, rollup, cube, or grouping sets. Grouping
   sets are chosen from every combination of the groups, including the grand
   total, and every group must appear in at least one.

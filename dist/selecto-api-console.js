@@ -7753,6 +7753,26 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       return target ? this.aggregateTargets().find(entry => entry.path === target)?.fields || [] : this.aggregateFeatures.fields;
     }
 
+    aggregateRowsLabels(target) {
+      let sources;
+      if (target) {
+        let relation = this.domain?.source, association;
+        for (const part of target.path.split(".")) {
+          association = relation?.associations?.[part];
+          relation = this.domain?.schemas?.[association?.queryable];
+        }
+        sources = [target, this.domain?.retarget?.targets?.[target.path], association, relation];
+      } else {
+        sources = [this.domain, this.aggregateFeatures, this.aggregateFeatures?.domain];
+      }
+      const text = values => values.find(value => typeof value === "string" && value.trim())?.trim();
+      const plural = text(sources.flatMap(source => [source?.plural, source?.label_plural]));
+      const label = plural || text(sources.flatMap(source => [source?.label, source?.name]))
+        || (target ? target.path : "This domain's records");
+      const singular = text(sources.flatMap(source => [source?.singular, source?.label_singular]));
+      return {label, option: singular ? `${label} (each ${singular})` : label};
+    }
+
     aggregateCanSort() {
       const state = this.aggregateState;
       return !!state.groupBy.length && (state.grouping === "none" || this.aggregateFeatures.supports.subtotal_position === true && ["before", "after"].includes(state.subtotal_position));
@@ -7778,7 +7798,7 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
         const sortable = new Set(this.aggregateSortFields().map(field => field.path));
         state.orders = state.orders.filter(order => sortable.has(order.field));
       });
-      this.announceChooser("Count by changed. Groups and measures unavailable for this target were removed; filters remain on root fields.");
+      this.announceChooser(`Rows of changed. Groups and measures unavailable for this target were removed. Filters still apply to ${this.aggregateRowsLabels().label}.`);
     }
 
     aggregatePivotField(state = this.aggregateState) {
@@ -8164,8 +8184,13 @@ return {ExplorerIntentError,humanizeExplorerLabel,explorerFieldLabel,unsupported
       };
       if (targetSlot) {
         targetSlot.replaceChildren(); targetSlot.hidden = this.aggregateFeatures.supports.retarget !== true;
-        if (!targetSlot.hidden) targetSlot.append(selector("Count by", "retarget", [{value:"",label:"Root"},
-          ...this.aggregateTargets().map(target => ({value:target.path,label:target.label || target.path}))], state.retarget || ""));
+        if (!targetSlot.hidden) {
+          const rows = this.aggregateRowsLabels();
+          const control = selector("Rows of", "retarget", [{value:"",label:rows.option},
+            ...this.aggregateTargets().map(target => ({value:target.path,label:this.aggregateRowsLabels(target).option}))], state.retarget || "");
+          const help = element("small", "sac-help", `Which records each row counts. Filters still apply to ${rows.label}.`);
+          control.append(help); targetSlot.append(control);
+        }
       }
       const labelOf = new Map(this.aggregateSelectedGroupFields().map(field => [field.id, field.label]));
       for (const kind of ["group", "measure"]) {
