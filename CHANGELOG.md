@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep the chooser usable when built from the bare prototype (as hosts do headlessly): loading a payload no longer assumes the per-profile pin choices were set up by the constructor.
+
 - Default Detail, Aggregates, and nested Detail to unpinned envelopes on capable hosts. Add the Request pin checkbox, preserve imported pins and request links, display response fingerprints, and retain mandatory pins for older hosts.
 
 - Show Query profile before Request method in the Request section, since choosing Aggregates or another POST-only profile hides the method choice.

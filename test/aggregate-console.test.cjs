@@ -107,3 +107,17 @@ test("tells a left-out group from a NULL value in a result row", () => {
   assert.equal(api.aggregateRowHolds({level: 1, kind: "subtotal", groups: ["done"]}, columns[0], columns), false);
   assert.equal(api.aggregateRowHolds({level: 0, kind: "total", groups: []}, columns[0], columns), false);
 });
+
+test("a chooser built from the bare prototype loads aggregate payloads", () => {
+  // Hosts drive the chooser headlessly with Object.create, so loading must not
+  // depend on constructor state such as the per-profile domain pin choices.
+  const chooser = Object.create(api.APIConsole.prototype);
+  chooser.aggregateFeatures = {...features(), supports: {...features().supports, optional_domain_pin: true}};
+  chooser.state = {rawDirty: true};
+  const query = {group_by: ["state"], select: ["state", {aggregate: "count", alias: "n"}]};
+  chooser.loadAggregatePayload({format: "selecto.explorer-query", format_version: 1, query});
+  assert.equal(chooser.pinsDomain("aggregate"), false);
+  chooser.loadAggregatePayload({format: "selecto.explorer-query", format_version: 1,
+    domain: {fingerprint: "sha256:domain"}, features: {revision: "sha256:features"}, query});
+  assert.equal(chooser.pinsDomain("aggregate"), true);
+});
