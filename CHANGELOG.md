@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Group Request method and Query profile in a first Request section, with consecutive visible step numbers and advanced state panels beside the JSON editor.
+
 - Add capability-gated aggregate As of, Count by targets, typed pivots and subtotal placement; preserve chooser handoffs and render pivot metadata headers.
 
 - Retain canonical Explorer handoff settings in the Aggregates chooser, including row shape, sum null handling, advanced selections and filters, and contract-defined defaults.

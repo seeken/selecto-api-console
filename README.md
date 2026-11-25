@@ -27,6 +27,15 @@ canonical domain API. It discovers the API manifest, canonical domain, OpenAPI
 query route at runtime. It contains no adapter, database, table, raw-SQL, or
 application-domain knowledge.
 
+The Query builder starts with **Request**, grouping **Request method** (when
+resource GET is available) and **Query profile** (for remote mode or advertised
+aggregates). Next come **Choose data** (**Group & measure** for Aggregates),
+**Constrain**, and **Order & page** (**Subtotals & page** for Aggregates). Visible
+steps are numbered consecutively; hosts offering neither request choice start
+with Choose data. Advanced root and nested state panels stay beside the JSON
+request they serialize. Request stays available when those profiles hide the
+ordinary chooser.
+
 Field and filter selection use the same searchable semantic catalog pattern.
 Temporal fields also offer operational quick periods such as Today, This Week,
 Month to Date, Month/Quarter/Year to Date across all years, and Last 30 Days.

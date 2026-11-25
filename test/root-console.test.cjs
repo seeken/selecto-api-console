@@ -15,7 +15,7 @@ async function instance() {
 test("Console root handoff preserves complete bound tree and makes flat chooser visibly unavailable",async()=>{
   const {console,nodes,state,context}=await instance();const raw=JSON.stringify(state);
   assert.deepEqual(requestPayloadFromLocation({hash:`#request=${encodeURIComponent(raw)}`}),state);
-  assert.equal(await console.restoreRootState(raw),true);assert.equal(nodes[".sac-builder"].hidden,true);
+  assert.equal(await console.restoreRootState(raw),true);assert.equal(nodes[".sac-builder"].hidden,false);
   const parsed=JSON.parse(nodes["[data-sac-request]"].value);assert.equal(parsed.format_version,2);assert.deepEqual(parsed.query.where,globalThis.SelectoExplorerClient.toRootPredicateQuery(state.intent,context).where);
   assert.equal(nodes["[data-sac-root-state]"].value,raw);assert.equal(nodes["[data-sac-root-mode]"].value,"root");
   const before=nodes["[data-sac-request]"].value;assert.equal(console.loadRequestIntoChooser(),false);assert.equal(nodes["[data-sac-request]"].value,before);

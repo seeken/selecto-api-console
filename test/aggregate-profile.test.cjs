@@ -23,6 +23,7 @@ class Node {
   setCustomValidity() {}
   addEventListener() {}
   matches(selector) {
+    if (/^[a-z][a-z0-9]*$/.test(selector)) return this.tagName.toLowerCase() === selector;
     if (selector.startsWith(".")) return this.className.split(/\s+/).includes(selector.slice(1));
     const match = /^\[data-([\w-]+)(?:="([^"]*)")?\]$/.exec(selector);
     if (!match) return false;
@@ -65,7 +66,7 @@ async function withDOM(fn) {
   try { await fn(); } finally { Object.assign(global, before); }
 }
 
-async function instance({routes = aggregateRoutes, remote = false, featureResponse = features()} = {}) {
+async function instance({routes = aggregateRoutes, remote = false, resource = true, featureResponse = features()} = {}) {
   const root = new Node(); root.dataset.apiBase = "/api/orders";
   const console = new APIConsole(root);
   // These independent form renderers are covered by the existing chooser tests.
@@ -75,7 +76,7 @@ async function instance({routes = aggregateRoutes, remote = false, featureRespon
   const manifest = {format: "selecto.canonical-domain-api", format_version: 1, domain: {fingerprint: "fp"},
     profiles: remote ? ["remote_query.v1"] : [], routes: [
       {operation_id: "queryDomain", method: "POST", path: "/api/orders/detail-query"},
-      {operation_id: "getResource", method: "GET", path: "/api/orders/{id}"}, ...routes]};
+      ...(resource ? [{operation_id: "getResource", method: "GET", path: "/api/orders/{id}"}] : []), ...routes]};
   const domain = {name: "Orders", domain_fingerprint: "fp", source: {primary_key: "id", fields: ["id", "status"],
     columns: {id: {type: "integer"}, status: {type: "string"}}}};
   const calls = [];
@@ -213,4 +214,61 @@ test("retained resource GET drafts do not change aggregate transport, editor or 
   assert.equal(x.node("result-body").children[0].children[0].textContent, "open");
   await x.choose("flat"); assert.equal(x.node("request").value, resource); assert.equal(x.node("request").readOnly, true);
   await x.choose("aggregate"); assert.equal(x.node("request").readOnly, false);
+}));
+
+
+test("Request groups capability-gated choices and numbers only visible builder steps", () => withDOM(async () => {
+  for (const remote of [false, true]) {
+    for (const advertised of [false, true]) {
+      for (const resource of [false, true]) {
+        const x = await instance({remote, resource, routes: advertised ? aggregateRoutes : []});
+        const request = x.node("request-section");
+        const profile = x.node("root-mode");
+        assert.equal(request.hidden, !remote && !advertised && !resource);
+        assert.equal(x.node("query-method-group").hidden, !resource);
+        assert.equal(Boolean(profile), remote || advertised);
+        assert.equal(x.node("query-method-group").closest(".sac-card"), request);
+        if (profile) assert.equal(profile.closest(".sac-card"), request);
+        const visible = x.root.querySelectorAll("[data-sac-query-step]").filter(card => !card.hidden);
+        assert.deepEqual(visible.map(card => card.querySelector(".sac-step").textContent),
+          visible.map((_, index) => String(index + 1)));
+        assert.equal(visible[0].querySelector("h2").textContent, request.hidden ? "Choose data" : "Request");
+        if (remote) {
+          for (const name of ["root-availability", "nested-availability", "aggregate-availability"]) {
+            assert.equal(x.node(name).closest(".sac-card"), request);
+          }
+          assert.equal(x.node("root-state").closest(".sac-request-card") !== null, true);
+          assert.equal(x.node("nested-state-controls").closest(".sac-request-card") !== null, true);
+        }
+      }
+    }
+  }
+}));
+
+test("Request remains reachable across profiles and GET hides only POST builder steps", () => withDOM(async () => {
+  const x = await instance({remote: true});
+  const steps = () => x.root.querySelectorAll("[data-sac-query-step]").filter(card => !card.hidden);
+  const numbers = () => steps().map(card => card.querySelector(".sac-step").textContent);
+  x.console.setQueryMethod("get"); x.console.renderAll();
+  assert.deepEqual(numbers(), ["1", "2"]);
+  assert.equal(x.node("resource-id-wrap").hidden, false);
+  await x.choose("aggregate");
+  assert.equal(x.node("query-method-group").hidden, true);
+  assert.deepEqual(numbers(), ["1", "2", "3", "4"]);
+  assert.equal(x.node("data-heading").textContent, "Group & measure");
+  for (const profile of ["root", "nested"]) {
+    x.console.renderNestedBuilder = () => {};
+    x.console.queryProfile = profile; x.console.applyQueryProfile();
+    assert.equal(x.root.querySelector(".sac-builder").hidden, false);
+    assert.equal(x.node("request-section").hidden, false);
+    assert.equal(x.node("query-method-group").hidden, true);
+    assert.deepEqual(numbers(), ["1"]);
+  }
+  await x.choose("flat");
+  assert.equal(x.node("query-method-group").hidden, false);
+  assert.equal(x.node("root-mode").value, "flat");
+  assert.equal(x.node("resource-id-wrap").hidden, false);
+  assert.deepEqual(numbers(), ["1", "2"]);
+  x.console.setQueryMethod("post"); x.console.renderAll();
+  assert.deepEqual(numbers(), ["1", "2", "3", "4"]);
 }));

@@ -119,13 +119,13 @@ function load(x, value) {x.node('request').value=JSON.stringify(value);x.console
 
 test('Aggregates occupies the three existing left cards and restores Detail controls and drafts',()=>withDOM(async()=>{
   const x=await instance();const aside=x.root.querySelector('.sac-builder');
-  const detail=request(x);const cards=aside.querySelectorAll('.sac-card');assert.equal(cards.length,3);
+  const detail=request(x);const cards=aside.querySelectorAll('.sac-card');assert.equal(cards.length,4);
   await x.choose('aggregate');assert.equal(aside.hidden,false);assert.equal(x.root.querySelector('section.sac-aggregate-builder'),null);
-  assert.deepEqual(cards.map(c=>c.querySelector('h2').textContent),['Group & measure','Constrain','Subtotals & page']);
+  assert.deepEqual(cards.map(c=>c.querySelector('h2').textContent),['Request','Group & measure','Constrain','Subtotals & page']);
   for(const name of ['data','constraints','page'])assert.equal(x.node(`detail-${name}`).hidden,true);
-  assert.equal(x.node('filters').closest('.sac-card'),cards[1]);assert.equal(x.node('as-of-slot').closest('.sac-card'),cards[1]);
+  assert.equal(x.node('filters').closest('.sac-card'),cards[2]);assert.equal(x.node('as-of-slot').closest('.sac-card'),cards[2]);
   group(x,'status');const aggregate=request(x);
-  await x.choose('flat');assert.deepEqual(cards.map(c=>c.querySelector('h2').textContent),['Choose data','Constrain','Order & page']);
+  await x.choose('flat');assert.deepEqual(cards.map(c=>c.querySelector('h2').textContent),['Request','Choose data','Constrain','Order & page']);
   assert.equal(x.node('aggregate-data').hidden,true);assert.equal(x.node('detail-constraints').hidden,false);assert.deepEqual(request(x),detail);
   await x.choose('aggregate');assert.deepEqual(request(x),aggregate);
 }));
