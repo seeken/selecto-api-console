@@ -1235,8 +1235,8 @@ export function nestedDetailConsoleHref(path,state) {
   nonEmptyString(path,"nested.console.path");if(path.includes("#"))refuse("nested.console.path","fragment reserved for nested handoff");safePath(path.split("?")[0]);
   const fragment=new URLSearchParams();fragment.set("nested_request",encodeNestedDetailState(state));return `${path}#${fragment}`;
 }
-export function toNestedDetailExplorerResult(envelope,intent,context) {
-  const query=toNestedDetailQuery(intent,context),features=context.features;canonical.assertNestedDetailResult(envelope,{query,features,context:canonical.nestedDetailContext(features)});
+export function toNestedDetailExplorerResult(envelope,intent,context,options = {}) {
+  const query=toNestedDetailQuery(intent,context),features=context.features;canonical.assertNestedDetailResult(envelope,{query,features,context:canonical.nestedDetailContext(features),pinDomain:options.pinDomain});
   const collection=features.collections[0],roots=new Map(features.root_fields.map(f=>[f.path,f])),children=new Map(collection.fields.map(f=>[f.path,f]));
   const scalar=f=>({id:f.id,key:f.id,path:f.path,label:f.label,type:f.type==="string"?"text":f.type,encoding:f.encoding,nullable:f.nullable});
   const childPaths=query.select.find(Array.isArray),childFields=childPaths.map(p=>children.get(p));

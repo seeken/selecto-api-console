@@ -54,7 +54,7 @@ const aggregateRoutes = [
   {operation_id: "getExplorerFeatures", method: "GET", path: "/api/orders/group-features"},
   {operation_id: "queryExplorer", method: "POST", path: "/api/orders/group-query"},
 ];
-const result = () => ({ok: true, data: {columns: [{id: "status", role: "group"}, {id: "count", role: "aggregate"}],
+const result = () => ({ok: true, data: {domain: {fingerprint: "fp"}, features: {revision: "rev"}, columns: [{id: "status", role: "group"}, {id: "count", role: "aggregate"}],
   rows: [["open", 2], [null, 2]], row_meta: [{kind: "detail", level: 1}, {kind: "total", level: 0}]}});
 
 async function withDOM(fn) {
@@ -271,4 +271,43 @@ test("Request remains reachable across profiles and GET hides only POST builder 
   assert.deepEqual(numbers(), ["1", "2"]);
   x.console.setQueryMethod("post"); x.console.renderAll();
   assert.deepEqual(numbers(), ["1", "2", "3", "4"]);
+}));
+
+test("optional aggregate pins default off, survive drafts and links, and check only pinned responses", () => withDOM(async () => {
+  const document = features(); document.supports.optional_domain_pin = true;
+  const x = await instance({featureResponse: document});
+  await x.choose("aggregate");
+  const pin = x.node("pin-domain");
+  assert.equal(pin.disabled, false); assert.equal(pin.checked, false);
+  const unpinned = JSON.parse(x.node("request").value);
+  assert.equal(Object.hasOwn(unpinned, "domain"), false);
+  assert.equal(Object.hasOwn(unpinned, "features"), false);
+  global.fetch = async () => Response.json({...result(), data: {...result().data, domain: {fingerprint: "changed"}, features: {revision: "changed"}}});
+  await x.console.run();
+  assert.equal(x.console.state.response.ok, true);
+  assert.equal(x.node("response-fingerprint").textContent, "Domain fingerprint: changed");
+  pin.checked = true; x.console.onChange({target: pin});
+  const pinned = JSON.parse(x.node("request").value);
+  assert.deepEqual(pinned.domain, {fingerprint: "fp"}); assert.deepEqual(pinned.features, {revision: "rev"});
+  assert.match(x.node("curl").textContent, /fingerprint/);
+  await x.console.run(); assert.match(x.console.state.response.error.message, /Domain fingerprint drift/);
+  await x.choose("flat"); await x.choose("aggregate");
+  assert.equal(pin.checked, true); assert.deepEqual(JSON.parse(x.node("request").value), pinned);
+  let link; x.console.copy = async value => {link = value;};
+  global.location.href = "https://example.test/console";
+  await x.console.copyRequestLink({});
+  const restored = JSON.parse(new URLSearchParams(new URL(link).hash.slice(1)).get("request"));
+  x.console.pinDomains.aggregate = false; x.console.loadPayloadIntoChooser(restored); x.console.renderDomainPin();
+  assert.equal(pin.checked, true);
+  x.console.loadPayloadIntoChooser(unpinned); x.console.renderDomainPin(); assert.equal(pin.checked, false);
+}));
+
+test("older aggregate hosts force pins and explain the disabled checkbox", () => withDOM(async () => {
+  for (const capability of [undefined, false, "true"]) {
+    const document = features(); document.supports.optional_domain_pin = capability;
+    const x = await instance({featureResponse: document}); await x.choose("aggregate");
+    assert.equal(x.node("pin-domain").disabled, true); assert.equal(x.node("pin-domain").checked, true);
+    assert.match(x.node("domain-pin-help").textContent, /always include pins/);
+    assert.deepEqual(JSON.parse(x.node("request").value).domain, {fingerprint: "fp"});
+  }
 }));

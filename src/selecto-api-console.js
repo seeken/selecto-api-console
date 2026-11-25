@@ -894,6 +894,7 @@
       this.nextOrderId = 1;
       this.queryProfile = "flat";
       this.profileDrafts = {};
+      this.pinDomains = {};
       this.nestedState = null;
       this.nextNestedFilterId = 1;
       this.writeState = {
@@ -1153,6 +1154,10 @@
                   <label class="sac-method-option"><input type="radio" name="sac-query-method" value="post" data-sac-query-method> POST query</label>
                   <label class="sac-method-option"><input type="radio" name="sac-query-method" value="get" data-sac-query-method> GET resource</label>
                 </fieldset>
+                <div data-sac-domain-pin-control hidden>
+                  <label class="sac-check"><input type="checkbox" data-sac-pin-domain aria-describedby="sac-domain-pin-help"> Pin to this domain version</label>
+                  <p id="sac-domain-pin-help" class="sac-help" data-sac-domain-pin-help></p>
+                </div>
               </section>
               <section class="sac-card" data-sac-data-card data-sac-query-step>
                 <div class="sac-card-heading"><div><span class="sac-step"></span><h2 data-sac-data-heading>Choose data</h2></div></div>
@@ -1286,6 +1291,7 @@
                     <button type="button" data-sac-result-tab="curl">cURL</button>
                   </div>
                 </div>
+                <p class="sac-response-fingerprint sac-help" data-sac-response-fingerprint hidden></p>
                 <div class="sac-page-info" data-sac-legacy-page-info hidden>
                   <span data-sac-page-text></span>
                   <button type="button" class="sac-text-button" data-sac-previous-page>← Previous page</button>
@@ -2861,6 +2867,30 @@
       return [payload];
     }
 
+    supportsOptionalDomainPin(profile = this.queryProfile) {
+      if (profile === "aggregate") return this.aggregateFeatures?.supports.optional_domain_pin === true;
+      if (profile === "nested") return this.nestedDetailContext?.features.supports.optional_domain_pin === true;
+      return profile === "flat" && this.remoteMode && this.manifest?.query_capabilities?.optional_domain_pin === true;
+    }
+
+    pinsDomain(profile = this.queryProfile) {
+      return !this.supportsOptionalDomainPin(profile) || this.pinDomains[profile] === true;
+    }
+
+    renderDomainPin() {
+      const control = this.root.querySelector("[data-sac-domain-pin-control]");
+      if (!control) return;
+      control.hidden = !["flat", "nested", "aggregate"].includes(this.queryProfile)
+        || (this.queryProfile === "flat" && (!this.remoteMode || this.state.queryMethod === "get"));
+      const checkbox = this.root.querySelector("[data-sac-pin-domain]");
+      const optional = this.supportsOptionalDomainPin();
+      checkbox.disabled = !optional;
+      checkbox.checked = this.pinsDomain();
+      this.root.querySelector("[data-sac-domain-pin-help]").textContent = optional
+        ? "Protects against a field keeping its id but changing meaning. Use for integrations that must never run against a changed contract."
+        : "This host does not advertise optional domain pins for this profile, so requests always include pins.";
+    }
+
     buildPayload() {
       if (this.queryProfile === "nested") {
         if (this.nestedBlocked || !this.nestedState) throw new Error("Nested state remains blocked; restore valid bound state or explicitly start a new draft.");
@@ -2868,7 +2898,7 @@
         const query = global.SelectoExplorerClient.toNestedDetailQuery(this.nestedState.intent, context);
         this.validateQueryContext(query, "nested");
         return global.SelectoCanonicalClient.buildNestedDetailRequest(this.nestedState.intent.binding.fingerprint, query,
-          {features: context.features, context: global.SelectoCanonicalClient.nestedDetailContext(context.features)});
+          {features: context.features, context: global.SelectoCanonicalClient.nestedDetailContext(context.features), pinDomain: this.pinsDomain()});
       }
       if (this.rootMode && !this.rootState) throw new Error("Root state remains blocked; restore valid bound state or explicitly select Flat Detail.");
       if (this.rootState && this.rootMode) {
@@ -2923,7 +2953,7 @@
       payload.limit = Number.parseInt(this.state.limit, 10) || 0;
       payload.offset = Number.parseInt(this.state.offset, 10) || 0;
       return this.remoteMode
-        ? global.SelectoCanonicalClient.buildRemoteRequest(this.manifest.domain.fingerprint, payload)
+        ? global.SelectoCanonicalClient.buildRemoteRequest(this.pinsDomain("flat") ? this.manifest.domain.fingerprint : undefined, payload)
         : payload;
     }
 
@@ -2973,7 +3003,7 @@
         if (!this.explorerMetadata) throw new Error("This host does not advertise Explorer metadata for handoff.");
         payload = global.SelectoExplorerClient.toCanonicalQuery(payload, this.explorerMetadata);
       } else if (payload.format === "selecto.remote-query") {
-        if (payload.format_version !== 1 || !payload.domain || payload.domain.fingerprint !== this.manifest.domain.fingerprint) throw new Error("The request targets a different Domain fingerprint.");
+        if (payload.format_version !== 1 || (Object.hasOwn(payload, "domain") ? !isPlainObject(payload.domain) || onlyKeys(payload.domain, ["fingerprint"]).length || payload.domain.fingerprint !== this.manifest.domain.fingerprint : !this.supportsOptionalDomainPin("flat"))) throw new Error("The request targets a different Domain fingerprint.");
         payload = payload.query;
       }
       const allowed = ["select", "projection", "view", "segments", "segment_choices", "parameters", "filters", "ordering", "order_by", "timezone", "row_format", "limit", "offset", "as_of"];
@@ -3150,6 +3180,7 @@
       if (payload.format === "selecto.remote-query" && (this.queryProfile === "nested"
           || this.nestedDetailContext && payload.query?.select?.some(Array.isArray))) return this.loadNestedPayload(payload);
       const converted = this.chooserStateFromPayload(payload);
+      this.pinDomains.flat = Object.hasOwn(payload, "domain") || Object.hasOwn(payload, "publication") || payload.version === 2;
       Object.assign(this.state, converted.draft, {rawDirty: false});
       this.nextSelectedFieldId = converted.counters.selectedId;
       this.nextFilterId = converted.counters.filterId;
@@ -3178,6 +3209,7 @@
       intent.row_format = query.row_format || "arrays";
       if (query.as_of !== undefined) intent.as_of = query.as_of;
       global.SelectoExplorerClient.assertNestedDetailIntent(intent, context);
+      this.pinDomains.nested = Object.hasOwn(payload, "domain");
       this.nestedState = {format: "selecto.nested-detail-state", format_version: 1, intent};
       this.queryProfile = "nested"; this.nestedBlocked = false; this.nestedInitialError = null; this.state.rawDirty = false;
       return this.nestedState;
@@ -3357,10 +3389,11 @@
 
     loadAggregatePayload(payload) {
       const features = this.aggregateFeatures;
-      if (!features || payload.format_version !== 1 || payload.domain?.fingerprint !== features.domain.fingerprint
-          || payload.features?.revision !== features.revision) throw new Error("The aggregate request does not match the published features.");
+      if (!features || payload.format_version !== 1
+          || (Object.hasOwn(payload, "domain") ? payload.domain?.fingerprint !== features.domain.fingerprint : !this.supportsOptionalDomainPin("aggregate"))
+          || (Object.hasOwn(payload, "features") ? payload.features?.revision !== features.revision : !this.supportsOptionalDomainPin("aggregate"))) throw new Error("The aggregate request does not match the published features.");
       if (onlyKeys(payload, ["format", "format_version", "domain", "features", "query", "request_id"]).length
-          || onlyKeys(payload.domain, ["fingerprint"]).length || onlyKeys(payload.features, ["revision"]).length) throw new Error("Unsupported aggregate envelope properties.");
+          || (Object.hasOwn(payload, "domain") && onlyKeys(payload.domain, ["fingerprint"]).length) || (Object.hasOwn(payload, "features") && onlyKeys(payload.features, ["revision"]).length)) throw new Error("Unsupported aggregate envelope properties.");
       const query = payload.query;
       if (!isPlainObject(query) || onlyKeys(query, ["select", "group_by", "rollup", "cube", "grouping_sets", "limit", "offset", "as_of", "filters", "order_by", "row_format", "timezone", "count", "complete", "segments", "parameters", "export", "retarget", "pivot", "subtotal_position"]).length) throw new Error("Unsupported aggregate chooser properties.");
       this.validateQueryContext(query, "aggregate");
@@ -3433,6 +3466,7 @@
         this.aggregateState = previous;
         throw new Error(model.errors.join(" ") || "The aggregate chooser cannot retain the complete request.");
       }
+      this.pinDomains.aggregate = Object.hasOwn(payload, "domain") || Object.hasOwn(payload, "features");
       this.queryProfile = "aggregate"; this.state.rawDirty = false;
       return state;
     }
@@ -3468,6 +3502,7 @@
     renderQuerySections() {
       const request = this.root.querySelector("[data-sac-request-section]");
       if (!request) return;
+      this.renderDomainPin();
       const flat = this.queryProfile === "flat";
       const chooser = flat || this.queryProfile === "aggregate";
       const method = this.root.querySelector("[data-sac-query-method-group]");
@@ -3511,7 +3546,7 @@
         const sort = this.root.querySelector("[data-sac-add-order]"); if (sort) {sort.hidden = false; sort.disabled = false;}
       }
       const actions = this.root.querySelector("[data-sac-post-editor-actions]"); if (actions) actions.hidden = this.queryProfile === "root";
-      const link = this.root.querySelector("[data-sac-copy-link]"); if (link) link.hidden = !["flat", "aggregate"].includes(this.queryProfile);
+      const link = this.root.querySelector("[data-sac-copy-link]"); if (link) link.hidden = !["flat", "nested", "aggregate"].includes(this.queryProfile);
       if (nested) this.renderNestedBuilder();
     }
 
@@ -3869,7 +3904,7 @@
       try {
         const editor = this.root.querySelector("[data-sac-request]");
         const payload = global.SelectoCanonicalClient.parseStrictJSON(editor.value, {maxBytes:65536});
-        if (!["flat", "aggregate"].includes(this.queryProfile)) return;
+        if (!["flat", "nested", "aggregate"].includes(this.queryProfile)) return;
         const url = new URL(global.location.href);
         const slots = new URLSearchParams();
         slots.set("request", JSON.stringify(payload)); slots.set("profile", this.queryProfile);
@@ -3898,6 +3933,7 @@
     }
 
     syncRequest(force) {
+      this.renderDomainPin();
       if (this.queryProfile === "aggregate") {
         if (!this.state.rawDirty || force) this.syncAggregateRequest();
         return;
@@ -4913,6 +4949,25 @@
 
     onChange(event) {
       const target = event.target;
+      if (target.matches("[data-sac-pin-domain]")) {
+        if (!this.supportsOptionalDomainPin()) return;
+        const editor = this.root.querySelector("[data-sac-request]");
+        try {
+          const request = global.SelectoCanonicalClient.parseStrictJSON(editor.value);
+          if (!["selecto.remote-query", "selecto.explorer-query"].includes(request.format)) throw new Error("Load an envelope into the chooser before changing its pins.");
+          this.pinDomains[this.queryProfile] = target.checked;
+          if (target.checked) {
+            const features = this.queryProfile === "aggregate" ? this.aggregateFeatures : this.nestedDetailContext?.features;
+            request.domain = {fingerprint: this.queryProfile === "flat" ? this.manifest.domain.fingerprint : features.domain.fingerprint};
+            if (this.queryProfile === "aggregate") request.features = {revision: features.revision};
+          } else { delete request.domain; delete request.features; }
+          editor.value = JSON.stringify(request, null, 2);
+          this.updateCurl();
+        } catch (error) { this.setImportMessage(error.message, "error"); }
+        this.renderDomainPin();
+        return;
+      }
+
       if (target.matches("[data-sac-period-part]")) return this.editPeriod(target);
       if (this.queryProfile === "aggregate" && (target.matches("[data-sac-order-field]") || target.matches("[data-sac-order-direction]"))) {
         const id = target.closest("[data-order-id]").dataset.orderId;
@@ -5175,6 +5230,13 @@
         return;
       }
       if (target.matches("[data-sac-request]")) {
+        try {
+          const payload = global.SelectoCanonicalClient.parseStrictJSON(target.value);
+          if (["selecto.remote-query", "selecto.explorer-query"].includes(payload.format)) {
+            this.pinDomains[this.queryProfile] = Object.hasOwn(payload, "domain") || Object.hasOwn(payload, "features");
+            this.renderDomainPin();
+          }
+        } catch (_) { /* Retain the control state while JSON is incomplete. */ }
         this.nestedRestoreSequence = (this.nestedRestoreSequence || 0) + 1;
         this.rootRestoreSequence = (this.rootRestoreSequence || 0) + 1;
         this.nestedInitialError = null;
@@ -5325,7 +5387,7 @@
           renderIntent.limit = parsed.request.query.limit ?? context.features.defaults.limit;
           renderIntent.offset = parsed.request.query.offset ?? context.features.defaults.offset;
           renderIntent.row_format = parsed.request.query.row_format || "arrays";
-          nestedResult = global.SelectoExplorerClient.toNestedDetailExplorerResult(payload, renderIntent, context);
+          nestedResult = global.SelectoExplorerClient.toNestedDetailExplorerResult(payload, renderIntent, context, {pinDomain: Object.hasOwn(parsed.request, "domain")});
           response = {status:200,statusText:"OK",ok:true};
         } else if (this.remoteMode && (request.format === "selecto.root-predicate-state" || request.format === "selecto.remote-query" && request.format_version === 2)) {
           const context = await this.freshRootContext(controller.signal);
@@ -5339,12 +5401,12 @@
           }
           response = {status:200,statusText:"OK",ok:true};
         } else if (this.remoteMode) {
-          if (this.explorerClient && this.explorerMetadata) {
+          if (request.domain && this.explorerClient && this.explorerMetadata) {
             const descriptor = await this.explorerClient.getDomain(this.explorerMetadata.domain.id);
             if (descriptor.release.fingerprint !== this.manifest.domain.fingerprint || descriptor.release.id !== this.explorerMetadata.domain.publication) throw new Error("Publication changed; retain the request and reload.");
           }
           let query;
-          let fingerprint = this.manifest.domain.fingerprint;
+          let fingerprint = this.pinsDomain("flat") ? this.manifest.domain.fingerprint : undefined;
           let requestId;
           if (request.version === 2 && request.domainId) request = global.SelectoExplorerClient.flatSnapshotToRequest(request);
           if (request.schema === "selecto.spa.query-request/v1") {
@@ -5353,14 +5415,17 @@
           } else if (request.format === "selecto.remote-query") {
             global.SelectoCanonicalClient.keys(request, ["format", "format_version", "domain", "query", "request_id"], "request");
             if (request.format_version !== 1) throw new Error("Unsupported remote query version.");
-            global.SelectoCanonicalClient.keys(request.domain, ["fingerprint"], "request.domain");
-            fingerprint = request.domain.fingerprint;
+            if (Object.hasOwn(request, "domain")) {
+              global.SelectoCanonicalClient.keys(request.domain, ["fingerprint"], "request.domain");
+              fingerprint = request.domain.fingerprint;
+              if (typeof fingerprint !== "string" || !fingerprint) throw new Error("A supplied domain pin needs a fingerprint.");
+            } else fingerprint = undefined;
             query = request.query;
             requestId = request.request_id;
           } else {
             query = request;
           }
-          payload = await this.canonicalClient.query(this.manifest, query, {fingerprint, requestId, signal: controller.signal});
+          payload = await this.canonicalClient.query(this.manifest, query, {fingerprint, pinDomain: fingerprint !== undefined, requestId, signal: controller.signal});
           response = {status: 200, statusText: "OK", ok: true};
         } else {
         const requestPath = format.id === "json"
@@ -5821,7 +5886,7 @@
         try { this.aggregateImportedOptions(query, state); } catch (error) { invalid("page", error.message); }
       }
       return {errors, cardErrors, request: {format: "selecto.explorer-query", format_version: 1,
-        domain: {fingerprint: features.domain.fingerprint}, features: {revision: features.revision}, ...(state.requestId !== undefined ? {request_id:state.requestId} : {}), query}};
+        ...(this.pinsDomain("aggregate") ? {domain: {fingerprint: features.domain.fingerprint}, features: {revision: features.revision}} : {}), ...(state.requestId !== undefined ? {request_id:state.requestId} : {}), query}};
     }
 
     syncAggregateRequest() {
@@ -6162,6 +6227,12 @@
         try { payload = text ? JSON.parse(text) : null; }
         catch (_error) { payload = {ok: false, error: {code: "invalid_response", message: text || "Empty response", details: {}}}; }
         if (sequence !== this.querySequence) return;
+        if (payload?.ok === true) {
+          const fingerprint = payload.data?.domain?.fingerprint;
+          if (typeof fingerprint !== "string" || !fingerprint) throw new Error("Response needs a domain fingerprint.");
+          if (request.domain && fingerprint !== request.domain.fingerprint) throw new Error("Domain fingerprint drift");
+          if (request.features && payload.data?.features?.revision !== request.features.revision) throw new Error("Explorer features revision drift");
+        }
         this.state.response = payload; this.nestedResult = null;
         this.renderResponse(payload);
         this.setStatus(`${response.status} ${response.statusText} · ${Math.round(performance.now() - started)} ms`, response.ok ? "success" : "error");
@@ -6270,6 +6341,7 @@
 
     clearQueryResult() {
       setNestedRefusal(this.root.querySelector("[data-sac-response-status]"), null);
+      const fingerprint = this.root.querySelector("[data-sac-response-fingerprint]"); if (fingerprint) {fingerprint.hidden = true; fingerprint.textContent = "";}
       const clock = this.root.querySelector("[data-sac-response-as-of]"); if (clock) {clock.hidden = true; clock.textContent = "";}
       for (const selector of ["[data-sac-result-head]", "[data-sac-result-body]"]) this.root.querySelector(selector)?.replaceChildren();
       const json = this.root.querySelector("[data-sac-response-json]"); if (json) json.textContent = "";
@@ -6314,6 +6386,12 @@
     }
 
     renderResponse(payload) {
+      const fingerprint = this.root.querySelector("[data-sac-response-fingerprint]");
+      if (fingerprint) {
+        const value = payload?.ok === true && payload.data?.domain?.fingerprint;
+        fingerprint.hidden = typeof value !== "string" || !value;
+        fingerprint.textContent = fingerprint.hidden ? "" : `Domain fingerprint: ${value}`;
+      }
       const clock = this.root.querySelector("[data-sac-response-as-of]");
       if (clock) {
         const value = payload?.ok === true && payload?.meta?.as_of;

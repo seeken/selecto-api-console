@@ -59,7 +59,7 @@ const aggregateRoutes = [
   {operation_id: "getExplorerFeatures", method: "GET", path: "/api/orders/group-features"},
   {operation_id: "queryExplorer", method: "POST", path: "/api/orders/group-query"},
 ];
-const result = () => ({ok: true, data: {columns: [{id: "status", role: "group"}, {id: "count", role: "aggregate"}],
+const result = () => ({ok: true, data: {domain: {fingerprint: "fp"}, features: {revision: "rev"}, columns: [{id: "status", role: "group"}, {id: "count", role: "aggregate"}],
   rows: [["open", 2], [null, 2]], row_meta: [{kind: "detail", level: 1}, {kind: "total", level: 0}]}});
 
 async function withDOM(fn) {
@@ -322,7 +322,7 @@ test('Copy link includes the profile, reopens complete Aggregates state, and leg
 
 test('aggregate paging uses Explorer page metadata, preserves POST with a retained GET draft, and respects manual mode',()=>withDOM(async()=>{
   const x=await instance();x.console.state.resourceId='7';x.console.setQueryMethod('get');x.console.renderAll();await x.choose('aggregate');group(x,'status');edit(x,'limit','5');
-  const posts=[];global.fetch=async(path,init)=>{const body=JSON.parse(init.body);posts.push({path,body});return Response.json({ok:true,data:{format:'selecto.explorer-query-result',format_version:1,columns:[{id:'count',role:'aggregate'}],rows:[[2]],row_count:1,page:{has_more:true,limit:body.query.limit,offset:body.query.offset||0}}});};
+  const posts=[];global.fetch=async(path,init)=>{const body=JSON.parse(init.body);posts.push({path,body});return Response.json({ok:true,data:{format:'selecto.explorer-query-result',format_version:1,domain:{fingerprint:'fp'},features:{revision:'rev'},columns:[{id:'count',role:'aggregate'}],rows:[[2]],row_count:1,page:{has_more:true,limit:body.query.limit,offset:body.query.offset||0}}});};
   await x.console.run();assert.equal(x.node('legacy-page-info').hidden,false);assert.equal(x.node('next-page').hidden,false);
   await x.console.goToPage('next');assert.equal(posts.at(-1).body.query.offset,5);assert.equal(posts.at(-1).path,'/api/orders/group-query');assert.equal(x.console.aggregateState.offset,5);
   await x.console.goToPage('previous');assert.equal(posts.at(-1).body.query.offset,undefined);assert.equal(x.console.aggregateState.offset,0);

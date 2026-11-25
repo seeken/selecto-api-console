@@ -203,7 +203,7 @@ The workspace also builds `@selecto/canonical-client` and
 declarations. Their built sources are included in the existing standalone
 Console script so vendoring hosts do not need an additional script tag.
 
-When a host advertises `remote_query.v1`, the Console sends fingerprint-bound
+When a host advertises `remote_query.v1`, the Console sends canonical
 query envelopes through the shared canonical client and validates exact result
 codecs. Published `getExplorerMetadata` and `getDomainCatalog` routes bind
 Explorer handoff to the same authenticated publication. An Explorer fragment
@@ -253,8 +253,8 @@ supports.
 - **Subtotal rows** is one of none, rollup, cube, or grouping sets. Grouping
   sets are chosen from every combination of the groups, including the grand
   total, and every group must appear in at least one.
-- The request editor holds the `selecto.explorer-query` envelope, bound to
-  the domain fingerprint and the features revision. It can be edited by hand
+- The request editor holds the `selecto.explorer-query` envelope, with
+  optional domain fingerprint and features revision pins. It can be edited by hand
   and is sent as written; changing the builder rewrites it.
 - In the result table subtotal rows are bold and the total row is ruled off.
   A group that a row leaves out reads **All** (or **Total**), so it is not
@@ -305,3 +305,26 @@ The plaintext list stays outside the repository. To regenerate the hashes:
 ```sh
 SELECTO_DENYLIST_FILE=/path/to/external/names.txt node scripts/denylist-hashes.mjs > test/data/denylist.sha256
 ```
+
+### Optional domain pins
+
+Detail, Aggregates, and complete nested Detail omit `domain` and `features`
+by default when the host advertises Boolean `optional_domain_pin: true`.
+**Pin to this domain version** (`data-sac-pin-domain`) sits below Query profile
+and Request method in Request and is off by default. Pinning protects against
+a field keeping its id but changing meaning; use it for integrations that must
+never run against a changed contract. Enabling it includes the current domain
+fingerprint and, for Aggregates, the Explorer features revision. Flat and nested
+Detail retain their existing domain-only envelope pins.
+
+Capability detection is profile-specific: flat Detail uses the canonical manifest's
+`query_capabilities.optional_domain_pin`, Aggregates uses Explorer features'
+`supports.optional_domain_pin`, and nested Detail uses nested features'
+`supports.optional_domain_pin`. A missing or false capability keeps pins mandatory
+and disables the checkbox with an explanation. Recursive root v2 keeps its existing
+required pin. Nested publication/context checks remain mandatory in either mode.
+
+Drafts and `#request=` links retain the choice. Imported pinned envelopes and
+Explorer handoffs keep pinning enabled. The JSON editor, cURL, and copy-as-code
+use the selected envelope. Responses display their domain fingerprint as
+information; fingerprint drift is an error only when the request supplied a pin.

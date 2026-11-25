@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Default Detail, Aggregates, and nested Detail to unpinned envelopes on capable hosts. Add the Request pin checkbox, preserve imported pins and request links, display response fingerprints, and retain mandatory pins for older hosts.
+
 - Show Query profile before Request method in the Request section, since choosing Aggregates or another POST-only profile hides the method choice.
 
 - Section aggregate groups, measures, filters and sort choices by relationship using Detail's field helpers, including root-relative Rows of targets; style the Rows of label consistently.

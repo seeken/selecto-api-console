@@ -49,7 +49,7 @@ export function parseNestedDetailState(rawJSON:string,context?:NestedDetailValid
 export function encodeNestedDetailState(state:NestedDetailState):string;
 export function decodeNestedDetailState(rawOrEncoded:string,context?:NestedDetailValidationContext):NestedDetailState;
 export function nestedDetailConsoleHref(path:string,state:NestedDetailState):string;
-export function toNestedDetailExplorerResult(envelope:NestedDetailResult,intent:NestedDetailIntent,context:NestedDetailValidationContext):NestedExplorerResult;
+export function toNestedDetailExplorerResult(envelope:NestedDetailResult,intent:NestedDetailIntent,context:NestedDetailValidationContext,options?:{pinDomain?:boolean}):NestedExplorerResult;
 
 export interface UnsupportedExplorerFeature {id: string; label: string; reason: string;}
 export function unsupportedExplorerFeatures(metadata: ExplorerMetadata): UnsupportedExplorerFeature[];

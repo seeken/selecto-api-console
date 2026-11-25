@@ -251,7 +251,8 @@ export function assertQueryResult(value, fingerprint, query = {}) {
   if (value.ok !== true) throw new CanonicalWireError("response.ok", "expected true");
   const data = record(value.data, "response.data");
   format(data, "selecto.remote-query-result", "response.data");
-  if (record(data.domain, "response.data.domain").fingerprint !== fingerprint) throw new CanonicalWireError("response.data.domain", "Domain fingerprint drift");
+  nonEmptyString(record(data.domain, "response.data.domain").fingerprint, "response.data.domain.fingerprint");
+  if (fingerprint !== undefined && data.domain.fingerprint !== fingerprint) throw new CanonicalWireError("response.data.domain", "Domain fingerprint drift");
   const columns = array(data.columns, "response.data.columns");
   const ids = new Set();
   columns.forEach((column, i) => {
@@ -309,7 +310,7 @@ export function assertExactResultNumbers(value, numberTokens) {
 }
 
 export function buildRemoteRequest(fingerprint, query, requestId) {
-  nonEmptyString(fingerprint, "domain.fingerprint");
+  if (fingerprint !== undefined) nonEmptyString(fingerprint, "domain.fingerprint");
   keys(query, ["select", "projection", "view", "filters", "group_by", "segments", "segment_choices", "parameters", "order_by", "ordering", "limit", "offset", "timezone", "row_format", "as_of"], "query");
   if (query.segment_choices !== undefined) {
     record(query.segment_choices, "query.segment_choices");
@@ -329,7 +330,7 @@ export function buildRemoteRequest(fingerprint, query, requestId) {
   if (query.as_of !== undefined) assertAsOf(query.as_of);
   validatePeriodOnFilters(query.filters);
   if (!jsonScalar(query)) throw new CanonicalWireError("query", "must contain finite JSON values");
-  const result = {format: "selecto.remote-query", format_version: 1, domain: {fingerprint}, query};
+  const result = {format: "selecto.remote-query", format_version: 1, ...(fingerprint !== undefined ? {domain: {fingerprint}} : {}), query};
   if (requestId !== undefined) { nonEmptyString(requestId, "request_id"); if (requestId.length > 128) throw new CanonicalWireError("request_id", "too long"); result.request_id = requestId; }
   return result;
 }
@@ -363,9 +364,9 @@ export function createCanonicalClient(options = {}) {
     async metadata(path, signal) { return (await request(path, {signal})).payload; },
     async query(manifest, query, requestOptions = {}) {
       assertManifest(manifest);
-      const envelope = buildRemoteRequest(requestOptions.fingerprint ?? manifest.domain.fingerprint, query, requestOptions.requestId);
+      const envelope = buildRemoteRequest(requestOptions.pinDomain === false && manifest.query_capabilities?.optional_domain_pin === true ? undefined : requestOptions.fingerprint ?? manifest.domain.fingerprint, query, requestOptions.requestId);
       const result = await request(routePath(manifest, "queryDomain", "POST"), {method: "POST", body: JSON.stringify(envelope), signal: requestOptions.signal}, {exact: true});
-      assertQueryResult(result.payload, envelope.domain.fingerprint, query);
+      assertQueryResult(result.payload, envelope.domain?.fingerprint, query);
       assertExactResultNumbers(result.payload, result.numberTokens);
       return result.payload;
     },
@@ -387,7 +388,7 @@ export function createCanonicalClient(options = {}) {
       const parsed = parseNestedDetailRequestText(text, requestOptions);
       const context = nestedDetailContext(requestOptions.features);
       const result = await request(routePath(manifest, "queryDomain", "POST"), {method:"POST",body:parsed.raw,signal:requestOptions.signal,headers:{"Selecto-Nested-Detail-Context":encodeNestedDetailContext(context)}}, {context});
-      assertNestedDetailResult(result.payload, {features:requestOptions.features,context,query:parsed.request.query,numberTokens:result.numberTokens});
+      assertNestedDetailResult(result.payload, {features:requestOptions.features,context,query:parsed.request.query,numberTokens:result.numberTokens,pinDomain:Object.hasOwn(parsed.request,"domain")});
       if (result.payload.meta.request_id !== parsed.request.request_id) throw new CanonicalWireError("nested.meta.request_id", "request ID echo mismatch");
       return result.payload;
     },
@@ -403,7 +404,7 @@ export function createCanonicalClient(options = {}) {
       const parsed = parseCanonicalRequestText(text,{manifest,features:requestOptions.features});
       const result = await request(routePath(manifest,"queryDomain","POST"),{method:"POST",body:parsed.raw,signal:requestOptions.signal});
       if (parsed.request.format_version === 2) assertRootPredicateResult(result.payload,{fingerprint:parsed.request.domain.fingerprint,query:parsed.request.query,features:requestOptions.features});
-      else assertQueryResult(result.payload,parsed.request.domain.fingerprint,parsed.request.query);
+      else assertQueryResult(result.payload,parsed.request.domain?.fingerprint,parsed.request.query);
       return result.payload;
     },
     /** GET getExplorerFeatures; validated and bound to the manifest (and catalog entry when given). */
@@ -661,15 +662,23 @@ export function buildRootPredicateRequest(fingerprint, query, options = {}) {
 }
 export function parseCanonicalRequestText(text, context) {
   const {value,numberTokens} = parseStrictJSON(text,{tokens:true});
-  exactKeys(value,Object.hasOwn(value,"request_id") ? ["format","format_version","domain","query","request_id"] : ["format","format_version","domain","query"],"request");
+  const required = ["format", "format_version", "query"];
+  if (Object.hasOwn(value, "domain")) required.push("domain");
+  if (Object.hasOwn(value, "request_id")) required.push("request_id");
+  exactKeys(value, required, "request");
   if (value.format !== "selecto.remote-query") throw new CanonicalWireError("request.format","remote envelope required");
-  exactKeys(value.domain,["fingerprint"],"request.domain"); assertUnicode(nonEmptyString(value.domain.fingerprint,"request.domain.fingerprint"),"request.domain.fingerprint");
+  if (Object.hasOwn(value, "domain")) {
+    exactKeys(value.domain, ["fingerprint"], "request.domain");
+    assertUnicode(nonEmptyString(value.domain.fingerprint, "request.domain.fingerprint"), "request.domain.fingerprint");
+  } else if (value.format_version !== 1 || context.manifest?.query_capabilities?.optional_domain_pin !== true) {
+    throw new CanonicalWireError("request.domain", "domain pin required by this profile");
+  }
   if (value.request_id !== undefined) assertRootRequestId(value.request_id);
   if (value.format_version === 2) {
     if (numberTokens.get("/format_version") !== "2" || !context.manifest?.profiles.includes("remote_query.v2")) throw new CanonicalWireError("request.format_version","root v2 unavailable or noninteger token");
     if (!context.features) throw new CanonicalWireError("features","root features unavailable");
     assertRootPredicateQuery(value.query,context.features,{numberTokens});
-  } else if (value.format_version === 1) buildRemoteRequest(value.domain.fingerprint,value.query,value.request_id);
+  } else if (value.format_version === 1) buildRemoteRequest(value.domain?.fingerprint,value.query,value.request_id);
   else throw new CanonicalWireError("request.format_version","unsupported protocol version");
   return {request:value,raw:text};
 }
@@ -714,7 +723,9 @@ export function assertNestedDetailFeatures(value, discovered) {
   for (const key of Object.keys(value.domain)) nestedText(value.domain[key],`nested.features.domain.${key}`);
   exactKeys(value.result,["format","format_version"],"nested.features.result");format(value.result,"selecto.remote-query-result","nested.features.result");
   for (const [key,expected] of [["limits",nestedLimits],["supports",nestedSupports]]) {
-    exactKeys(value[key],Object.keys(expected),`nested.features.${key}`);
+    const optional = key === "supports" && Object.hasOwn(value.supports, "optional_domain_pin") ? ["optional_domain_pin"] : [];
+    exactKeys(value[key], [...Object.keys(expected), ...optional], `nested.features.${key}`);
+    if (optional.length) bool(value.supports.optional_domain_pin, "nested.features.supports.optional_domain_pin");
     for (const [name,wanted] of Object.entries(expected)) if (Array.isArray(wanted) ? JSON.stringify(value[key][name])!==JSON.stringify(wanted) : value[key][name]!==wanted) throw new CanonicalWireError(`nested.features.${key}.${name}`,"unsupported bound/capability");
   }
   const roots=array(value.root_fields,"nested.root_fields"), collections=array(value.collections,"nested.collections");
@@ -811,14 +822,24 @@ export function assertNestedDetailQuery(query,features,options={}) {
 function nestedRequestId(value){nestedText(value,"nested.request_id",128);if(/[\u0000-\u001f\u007f]/.test(value))throw new CanonicalWireError("nested.request_id","control unavailable");}
 export function buildNestedDetailRequest(fingerprint,query,options={}) {
   assertNestedContext(options.context,options.features);if(fingerprint!==options.context.fingerprint)throw new CanonicalWireError("nested.fingerprint","context/body mismatch");assertNestedDetailQuery(query,options.features);
-  const request={format:"selecto.remote-query",format_version:1,domain:{fingerprint},query};if(options.requestId!==undefined){nestedRequestId(options.requestId);request.request_id=options.requestId;}parseStrictJSON(JSON.stringify(request));return request;
+  const request={format:"selecto.remote-query",format_version:1,...(options.pinDomain === false && options.features.supports.optional_domain_pin === true ? {} : {domain:{fingerprint}}),query};if(options.requestId!==undefined){nestedRequestId(options.requestId);request.request_id=options.requestId;}parseStrictJSON(JSON.stringify(request));return request;
 }
 export function parseNestedDetailRequestText(text,options) {
   const {value,numberTokens}=parseStrictJSON(text,{tokens:true,maxBytes:1048576});
-  exactKeys(value,Object.hasOwn(value,"request_id")?["format","format_version","domain","query","request_id"]:["format","format_version","domain","query"],"nested.request");
+  const required = ["format", "format_version", "query"];
+  if (Object.hasOwn(value, "domain")) required.push("domain");
+  if (Object.hasOwn(value, "request_id")) required.push("request_id");
+  exactKeys(value, required, "nested.request");
   if(value.format!=="selecto.remote-query"||value.format_version!==1||numberTokens.get("/format_version")!=="1")throw new CanonicalWireError("nested.request","lexical version1 required");
-  exactKeys(value.domain,["fingerprint"],"nested.request.domain");assertNestedContext(options.context,options.features);
-  if(value.domain.fingerprint!==options.context.fingerprint)throw new CanonicalWireError("nested.request.domain","stale context/body binding");if(Object.hasOwn(value,"request_id"))nestedRequestId(value.request_id);
+  assertNestedContext(options.context, options.features);
+  if (Object.hasOwn(value, "domain")) {
+    exactKeys(value.domain, ["fingerprint"], "nested.request.domain");
+    nonEmptyString(value.domain.fingerprint, "nested.request.domain.fingerprint");
+    if (value.domain.fingerprint !== options.context.fingerprint) throw new CanonicalWireError("nested.request.domain", "stale context/body binding");
+  } else if (options.features.supports.optional_domain_pin !== true) {
+    throw new CanonicalWireError("nested.request.domain", "domain pin required by this profile");
+  }
+  if (Object.hasOwn(value, "request_id")) nestedRequestId(value.request_id);
   assertNestedDetailQuery(value.query,options.features,{numberTokens});return {request:value,raw:text,numberTokens};
 }
 function nestedEcho(meta,context,required) {
@@ -831,9 +852,9 @@ function assertNestedDetailError(value,context,status) {
   exactKeys(value,Object.hasOwn(value,"meta")?["ok","error","meta"]:["ok","error"],"nested.error");assertError(value);exactKeys(value.error,["code","message","details"],"nested.error.error");exactKeys(value.error.details,[],"nested.error.details");oneOf(value.error.code,["malformed_request","operation_unsupported","stale_domain_fingerprint","stale_nested_detail_context","invalid_query","internal_failure","authentication_required","hidden_field","unsupported_media_type","unsupported_protocol_version","missing_tenant_scope","operation_forbidden"],"nested.error.code");assertUnicode(value.error.message,"nested.error.message",512);
   const codeStatus={malformed_request:400,operation_unsupported:501,stale_domain_fingerprint:409,stale_nested_detail_context:409,invalid_query:422,internal_failure:500,authentication_required:401,hidden_field:403,unsupported_media_type:415,unsupported_protocol_version:400,missing_tenant_scope:403,operation_forbidden:403};if(status!==codeStatus[value.error.code])throw new CanonicalWireError("nested.error.status","code/status mismatch");nestedEcho(value.meta,context,false);
 }
-export function assertNestedDetailResult(value,{query,features,context,numberTokens}={}) {
+export function assertNestedDetailResult(value,{query,features,context,numberTokens,pinDomain=true}={}) {
   assertNestedDetailQuery(query,features);assertNestedContext(context,features);exactKeys(value,["ok","data","meta"],"nested.response");if(value.ok!==true)throw new CanonicalWireError("nested.response","success required");nestedEcho(value.meta,context,true);
-  const d=value.data;exactKeys(d,["format","format_version","domain","columns","rows","row_count","page","row_format","subtables"],"nested.data");format(d,"selecto.remote-query-result","nested.data");exactKeys(d.domain,["fingerprint"],"nested.data.domain");if(d.domain.fingerprint!==context.fingerprint)throw new CanonicalWireError("nested.data.domain","fingerprint drift");
+  const d=value.data;exactKeys(d,["format","format_version","domain","columns","rows","row_count","page","row_format","subtables"],"nested.data");format(d,"selecto.remote-query-result","nested.data");exactKeys(d.domain,["fingerprint"],"nested.data.domain");nonEmptyString(d.domain.fingerprint,"nested.data.domain.fingerprint");if(pinDomain && d.domain.fingerprint!==context.fingerprint)throw new CanonicalWireError("nested.data.domain","fingerprint drift");
   const lexical=(path)=>{const t=numberTokens?.get(path);if(t!==undefined&&!/^(?:0|[1-9]\d*)$/.test(t))throw new CanonicalWireError(path,"lexical integer required");};
   for(const path of ["/data/format_version","/data/row_count","/data/page/limit","/data/page/offset","/data/subtables/"+features.collections[0].result_id+"/limit"])lexical(path);
   const collection=features.collections[0],children=nestedSelection(query.select,features);const roots=new Map(features.root_fields.map(f=>[f.path,f]));
