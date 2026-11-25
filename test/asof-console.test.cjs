@@ -82,7 +82,7 @@ test('resource GET retains the POST clock privately and only sends it when the p
 });
 
 function aggregate() {
-  const x=instance();x.aggregateFeatures={domain:{fingerprint:'fp'},revision:'rev',fields:[],limits:{},supports:{aggregate:true}};
+  const x=instance();x.aggregateFeatures={domain:{fingerprint:'fp'},revision:'rev',fields:[],limits:{},supports:{aggregate:true,as_of:true}};
   x.aggregateQueryPath='/api/aggregate';x.openapi.paths[x.aggregateQueryPath]=x.openapi.paths[x.queryPath];x.aggregateState=x.newAggregateState();x.queryProfile='aggregate';return x;
 }
 test('aggregate As of follows its route schema, imports and survives another builder edit',()=>withDOM(()=>{

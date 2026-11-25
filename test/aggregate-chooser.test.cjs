@@ -54,7 +54,7 @@ const features = () => ({format:"selecto.explorer-features",format_version:1,pro
   domain:{id:"orders",fingerprint:"fp"},revision:"rev",default:{order_by:[]},
   fields:[field("status","string"),field("category","string"),field("price","decimal",{aggregates:["sum","avg","min","max"]}),
     field("weight","decimal",{groupable:false,aggregates:["sum","avg"]}),field("items","integer",{collection:true,aggregates:["sum"]})],
-  limits:{max_limit:100,max_offset:10000,max_orders:3}, supports:{aggregate:true,rollup:true,cube:true,grouping_sets:true}});
+  limits:{max_limit:100,max_offset:10000,max_orders:3}, supports:{aggregate:true,as_of:true,rollup:true,cube:true,grouping_sets:true}});
 const aggregateRoutes = [
   {operation_id: "getExplorerFeatures", method: "GET", path: "/api/orders/group-features"},
   {operation_id: "queryExplorer", method: "POST", path: "/api/orders/group-query"},
